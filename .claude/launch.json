@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "longbox",
+      "runtimeExecutable": "./longbox",
+      "runtimeArgs": [],
+      "port": 8080
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+# Binary
+longbox
+
+# Database & data
+*.db
+*.db-journal
+*.db-wal
+
+# Frontend build output
+ui/build/
+ui/node_modules/
+ui/.svelte-kit/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Go
+vendor/
+
+# Environment / secrets
+.env
+*.yaml
+!*.example.yaml
