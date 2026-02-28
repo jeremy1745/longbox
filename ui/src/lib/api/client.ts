@@ -139,6 +139,12 @@ export interface TrackFromPullListResponse {
 
 // --- Response types ---
 
+export interface FileRenameResponse extends ComicFile {}
+
+export interface SeriesFilesResponse {
+	files: ComicFile[];
+}
+
 export interface FileListResponse {
 	files: ComicFile[];
 	total: number;

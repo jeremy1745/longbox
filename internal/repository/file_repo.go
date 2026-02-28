@@ -165,6 +165,42 @@ func (r *FileRepo) ListBySeries(seriesID int64) ([]model.ComicFile, error) {
 	return files, nil
 }
 
+// Search returns comic files matching the query (case-insensitive file_name LIKE), with pagination.
+func (r *FileRepo) Search(query string, page, perPage int) ([]model.ComicFile, int, error) {
+	if page < 1 {
+		page = 1
+	}
+	if perPage < 1 {
+		perPage = 50
+	}
+	offset := (page - 1) * perPage
+	pattern := "%" + query + "%"
+
+	var total int
+	if err := r.read.QueryRow(`SELECT COUNT(*) FROM comic_files WHERE file_name LIKE ? COLLATE NOCASE`, pattern).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("counting search results: %w", err)
+	}
+
+	rows, err := r.read.Query(`SELECT id, issue_id, file_path, file_name, file_size, file_hash,
+		file_format, page_count, has_comicinfo, cover_path, parsed_series, parsed_number,
+		parsed_year, match_confidence, created_at, updated_at
+		FROM comic_files WHERE file_name LIKE ? COLLATE NOCASE ORDER BY file_name ASC LIMIT ? OFFSET ?`, pattern, perPage, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("searching files: %w", err)
+	}
+	defer rows.Close()
+
+	var files []model.ComicFile
+	for rows.Next() {
+		f, err := scanComicFileRow(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		files = append(files, *f)
+	}
+	return files, total, nil
+}
+
 // UpdateHasComicInfo updates the has_comicinfo flag after writing metadata.
 func (r *FileRepo) UpdateHasComicInfo(id int64, hasComicInfo bool) error {
 	_, err := r.write.Exec(`UPDATE comic_files SET has_comicinfo = ?, updated_at = ? WHERE id = ?`,

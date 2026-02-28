@@ -105,6 +105,10 @@ func NewRouter(
 			// Files
 			r.Get("/files", fileH.List)
 			r.Get("/files/{id}", fileH.Get)
+			r.Put("/files/{id}/rename", fileH.Rename)
+
+			// Series files
+			r.Get("/series/{id}/files", fileH.ListBySeries)
 
 			// Covers
 			r.Get("/covers/file/{id}", coverH.ServeFileCover)

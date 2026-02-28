@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/stores';
-	import { ApiClient, type Series, type Issue, type IssueListResponse, type WriteMetadataResponse } from '$lib/api/client';
+	import { ApiClient, type Series, type Issue, type IssueListResponse, type WriteMetadataResponse, type ComicFile, type SeriesFilesResponse, type FileRenameResponse } from '$lib/api/client';
 	import ComicVineSearch from '$lib/components/ComicVineSearch.svelte';
 
 	let series = $state<Series | null>(null);
@@ -13,6 +13,13 @@
 	let writingMetadata = $state(false);
 	let writeResult = $state<WriteMetadataResponse | null>(null);
 
+	// File rename state
+	let fileMap = $state<Map<number, ComicFile>>(new Map());
+	let editingFileId = $state<number | null>(null);
+	let editFileName = $state('');
+	let renamingFileId = $state<number | null>(null);
+	let renameError = $state<string | null>(null);
+
 	let seriesId = $derived($page.params.id);
 
 	// Computed stats
@@ -24,12 +31,21 @@
 		loading = true;
 		error = null;
 		try {
-			const [seriesData, issuesData] = await Promise.all([
+			const [seriesData, issuesData, filesData] = await Promise.all([
 				ApiClient.get<Series>(`/series/${seriesId}`),
-				ApiClient.get<IssueListResponse>(`/series/${seriesId}/issues`)
+				ApiClient.get<IssueListResponse>(`/series/${seriesId}/issues`),
+				ApiClient.get<SeriesFilesResponse>(`/series/${seriesId}/files`)
 			]);
 			series = seriesData;
 			issues = issuesData.issues || [];
+
+			const map = new Map<number, ComicFile>();
+			for (const f of filesData.files || []) {
+				if (f.issue_id) {
+					map.set(f.issue_id, f);
+				}
+			}
+			fileMap = map;
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load series';
 		} finally {
@@ -92,6 +108,61 @@
 			error = e instanceof Error ? e.message : 'Failed to write metadata';
 		} finally {
 			writingMetadata = false;
+		}
+	}
+
+	function startRename(file: ComicFile) {
+		const ext = file.file_name.substring(file.file_name.lastIndexOf('.'));
+		editFileName = file.file_name.substring(0, file.file_name.lastIndexOf('.'));
+		editingFileId = file.id;
+		renameError = null;
+	}
+
+	function cancelRename() {
+		editingFileId = null;
+		editFileName = '';
+		renameError = null;
+	}
+
+	async function saveRename(file: ComicFile) {
+		const ext = file.file_name.substring(file.file_name.lastIndexOf('.'));
+		const newName = editFileName.trim() + ext;
+
+		if (!editFileName.trim()) {
+			renameError = 'Name cannot be empty';
+			return;
+		}
+
+		if (newName === file.file_name) {
+			cancelRename();
+			return;
+		}
+
+		renamingFileId = file.id;
+		renameError = null;
+		try {
+			const updated = await ApiClient.put<FileRenameResponse>(`/files/${file.id}/rename`, {
+				file_name: newName
+			});
+			if (file.issue_id) {
+				fileMap.set(file.issue_id, updated);
+				fileMap = new Map(fileMap);
+			}
+			editingFileId = null;
+			editFileName = '';
+		} catch (e) {
+			renameError = e instanceof Error ? e.message : 'Rename failed';
+		} finally {
+			renamingFileId = null;
+		}
+	}
+
+	function handleRenameKeydown(e: KeyboardEvent, file: ComicFile) {
+		if (e.key === 'Enter') {
+			e.preventDefault();
+			saveRename(file);
+		} else if (e.key === 'Escape') {
+			cancelRename();
 		}
 	}
 
@@ -249,6 +320,7 @@
 			{#if issues.length > 0}
 				<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
 					{#each issues as issue (issue.id)}
+						{@const file = issue.file_id ? fileMap.get(issue.id) : undefined}
 						<div class="relative group rounded-lg overflow-hidden bg-gray-800 shadow-lg
 							{issue.has_file ? '' : 'opacity-60'}">
 							<div class="aspect-[2/3] bg-gray-700 relative">
@@ -307,6 +379,60 @@
 								{/if}
 								{#if issue.cover_date}
 									<p class="text-xs text-gray-500 mt-1">{issue.cover_date}</p>
+								{/if}
+								<!-- Filename + inline rename -->
+								{#if file}
+									<div class="mt-1.5">
+										{#if editingFileId === file.id}
+											<div class="flex flex-col gap-1">
+												<div class="flex items-center gap-0.5">
+													<input
+														type="text"
+														bind:value={editFileName}
+														onkeydown={(e) => handleRenameKeydown(e, file)}
+														class="flex-1 min-w-0 text-xs px-1.5 py-0.5 bg-gray-700 border border-gray-600 rounded text-gray-200 focus:outline-none focus:border-amber-500"
+														disabled={renamingFileId === file.id}
+													/>
+													<span class="text-xs text-gray-500 flex-shrink-0">{file.file_name.substring(file.file_name.lastIndexOf('.'))}</span>
+												</div>
+												{#if renameError}
+													<p class="text-xs text-red-400">{renameError}</p>
+												{/if}
+												<div class="flex gap-1">
+													<button
+														onclick={() => saveRename(file)}
+														disabled={renamingFileId === file.id}
+														class="text-xs px-1.5 py-0.5 bg-amber-500 hover:bg-amber-600 text-gray-900 rounded disabled:opacity-50"
+													>
+														{renamingFileId === file.id ? '...' : 'Save'}
+													</button>
+													<button
+														onclick={cancelRename}
+														disabled={renamingFileId === file.id}
+														class="text-xs px-1.5 py-0.5 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded disabled:opacity-50"
+													>
+														Cancel
+													</button>
+												</div>
+											</div>
+										{:else}
+											<div class="flex items-center gap-1 group/file">
+												<p class="text-xs text-gray-500 truncate flex-1" title={file.file_name}>
+													{file.file_name}
+												</p>
+												<button
+													onclick={() => startRename(file)}
+													class="flex-shrink-0 opacity-0 group-hover/file:opacity-100 transition-opacity text-gray-500 hover:text-amber-400"
+													title="Rename file"
+												>
+													<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+															d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+													</svg>
+												</button>
+											</div>
+										{/if}
+									</div>
 								{/if}
 							</div>
 						</div>

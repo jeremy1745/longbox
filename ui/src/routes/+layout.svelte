@@ -10,6 +10,7 @@
 	const navLinks = [
 		{ href: '/', label: 'Dashboard' },
 		{ href: '/library', label: 'Library' },
+		{ href: '/files', label: 'Files' },
 		{ href: '/wanted', label: 'Wanted' },
 		{ href: '/downloads', label: 'Downloads' },
 		{ href: '/calendar', label: 'Pull List' },
