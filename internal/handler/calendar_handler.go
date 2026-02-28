@@ -161,14 +161,16 @@ func (h *CalendarHandler) TrackSeries(w http.ResponseWriter, r *http.Request) {
 }
 
 // WantIssue adds an issue to the want list.
-// Supports two paths:
-//   - By ComicVine ID: { "comicvine_id": 67890, "series_cv_id": 12345 }
+// Supports three paths:
 //   - By local issue ID: { "local_issue_id": 42 }
+//   - By ComicVine issue ID: { "comicvine_id": 67890, "series_cv_id": 12345 }
+//   - By series CV ID + issue number: { "series_cv_id": 12345, "issue_number": "5" }
 func (h *CalendarHandler) WantIssue(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ComicVineID  int   `json:"comicvine_id"`
-		SeriesCVID   int   `json:"series_cv_id"`
-		LocalIssueID int64 `json:"local_issue_id"`
+		ComicVineID  int    `json:"comicvine_id"`
+		SeriesCVID   int    `json:"series_cv_id"`
+		LocalIssueID int64  `json:"local_issue_id"`
+		IssueNumber  string `json:"issue_number"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
@@ -187,19 +189,29 @@ func (h *CalendarHandler) WantIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Path 2: Want by ComicVine ID (may need to create series/issue first)
-	if body.ComicVineID == 0 {
-		writeError(w, http.StatusBadRequest, "MISSING_ID", "comicvine_id or local_issue_id is required")
+	// Path 2: Want by ComicVine issue ID (may need to create series/issue first)
+	if body.ComicVineID > 0 {
+		item, err := h.metaSvc.WantIssueFromComicVine(body.ComicVineID, body.SeriesCVID, h.wantListRepo)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "WANT_FAILED", err.Error())
+			return
+		}
+		triggerAutoSearch(h.searchSvc, h.settingRepo, item.IssueID, fmt.Sprintf("calendar-want cv-issue %d", body.ComicVineID))
+		writeJSON(w, http.StatusCreated, item)
 		return
 	}
 
-	item, err := h.metaSvc.WantIssueFromComicVine(body.ComicVineID, body.SeriesCVID, h.wantListRepo)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "WANT_FAILED", err.Error())
+	// Path 3: Want by series CV ID + issue number (for future releases without issue-level CV ID)
+	if body.SeriesCVID > 0 && body.IssueNumber != "" {
+		item, err := h.metaSvc.WantIssueBySeriesAndNumber(body.SeriesCVID, body.IssueNumber, h.wantListRepo)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "WANT_FAILED", err.Error())
+			return
+		}
+		triggerAutoSearch(h.searchSvc, h.settingRepo, item.IssueID, fmt.Sprintf("calendar-want series %d #%s", body.SeriesCVID, body.IssueNumber))
+		writeJSON(w, http.StatusCreated, item)
 		return
 	}
 
-	triggerAutoSearch(h.searchSvc, h.settingRepo, item.IssueID, fmt.Sprintf("calendar-want cv-issue %d", body.ComicVineID))
-
-	writeJSON(w, http.StatusCreated, item)
+	writeError(w, http.StatusBadRequest, "MISSING_ID", "comicvine_id, local_issue_id, or series_cv_id + issue_number is required")
 }

@@ -289,7 +289,7 @@
 	}
 
 	function canWant(issue: PullListIssue): boolean {
-		return !issue.has_file && !issue.wanted && (!!issue.comicvine_id || !!issue.local_issue_id);
+		return !issue.has_file && !issue.wanted && (!!issue.comicvine_id || !!issue.local_issue_id || !!issue.series_cv_id);
 	}
 
 	async function wantIssue(issue: PullListIssue) {
@@ -298,10 +298,12 @@
 
 		wantingInProgress = new Set([...wantingInProgress, key]);
 		try {
-			// Use local_issue_id if available (direct DB add), otherwise ComicVine path
+			// Use local_issue_id if available (direct DB add), then ComicVine issue ID, then series + issue number
 			const body = issue.local_issue_id
 				? { local_issue_id: issue.local_issue_id }
-				: { comicvine_id: issue.comicvine_id, series_cv_id: issue.series_cv_id };
+				: issue.comicvine_id
+					? { comicvine_id: issue.comicvine_id, series_cv_id: issue.series_cv_id }
+					: { series_cv_id: issue.series_cv_id, issue_number: issue.issue_number };
 
 			await ApiClient.post<WantListItem>('/calendar/want', body);
 

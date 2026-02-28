@@ -1071,6 +1071,40 @@ func (s *MetadataService) WantIssueFromComicVine(cvIssueID int, seriesCVID int, 
 	return item, nil
 }
 
+// WantIssueBySeriesAndNumber tracks a series by its ComicVine volume ID, finds the
+// issue by number, and adds it to the want list. Used for future releases that don't
+// have an issue-level ComicVine ID yet.
+func (s *MetadataService) WantIssueBySeriesAndNumber(seriesCVID int, issueNumber string, wantListRepo *repository.WantListRepo) (*model.WantListItem, error) {
+	if wantListRepo == nil {
+		return nil, fmt.Errorf("want list repo is required")
+	}
+	if seriesCVID == 0 {
+		return nil, fmt.Errorf("series ComicVine ID is required")
+	}
+
+	// Ensure the series (and all its issues) exist locally
+	series, _, err := s.TrackFromComicVine(seriesCVID, wantListRepo)
+	if err != nil {
+		return nil, fmt.Errorf("creating series from ComicVine: %w", err)
+	}
+
+	// Find the issue by series + number
+	issue, err := s.issueRepo.FindBySeriesAndNumber(series.ID, issueNumber)
+	if err != nil {
+		return nil, fmt.Errorf("finding issue by number: %w", err)
+	}
+	if issue == nil {
+		return nil, fmt.Errorf("issue #%s not found in series %q (CV %d)", issueNumber, series.Title, seriesCVID)
+	}
+
+	// Add to want list (may already be there from TrackFromComicVine's AddMissingForSeries)
+	item, err := wantListRepo.Create(issue.ID, 0, "")
+	if err != nil {
+		return nil, fmt.Errorf("adding to want list: %w", err)
+	}
+	return item, nil
+}
+
 // SetLibraryDir saves the library directory to the settings database.
 func (s *MetadataService) SetLibraryDir(dir string) error {
 	return s.settingRepo.Set("library_dir", dir)
