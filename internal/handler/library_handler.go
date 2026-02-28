@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 
 	"github.com/jeremy/longbox/internal/model"
@@ -75,4 +76,10 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 			"message": message,
 		},
 	})
+}
+
+// writeInternalError logs the detailed error but returns a generic message to the client.
+func writeInternalError(w http.ResponseWriter, code string, err error) {
+	slog.Error("internal error", "code", code, "error", err)
+	writeError(w, http.StatusInternalServerError, code, "an internal error occurred")
 }

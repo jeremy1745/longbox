@@ -30,6 +30,8 @@ func (h *SeriesHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	if perPage < 1 {
 		perPage = 50
+	} else if perPage > 500 {
+		perPage = 500
 	}
 
 	series, total, err := h.seriesRepo.List(page, perPage, sortBy, order, trackedOnly)

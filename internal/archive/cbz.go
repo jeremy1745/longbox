@@ -21,7 +21,7 @@ func OpenCBZ(path string) (Archive, error) {
 func (a *cbzArchive) ListEntries() ([]Entry, error) {
 	entries := make([]Entry, 0, len(a.reader.File))
 	for _, f := range a.reader.File {
-		if f.FileInfo().IsDir() {
+		if f.FileInfo().IsDir() || !isSafeEntryName(f.Name) {
 			continue
 		}
 		entries = append(entries, Entry{
@@ -33,6 +33,9 @@ func (a *cbzArchive) ListEntries() ([]Entry, error) {
 }
 
 func (a *cbzArchive) ExtractFile(name string) (io.ReadCloser, error) {
+	if !isSafeEntryName(name) {
+		return nil, fmt.Errorf("unsafe entry name: %s", name)
+	}
 	for _, f := range a.reader.File {
 		if f.Name == name {
 			return f.Open()

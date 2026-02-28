@@ -119,6 +119,8 @@ func (h *SearchHandler) DownloadHistory(w http.ResponseWriter, r *http.Request) 
 	}
 	if perPage < 1 {
 		perPage = 50
+	} else if perPage > 500 {
+		perPage = 500
 	}
 
 	items, total, err := h.dlHistoryRepo.List(page, perPage)

@@ -49,13 +49,20 @@ func NewWatcher(dir string, callback WatchCallback) (*Watcher, error) {
 // Start begins watching for file changes.
 func (w *Watcher) Start() error {
 	// Walk directory tree and add all subdirectories
-	err := filepath.Walk(w.dir, func(path string, info os.FileInfo, err error) error {
+	err := filepath.WalkDir(w.dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil // skip errors
 		}
-		if info.IsDir() {
+		// Skip symlinks to prevent directory traversal
+		if d.Type()&os.ModeSymlink != 0 {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
 			// Skip hidden directories
-			if strings.HasPrefix(info.Name(), ".") && path != w.dir {
+			if strings.HasPrefix(d.Name(), ".") && path != w.dir {
 				return filepath.SkipDir
 			}
 			if err := w.watcher.Add(path); err != nil {

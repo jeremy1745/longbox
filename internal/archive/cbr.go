@@ -36,7 +36,7 @@ func (a *cbrArchive) ListEntries() ([]Entry, error) {
 		if err != nil {
 			return nil, fmt.Errorf("reading cbr entry: %w", err)
 		}
-		if header.IsDir {
+		if header.IsDir || !isSafeEntryName(header.Name) {
 			continue
 		}
 		entries = append(entries, Entry{
@@ -48,6 +48,10 @@ func (a *cbrArchive) ListEntries() ([]Entry, error) {
 }
 
 func (a *cbrArchive) ExtractFile(name string) (io.ReadCloser, error) {
+	if !isSafeEntryName(name) {
+		return nil, fmt.Errorf("unsafe entry name: %s", name)
+	}
+
 	r, err := rardecode.OpenReader(a.path)
 	if err != nil {
 		return nil, fmt.Errorf("reading cbr: %w", err)
@@ -65,7 +69,7 @@ func (a *cbrArchive) ExtractFile(name string) (io.ReadCloser, error) {
 		}
 		if header.Name == name {
 			// Read the entire file into memory since RAR requires sequential reading
-			data, err := io.ReadAll(r)
+			data, err := io.ReadAll(io.LimitReader(r, maxExtractSize))
 			r.Close()
 			if err != nil {
 				return nil, fmt.Errorf("extracting cbr file: %w", err)

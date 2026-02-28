@@ -99,10 +99,10 @@ func (c *Client) Search(query string, categories []string) ([]SearchResult, erro
 			}
 		}
 
-		// Use link as NZB URL; if empty, construct from GUID
+		// Use link as NZB URL; if empty, construct from GUID.
+		// Don't include the API key — it gets reattached at grab time.
 		if result.NZBURL == "" && result.GUID != "" {
 			result.NZBURL = fmt.Sprintf("%s/api?t=get&id=%s", c.baseURL, result.GUID)
-			result.NZBURL += "&apikey=" + c.apiKey
 		}
 
 		results = append(results, result)

@@ -35,6 +35,11 @@ func Scan(dir string) ([]Result, error) {
 			return nil
 		}
 
+		// Skip symlinks to prevent directory traversal
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+
 		if !archive.IsComicFile(path) {
 			return nil
 		}

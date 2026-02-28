@@ -8,6 +8,18 @@ import (
 	"strings"
 )
 
+// maxExtractSize is the maximum decompressed size for a single file extraction (100 MB).
+const maxExtractSize = 100 << 20
+
+// isSafeEntryName returns true if the archive entry name doesn't contain path traversal.
+func isSafeEntryName(name string) bool {
+	if name == "" {
+		return false
+	}
+	cleaned := filepath.ToSlash(filepath.Clean(name))
+	return !strings.HasPrefix(cleaned, "..") && !filepath.IsAbs(cleaned)
+}
+
 // Entry represents a file inside a comic archive.
 type Entry struct {
 	Name string

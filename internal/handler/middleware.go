@@ -37,6 +37,10 @@ func SecurityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'")
+		if r.TLS != nil {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -66,18 +70,20 @@ func Recovery(next http.Handler) http.Handler {
 
 // RateLimiter provides per-IP rate limiting using a token bucket approach.
 type RateLimiter struct {
-	mu       sync.Mutex
-	attempts map[string][]time.Time
-	limit    int
-	window   time.Duration
+	mu        sync.Mutex
+	attempts  map[string][]time.Time
+	limit     int
+	window    time.Duration
+	lastClean time.Time
 }
 
 // NewRateLimiter creates a rate limiter that allows `limit` requests per `window` per IP.
 func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
 	return &RateLimiter{
-		attempts: make(map[string][]time.Time),
-		limit:    limit,
-		window:   window,
+		attempts:  make(map[string][]time.Time),
+		limit:     limit,
+		window:    window,
+		lastClean: time.Now(),
 	}
 }
 
@@ -93,7 +99,17 @@ func (rl *RateLimiter) RateLimit(next http.HandlerFunc) http.HandlerFunc {
 		now := time.Now()
 		cutoff := now.Add(-rl.window)
 
-		// Prune old attempts
+		// Periodically evict stale IPs to bound memory
+		if now.Sub(rl.lastClean) > 5*time.Minute {
+			for k, times := range rl.attempts {
+				if len(times) == 0 || times[len(times)-1].Before(cutoff) {
+					delete(rl.attempts, k)
+				}
+			}
+			rl.lastClean = now
+		}
+
+		// Prune old attempts for this IP
 		recent := rl.attempts[ip][:0]
 		for _, t := range rl.attempts[ip] {
 			if t.After(cutoff) {

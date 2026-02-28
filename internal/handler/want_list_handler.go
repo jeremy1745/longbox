@@ -36,6 +36,8 @@ func (h *WantListHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	if perPage < 1 {
 		perPage = 100
+	} else if perPage > 500 {
+		perPage = 500
 	}
 
 	items, total, err := h.wantListRepo.List(page, perPage, sortBy, order)

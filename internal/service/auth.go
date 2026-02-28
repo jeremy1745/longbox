@@ -60,11 +60,15 @@ func (s *AuthService) Login(username, password string) (*model.User, *model.Sess
 	if err != nil {
 		return nil, nil, fmt.Errorf("looking up user: %w", err)
 	}
-	if user == nil {
-		return nil, nil, fmt.Errorf("invalid credentials")
+
+	// Always run bcrypt comparison to prevent timing-based username enumeration.
+	// If the user doesn't exist, compare against a dummy hash.
+	hash := []byte("$2a$10$000000000000000000000uDummyHashForTimingAttackPrevention.")
+	if user != nil {
+		hash = []byte(user.PasswordHash)
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
+	if err := bcrypt.CompareHashAndPassword(hash, []byte(password)); err != nil || user == nil {
 		return nil, nil, fmt.Errorf("invalid credentials")
 	}
 

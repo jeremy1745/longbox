@@ -29,6 +29,8 @@ func (h *FileHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	if perPage < 1 {
 		perPage = 50
+	} else if perPage > 500 {
+		perPage = 500
 	}
 
 	search := strings.TrimSpace(r.URL.Query().Get("search"))

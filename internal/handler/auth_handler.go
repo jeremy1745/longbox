@@ -23,7 +23,7 @@ func NewAuthHandler(authSvc *service.AuthService) *AuthHandler {
 func (h *AuthHandler) Status(w http.ResponseWriter, r *http.Request) {
 	enabled, err := h.authSvc.AuthEnabled()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "AUTH_ERROR", err.Error())
+		writeInternalError(w, "AUTH_ERROR", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -58,6 +58,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 
 	newUser, err := h.authSvc.Register(req.Username, req.Password)
 	if err != nil {
+		// Register errors are validation messages (username/password requirements), safe to return
 		writeError(w, http.StatusBadRequest, "REGISTER_FAILED", err.Error())
 		return
 	}
@@ -90,6 +91,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		Expires:  session.ExpiresAt,
 		HttpOnly: true,
+		Secure:   r.TLS != nil,
 		SameSite: http.SameSiteStrictMode,
 	})
 
@@ -111,6 +113,7 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		Expires:  time.Unix(0, 0),
 		HttpOnly: true,
+		Secure:   r.TLS != nil,
 		SameSite: http.SameSiteStrictMode,
 	})
 
@@ -133,7 +136,7 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) ListUsers(w http.ResponseWriter, r *http.Request) {
 	users, err := h.authSvc.ListUsers()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", err.Error())
+		writeInternalError(w, "LIST_FAILED", err)
 		return
 	}
 	if users == nil {
@@ -165,7 +168,7 @@ func (h *AuthHandler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.authSvc.DeleteUser(id); err != nil {
-		writeError(w, http.StatusInternalServerError, "DELETE_FAILED", err.Error())
+		writeInternalError(w, "DELETE_FAILED", err)
 		return
 	}
 

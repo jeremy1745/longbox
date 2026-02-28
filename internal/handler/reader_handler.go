@@ -148,6 +148,12 @@ func (h *ReaderHandler) UpdateProgress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate page bounds
+	if body.Page < 0 {
+		writeError(w, http.StatusBadRequest, "INVALID_PAGE", "page must be non-negative")
+		return
+	}
+
 	// Update last_read_page
 	if err := h.issueRepo.UpdateLastReadPage(issueID, body.Page); err != nil {
 		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", err.Error())

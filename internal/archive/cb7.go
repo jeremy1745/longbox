@@ -23,7 +23,7 @@ func OpenCB7(path string) (Archive, error) {
 func (a *cb7Archive) ListEntries() ([]Entry, error) {
 	entries := make([]Entry, 0, len(a.reader.File))
 	for _, f := range a.reader.File {
-		if f.FileInfo().IsDir() {
+		if f.FileInfo().IsDir() || !isSafeEntryName(f.Name) {
 			continue
 		}
 		entries = append(entries, Entry{
@@ -35,6 +35,9 @@ func (a *cb7Archive) ListEntries() ([]Entry, error) {
 }
 
 func (a *cb7Archive) ExtractFile(name string) (io.ReadCloser, error) {
+	if !isSafeEntryName(name) {
+		return nil, fmt.Errorf("unsafe entry name: %s", name)
+	}
 	for _, f := range a.reader.File {
 		if f.Name == name {
 			rc, err := f.Open()
@@ -42,7 +45,7 @@ func (a *cb7Archive) ExtractFile(name string) (io.ReadCloser, error) {
 				return nil, fmt.Errorf("opening file in cb7: %w", err)
 			}
 			// Read into memory since sevenzip readers may not support concurrent access
-			data, err := io.ReadAll(rc)
+			data, err := io.ReadAll(io.LimitReader(rc, maxExtractSize))
 			rc.Close()
 			if err != nil {
 				return nil, fmt.Errorf("reading file from cb7: %w", err)
