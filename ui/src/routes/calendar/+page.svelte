@@ -12,7 +12,7 @@
 
 	// Track/Want action state
 	let trackingInProgress = $state<Set<number>>(new Set());
-	let wantingInProgress = $state<Set<number>>(new Set());
+	let wantingInProgress = $state<Set<string>>(new Set());
 
 	// View mode: 'week' = single week view, 'month' = full month view
 	let viewMode = $state<'week' | 'month'>('week');
@@ -283,9 +283,12 @@
 		}
 	}
 
-	// Unique key for want-in-progress tracking (prefer comicvine_id, fall back to local_issue_id)
-	function wantKey(issue: PullListIssue): number {
-		return issue.comicvine_id || -(issue.local_issue_id || 0);
+	// Unique key for want-in-progress tracking
+	function wantKey(issue: PullListIssue): string {
+		if (issue.comicvine_id) return `cv:${issue.comicvine_id}`;
+		if (issue.local_issue_id) return `local:${issue.local_issue_id}`;
+		if (issue.series_cv_id) return `series:${issue.series_cv_id}:${issue.issue_number}`;
+		return '';
 	}
 
 	function canWant(issue: PullListIssue): boolean {
@@ -294,7 +297,7 @@
 
 	async function wantIssue(issue: PullListIssue) {
 		const key = wantKey(issue);
-		if (key === 0 || wantingInProgress.has(key)) return;
+		if (key === '' || wantingInProgress.has(key)) return;
 
 		wantingInProgress = new Set([...wantingInProgress, key]);
 		try {
@@ -310,7 +313,8 @@
 			// Mark this issue as wanted and the series as tracked
 			releases = releases.map(r => {
 				const isSameIssue = (issue.comicvine_id && r.comicvine_id === issue.comicvine_id)
-					|| (issue.local_issue_id && r.local_issue_id === issue.local_issue_id);
+					|| (issue.local_issue_id && r.local_issue_id === issue.local_issue_id)
+					|| (issue.series_cv_id && r.series_cv_id === issue.series_cv_id && r.issue_number === issue.issue_number);
 				if (isSameIssue) {
 					return { ...r, tracked: true, wanted: true };
 				}
