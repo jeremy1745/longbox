@@ -7,19 +7,22 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/jeremy/longbox/internal/model"
+	"github.com/jeremy/longbox/internal/repository"
 	"github.com/jeremy/longbox/internal/scanner"
 	"github.com/jeremy/longbox/internal/scheduler"
 	"github.com/jeremy/longbox/internal/service"
 )
 
 type SettingsHandler struct {
-	metaSvc    *service.MetadataService
-	librarySvc *service.LibraryService
-	watcher    *scanner.Watcher
-	scheduler  *scheduler.Scheduler
+	metaSvc     *service.MetadataService
+	librarySvc  *service.LibraryService
+	watcher     *scanner.Watcher
+	scheduler   *scheduler.Scheduler
+	settingRepo *repository.SettingRepo
 }
 
 func NewSettingsHandler(
@@ -27,12 +30,14 @@ func NewSettingsHandler(
 	librarySvc *service.LibraryService,
 	watcher *scanner.Watcher,
 	sched *scheduler.Scheduler,
+	settingRepo *repository.SettingRepo,
 ) *SettingsHandler {
 	return &SettingsHandler{
-		metaSvc:    metaSvc,
-		librarySvc: librarySvc,
-		watcher:    watcher,
-		scheduler:  sched,
+		metaSvc:     metaSvc,
+		librarySvc:  librarySvc,
+		watcher:     watcher,
+		scheduler:   sched,
+		settingRepo: settingRepo,
 	}
 }
 
@@ -176,4 +181,74 @@ func (h *SettingsHandler) UpdateLibraryDir(w http.ResponseWriter, r *http.Reques
 	}
 
 	writeJSON(w, http.StatusOK, response)
+}
+
+// UpdatePullListSchedule saves pull list automation settings.
+// PUT /api/v1/settings/pull-list-schedule
+func (h *SettingsHandler) UpdatePullListSchedule(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled *bool `json:"enabled"`
+		Day     *int  `json:"day"`
+		Hour    *int  `json:"hour"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+
+	if req.Enabled != nil {
+		val := "false"
+		if *req.Enabled {
+			val = "true"
+		}
+		if err := h.settingRepo.Set("pull_list_enabled", val); err != nil {
+			writeError(w, http.StatusInternalServerError, "SAVE_FAILED", err.Error())
+			return
+		}
+	}
+
+	if req.Day != nil {
+		if *req.Day < 0 || *req.Day > 6 {
+			writeError(w, http.StatusBadRequest, "INVALID_DAY", "day must be 0-6 (Sunday-Saturday)")
+			return
+		}
+		if err := h.settingRepo.Set("pull_list_day", strconv.Itoa(*req.Day)); err != nil {
+			writeError(w, http.StatusInternalServerError, "SAVE_FAILED", err.Error())
+			return
+		}
+	}
+
+	if req.Hour != nil {
+		if *req.Hour < 0 || *req.Hour > 23 {
+			writeError(w, http.StatusBadRequest, "INVALID_HOUR", "hour must be 0-23")
+			return
+		}
+		if err := h.settingRepo.Set("pull_list_hour", strconv.Itoa(*req.Hour)); err != nil {
+			writeError(w, http.StatusInternalServerError, "SAVE_FAILED", err.Error())
+			return
+		}
+	}
+
+	// Return current state
+	enabled, _ := h.settingRepo.Get("pull_list_enabled")
+	day, _ := h.settingRepo.Get("pull_list_day")
+	hour, _ := h.settingRepo.Get("pull_list_hour")
+	lastRun, _ := h.settingRepo.Get("pull_list_last_run")
+
+	dayInt := 3
+	if d, err := strconv.Atoi(day); err == nil {
+		dayInt = d
+	}
+	hourInt := 6
+	if h2, err := strconv.Atoi(hour); err == nil {
+		hourInt = h2
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":              "updated",
+		"pull_list_enabled":   enabled == "true",
+		"pull_list_day":       dayInt,
+		"pull_list_hour":      hourInt,
+		"pull_list_last_run":  lastRun,
+	})
 }

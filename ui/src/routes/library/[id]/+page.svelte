@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/stores';
-	import { ApiClient, type Series, type Issue, type IssueListResponse } from '$lib/api/client';
+	import { ApiClient, type Series, type Issue, type IssueListResponse, type WriteMetadataResponse } from '$lib/api/client';
 	import ComicVineSearch from '$lib/components/ComicVineSearch.svelte';
 
 	let series = $state<Series | null>(null);
@@ -10,6 +10,8 @@
 	let showSearch = $state(false);
 	let refreshing = $state(false);
 	let toggling = $state(false);
+	let writingMetadata = $state(false);
+	let writeResult = $state<WriteMetadataResponse | null>(null);
 
 	let seriesId = $derived($page.params.id);
 
@@ -75,6 +77,21 @@
 			error = e instanceof Error ? e.message : 'Failed to toggle tracking';
 		} finally {
 			toggling = false;
+		}
+	}
+
+	async function writeMetadata() {
+		writingMetadata = true;
+		writeResult = null;
+		try {
+			const result = await ApiClient.post<WriteMetadataResponse>(
+				`/series/${seriesId}/write-metadata`
+			);
+			writeResult = result;
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Failed to write metadata';
+		} finally {
+			writingMetadata = false;
 		}
 	}
 
@@ -152,6 +169,22 @@
 						>
 							{series.comicvine_id ? 'Re-match' : 'Match to ComicVine'}
 						</button>
+						{#if ownedCount > 0}
+							<button
+								onclick={writeMetadata}
+								disabled={writingMetadata}
+								class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600
+									disabled:bg-gray-600 disabled:cursor-not-allowed
+									text-gray-200 rounded-lg transition-colors flex items-center gap-1.5"
+								title="Write ComicInfo.xml metadata into CBZ files"
+							>
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+										d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+								</svg>
+								{writingMetadata ? 'Writing...' : 'Write Metadata'}
+							</button>
+						{/if}
 					</div>
 				</div>
 				<div class="flex flex-wrap items-center gap-3 mt-2 text-sm text-gray-400">
@@ -178,6 +211,14 @@
 						</a>
 					{/if}
 				</div>
+				{#if writeResult}
+					<div class="mt-3 p-3 rounded-lg {writeResult.failed > 0 ? 'bg-amber-900/30 border border-amber-700' : 'bg-green-900/30 border border-green-700'}">
+						<p class="text-sm {writeResult.failed > 0 ? 'text-amber-400' : 'text-green-400'}">
+							ComicInfo.xml written: {writeResult.succeeded} succeeded{writeResult.failed > 0 ? `, ${writeResult.failed} failed` : ''}{writeResult.skipped > 0 ? `, ${writeResult.skipped} skipped (non-CBZ)` : ''}
+						</p>
+					</div>
+				{/if}
+
 				{#if series.description}
 					<p class="text-gray-300 mt-4 text-sm leading-relaxed line-clamp-4">{series.description}</p>
 				{/if}

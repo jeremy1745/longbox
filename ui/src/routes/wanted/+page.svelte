@@ -1,10 +1,39 @@
 <script lang="ts">
-	import { ApiClient, type WantListItem, type WantListResponse } from '$lib/api/client';
+	import { ApiClient, type WantListItem, type WantListResponse, type Job } from '$lib/api/client';
+	import SearchResultsModal from '$lib/components/SearchResultsModal.svelte';
 
 	let items = $state<WantListItem[]>([]);
 	let total = $state(0);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
+
+	// Search modal state
+	let searchOpen = $state(false);
+	let searchIssueId = $state<number | null>(null);
+	let searchIssueLabel = $state('');
+
+	// Search All state
+	let searchingAll = $state(false);
+	let searchAllMessage = $state<string | null>(null);
+
+	function openSearch(item: WantListItem) {
+		searchIssueId = item.issue_id;
+		searchIssueLabel = `${item.series_title} #${item.issue_number}`;
+		searchOpen = true;
+	}
+
+	async function searchAll() {
+		searchingAll = true;
+		searchAllMessage = null;
+		try {
+			const job = await ApiClient.post<Job>('/search/pull-list');
+			searchAllMessage = `Pull list search job started (Job #${job.id})`;
+		} catch (e) {
+			searchAllMessage = e instanceof Error ? e.message : 'Failed to start search';
+		} finally {
+			searchingAll = false;
+		}
+	}
 
 	const priorityLabels = ['None', 'Low', 'Medium', 'High'];
 	const priorityColors = [
@@ -81,7 +110,28 @@
 				{/if}
 			</p>
 		</div>
+		{#if items.length > 0}
+			<button
+				onclick={searchAll}
+				disabled={searchingAll}
+				class="px-4 py-2 bg-amber-500 hover:bg-amber-600 disabled:bg-gray-600
+					disabled:cursor-not-allowed text-gray-900 font-semibold rounded-lg transition-colors
+					flex items-center gap-2"
+			>
+				<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+						d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+				</svg>
+				{searchingAll ? 'Starting...' : 'Search All'}
+			</button>
+		{/if}
 	</div>
+
+	{#if searchAllMessage}
+		<div class="bg-blue-900/30 border border-blue-700 rounded-lg p-3">
+			<p class="text-sm text-blue-400">{searchAllMessage}</p>
+		</div>
+	{/if}
 
 	{#if error}
 		<div class="bg-red-900/30 border border-red-700 rounded-lg p-4">
@@ -153,6 +203,18 @@
 									{/each}
 								</div>
 
+								<!-- Search button -->
+								<button
+									onclick={() => openSearch(item)}
+									class="text-gray-500 hover:text-amber-400 transition-colors p-1"
+									title="Search indexers for this issue"
+								>
+									<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+											d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+									</svg>
+								</button>
+
 								<!-- Remove button -->
 								<button
 									onclick={() => removeItem(item.id)}
@@ -171,3 +233,9 @@
 		</div>
 	{/if}
 </div>
+
+<SearchResultsModal
+	bind:open={searchOpen}
+	bind:issueId={searchIssueId}
+	issueLabel={searchIssueLabel}
+/>

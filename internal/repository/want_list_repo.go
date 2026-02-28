@@ -215,6 +215,26 @@ func (r *WantListRepo) ListBySeriesID(seriesID int64) ([]model.WantListItem, err
 	return items, nil
 }
 
+// ListWantedIssueIDs returns a set of all issue IDs currently on the want list.
+// Used for efficient cross-referencing in the pull list.
+func (r *WantListRepo) ListWantedIssueIDs() (map[int64]bool, error) {
+	rows, err := r.read.Query(`SELECT issue_id FROM want_list`)
+	if err != nil {
+		return nil, fmt.Errorf("listing wanted issue IDs: %w", err)
+	}
+	defer rows.Close()
+
+	wanted := make(map[int64]bool)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scanning wanted issue ID: %w", err)
+		}
+		wanted[id] = true
+	}
+	return wanted, nil
+}
+
 func scanWantListItem(row *sql.Row) (*model.WantListItem, error) {
 	item := &model.WantListItem{}
 	err := row.Scan(

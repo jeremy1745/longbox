@@ -197,6 +197,116 @@ func (c *Client) GetVolumeIssues(volumeID int) ([]Issue, error) {
 	return allIssues, nil
 }
 
+// GetIssuesByStoreDate fetches all issues from ComicVine with store_date in the given range.
+// Dates should be in YYYY-MM-DD format. This returns ALL comics releasing in that window.
+func (c *Client) GetIssuesByStoreDate(startDate, endDate string) ([]Issue, error) {
+	var allIssues []Issue
+	offset := 0
+	limit := 100
+
+	for {
+		params := url.Values{}
+		params.Set("filter", fmt.Sprintf("store_date:%s|%s", startDate, endDate))
+		params.Set("field_list", "id,name,issue_number,description,cover_date,store_date,image,volume,person_credits")
+		params.Set("sort", "store_date:asc")
+		params.Set("limit", fmt.Sprintf("%d", limit))
+		params.Set("offset", fmt.Sprintf("%d", offset))
+
+		body, err := c.get("issues", params)
+		if err != nil {
+			return nil, err
+		}
+
+		var resp APIResponse[[]Issue]
+		if err := json.Unmarshal(body, &resp); err != nil {
+			return nil, fmt.Errorf("parsing response: %w", err)
+		}
+
+		if resp.StatusCode != 1 {
+			return nil, fmt.Errorf("API error: %s (code %d)", resp.Error, resp.StatusCode)
+		}
+
+		allIssues = append(allIssues, resp.Results...)
+
+		slog.Debug("fetched issues by store date",
+			"offset", offset,
+			"page_results", len(resp.Results),
+			"total_results", resp.NumberOfTotalResults,
+		)
+
+		if len(resp.Results) < limit {
+			break
+		}
+		offset += limit
+
+		// Safety: cap at 1000 issues per query to avoid runaway pagination
+		if offset >= 1000 {
+			slog.Warn("store date query hit 1000 issue cap", "start", startDate, "end", endDate)
+			break
+		}
+	}
+
+	return allIssues, nil
+}
+
+
+// GetVolumesByIDs fetches multiple volumes by their ComicVine IDs.
+// This is used to look up publisher names for issues fetched by store_date.
+// ComicVine supports filtering volumes by pipe-separated IDs.
+func (c *Client) GetVolumesByIDs(ids []int) ([]Volume, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	var allVolumes []Volume
+
+	// Process in batches of 100 (ComicVine filter limit)
+	batchSize := 100
+	for i := 0; i < len(ids); i += batchSize {
+		end := i + batchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		batch := ids[i:end]
+
+		// Build pipe-separated ID filter
+		idStrs := make([]string, len(batch))
+		for j, id := range batch {
+			idStrs[j] = fmt.Sprintf("%d", id)
+		}
+		idFilter := strings.Join(idStrs, "|")
+
+		params := url.Values{}
+		params.Set("filter", fmt.Sprintf("id:%s", idFilter))
+		params.Set("field_list", "id,name,publisher")
+		params.Set("limit", fmt.Sprintf("%d", batchSize))
+
+		body, err := c.get("volumes", params)
+		if err != nil {
+			return allVolumes, fmt.Errorf("fetching volumes batch: %w", err)
+		}
+
+		var resp APIResponse[[]Volume]
+		if err := json.Unmarshal(body, &resp); err != nil {
+			return allVolumes, fmt.Errorf("parsing volumes response: %w", err)
+		}
+
+		if resp.StatusCode != 1 {
+			return allVolumes, fmt.Errorf("API error: %s (code %d)", resp.Error, resp.StatusCode)
+		}
+
+		allVolumes = append(allVolumes, resp.Results...)
+
+		slog.Debug("fetched volumes batch for publisher lookup",
+			"batch_start", i,
+			"batch_size", len(batch),
+			"results", len(resp.Results),
+		)
+	}
+
+	return allVolumes, nil
+}
+
 // StripHTML removes HTML tags from ComicVine descriptions.
 func StripHTML(s string) string {
 	// Simple HTML stripping - handles the common ComicVine description format

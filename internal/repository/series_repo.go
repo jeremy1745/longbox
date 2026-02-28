@@ -203,6 +203,35 @@ func (r *SeriesRepo) ListTracked() ([]model.Series, error) {
 	return seriesList, nil
 }
 
+// ListWithComicVineID returns all series that have been matched to ComicVine.
+func (r *SeriesRepo) ListWithComicVineID() ([]model.Series, error) {
+	rows, err := r.read.Query(`
+		SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id,
+			COALESCE(s.description,''), s.status, s.total_issues, s.cover_file_id, s.tracked,
+			s.metadata_locked, s.last_cv_sync, s.created_at, s.updated_at,
+			COALESCE((SELECT COUNT(*) FROM issues WHERE series_id = s.id), 0) as issue_count,
+			COALESCE((SELECT COUNT(*) FROM comic_files cf JOIN issues i ON cf.issue_id = i.id WHERE i.series_id = s.id), 0) as file_count,
+			COALESCE(p.name, '') as publisher_name
+		FROM series s
+		LEFT JOIN publishers p ON s.publisher_id = p.id
+		WHERE s.comicvine_id IS NOT NULL
+		ORDER BY s.sort_title ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("listing series with comicvine ID: %w", err)
+	}
+	defer rows.Close()
+
+	var seriesList []model.Series
+	for rows.Next() {
+		s, err := scanSeriesRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		seriesList = append(seriesList, *s)
+	}
+	return seriesList, nil
+}
+
 func (r *SeriesRepo) UpdateCoverFileID(seriesID, fileID int64) error {
 	_, err := r.write.Exec(`UPDATE series SET cover_file_id = ?, updated_at = ? WHERE id = ?`,
 		fileID, time.Now().UTC().Format(time.RFC3339), seriesID)

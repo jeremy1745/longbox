@@ -130,6 +130,48 @@ func (r *FileRepo) ListAll() ([]model.ComicFile, error) {
 	return files, nil
 }
 
+// GetByIssueID returns the comic file linked to the given issue, if any.
+func (r *FileRepo) GetByIssueID(issueID int64) (*model.ComicFile, error) {
+	row := r.read.QueryRow(`SELECT id, issue_id, file_path, file_name, file_size, file_hash,
+		file_format, page_count, has_comicinfo, cover_path, parsed_series, parsed_number,
+		parsed_year, match_confidence, created_at, updated_at
+		FROM comic_files WHERE issue_id = ? LIMIT 1`, issueID)
+	return scanComicFile(row)
+}
+
+// ListBySeries returns all comic files for issues in the given series.
+func (r *FileRepo) ListBySeries(seriesID int64) ([]model.ComicFile, error) {
+	rows, err := r.read.Query(`
+		SELECT cf.id, cf.issue_id, cf.file_path, cf.file_name, cf.file_size, cf.file_hash,
+			cf.file_format, cf.page_count, cf.has_comicinfo, cf.cover_path, cf.parsed_series,
+			cf.parsed_number, cf.parsed_year, cf.match_confidence, cf.created_at, cf.updated_at
+		FROM comic_files cf
+		JOIN issues i ON i.id = cf.issue_id
+		WHERE i.series_id = ?
+		ORDER BY i.sort_number ASC`, seriesID)
+	if err != nil {
+		return nil, fmt.Errorf("listing files by series: %w", err)
+	}
+	defer rows.Close()
+
+	var files []model.ComicFile
+	for rows.Next() {
+		f, err := scanComicFileRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, *f)
+	}
+	return files, nil
+}
+
+// UpdateHasComicInfo updates the has_comicinfo flag after writing metadata.
+func (r *FileRepo) UpdateHasComicInfo(id int64, hasComicInfo bool) error {
+	_, err := r.write.Exec(`UPDATE comic_files SET has_comicinfo = ?, updated_at = ? WHERE id = ?`,
+		hasComicInfo, time.Now().UTC().Format(time.RFC3339), id)
+	return err
+}
+
 func (r *FileRepo) Delete(id int64) error {
 	_, err := r.write.Exec(`DELETE FROM comic_files WHERE id = ?`, id)
 	return err

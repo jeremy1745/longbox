@@ -19,11 +19,12 @@ func NewIssueRepo(read, write *sql.DB) *IssueRepo {
 
 func (r *IssueRepo) Create(issue *model.Issue) error {
 	res, err := r.write.Exec(`
-		INSERT INTO issues (series_id, issue_number, sort_number, title, description,
-			cover_date, store_date, writers, artists, read_status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		issue.SeriesID, issue.IssueNumber, issue.SortNumber, issue.Title, issue.Description,
-		issue.CoverDate, issue.StoreDate, issue.Writers, issue.Artists, issue.ReadStatus,
+		INSERT INTO issues (series_id, issue_number, sort_number, title, comicvine_id,
+			description, cover_date, store_date, cover_url, writers, artists, read_status)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		issue.SeriesID, issue.IssueNumber, issue.SortNumber, issue.Title, issue.ComicVineID,
+		issue.Description, issue.CoverDate, issue.StoreDate, issue.CoverURL,
+		issue.Writers, issue.Artists, issue.ReadStatus,
 	)
 	if err != nil {
 		return fmt.Errorf("inserting issue: %w", err)

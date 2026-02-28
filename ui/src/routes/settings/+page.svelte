@@ -1,5 +1,18 @@
 <script lang="ts">
-	import { ApiClient, type Settings, type APIKeyTestResult, type OrganizeTemplateResponse, type OrganizeTemplatePreviewResponse, type RenamePreview } from '$lib/api/client';
+	import {
+		ApiClient,
+		type Settings,
+		type APIKeyTestResult,
+		type OrganizeTemplateResponse,
+		type OrganizeTemplatePreviewResponse,
+		type RenamePreview,
+		type Indexer,
+		type IndexerListResponse,
+		type IndexerTestResult,
+		type DownloadClient,
+		type DownloadClientListResponse,
+		type DownloadClientTestResult,
+	} from '$lib/api/client';
 
 	let settings = $state<Settings | null>(null);
 	let loading = $state(true);
@@ -26,7 +39,33 @@
 	let previewLoading = $state(false);
 	let previewDebounce: ReturnType<typeof setTimeout> | null = null;
 
+	// Indexer state
+	let indexers = $state<Indexer[]>([]);
+	let indexerEditing = $state<Partial<Indexer> | null>(null);
+	let indexerSaving = $state(false);
+	let indexerMessage = $state<string | null>(null);
+	let indexerTesting = $state<number | null>(null);
+	let indexerTestResult = $state<IndexerTestResult | null>(null);
+
+	// Download client state
+	let dlClients = $state<DownloadClient[]>([]);
+	let dlClientEditing = $state<Partial<DownloadClient> | null>(null);
+	let dlClientSaving = $state(false);
+	let dlClientMessage = $state<string | null>(null);
+	let dlClientTesting = $state<number | null>(null);
+	let dlClientTestResult = $state<DownloadClientTestResult | null>(null);
+
+	// Pull list schedule state
+	let pullListSaving = $state(false);
+	let pullListMessage = $state<string | null>(null);
+
+	// Mylar3 metadata state
+	let mylarWriting = $state(false);
+	let mylarMessage = $state<string | null>(null);
+
 	const defaultTemplate = '{series}/{series} #{number|pad:3}.{format}';
+
+	const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 	const variables = [
 		{ name: '{series}', desc: 'Series title' },
@@ -138,6 +177,21 @@
 		return path.split('/').pop() || path;
 	}
 
+	async function writeMylarMetadata() {
+		mylarWriting = true;
+		mylarMessage = null;
+		try {
+			const result = await ApiClient.post<{ job_id: number; total_series: number; message: string }>(
+				'/library/write-mylar-metadata'
+			);
+			mylarMessage = `${result.message} (${result.total_series} series, Job #${result.job_id})`;
+		} catch (e) {
+			mylarMessage = e instanceof Error ? e.message : 'Failed to start';
+		} finally {
+			mylarWriting = false;
+		}
+	}
+
 	async function saveAPIKey() {
 		if (!apiKeyInput.trim()) return;
 		saving = true;
@@ -172,9 +226,158 @@
 		}
 	}
 
+	// --- Indexer functions ---
+
+	async function loadIndexers() {
+		try {
+			const data = await ApiClient.get<IndexerListResponse>('/indexers');
+			indexers = data.indexers || [];
+		} catch { /* ignore */ }
+	}
+
+	function newIndexer() {
+		indexerEditing = { name: '', url: '', api_key: '', type: 'newznab', priority: 50, categories: '7030' };
+		indexerMessage = null;
+	}
+
+	function editIndexer(idx: Indexer) {
+		indexerEditing = { ...idx, api_key: '' };
+		indexerMessage = null;
+	}
+
+	async function saveIndexer() {
+		if (!indexerEditing) return;
+		indexerSaving = true;
+		indexerMessage = null;
+		try {
+			if (indexerEditing.id) {
+				const body: Record<string, any> = {};
+				if (indexerEditing.name) body.name = indexerEditing.name;
+				if (indexerEditing.url) body.url = indexerEditing.url;
+				if (indexerEditing.api_key) body.api_key = indexerEditing.api_key;
+				if (indexerEditing.type) body.type = indexerEditing.type;
+				if (indexerEditing.priority != null) body.priority = indexerEditing.priority;
+				if (indexerEditing.categories) body.categories = indexerEditing.categories;
+				await ApiClient.put(`/indexers/${indexerEditing.id}`, body);
+			} else {
+				await ApiClient.post('/indexers', indexerEditing);
+			}
+			indexerEditing = null;
+			await loadIndexers();
+		} catch (e) {
+			indexerMessage = e instanceof Error ? e.message : 'Save failed';
+		} finally {
+			indexerSaving = false;
+		}
+	}
+
+	async function deleteIndexer(id: number) {
+		try {
+			await ApiClient.delete(`/indexers/${id}`);
+			await loadIndexers();
+		} catch (e) {
+			indexerMessage = e instanceof Error ? e.message : 'Delete failed';
+		}
+	}
+
+	async function testIndexer(id: number) {
+		indexerTesting = id;
+		indexerTestResult = null;
+		try {
+			indexerTestResult = await ApiClient.post<IndexerTestResult>(`/indexers/${id}/test`);
+		} catch (e) {
+			indexerTestResult = { success: false, message: e instanceof Error ? e.message : 'Test failed' };
+		} finally {
+			indexerTesting = null;
+		}
+	}
+
+	// --- Download Client functions ---
+
+	async function loadDlClients() {
+		try {
+			const data = await ApiClient.get<DownloadClientListResponse>('/download-clients');
+			dlClients = data.download_clients || [];
+		} catch { /* ignore */ }
+	}
+
+	function newDlClient() {
+		dlClientEditing = { name: '', url: '', api_key: '', type: 'sabnzbd', category: 'comics', priority: 50 };
+		dlClientMessage = null;
+	}
+
+	function editDlClient(dc: DownloadClient) {
+		dlClientEditing = { ...dc, api_key: '' };
+		dlClientMessage = null;
+	}
+
+	async function saveDlClient() {
+		if (!dlClientEditing) return;
+		dlClientSaving = true;
+		dlClientMessage = null;
+		try {
+			if (dlClientEditing.id) {
+				const body: Record<string, any> = {};
+				if (dlClientEditing.name) body.name = dlClientEditing.name;
+				if (dlClientEditing.url) body.url = dlClientEditing.url;
+				if (dlClientEditing.api_key) body.api_key = dlClientEditing.api_key;
+				if (dlClientEditing.category) body.category = dlClientEditing.category;
+				if (dlClientEditing.priority != null) body.priority = dlClientEditing.priority;
+				await ApiClient.put(`/download-clients/${dlClientEditing.id}`, body);
+			} else {
+				await ApiClient.post('/download-clients', dlClientEditing);
+			}
+			dlClientEditing = null;
+			await loadDlClients();
+		} catch (e) {
+			dlClientMessage = e instanceof Error ? e.message : 'Save failed';
+		} finally {
+			dlClientSaving = false;
+		}
+	}
+
+	async function deleteDlClient(id: number) {
+		try {
+			await ApiClient.delete(`/download-clients/${id}`);
+			await loadDlClients();
+		} catch (e) {
+			dlClientMessage = e instanceof Error ? e.message : 'Delete failed';
+		}
+	}
+
+	async function testDlClient(id: number) {
+		dlClientTesting = id;
+		dlClientTestResult = null;
+		try {
+			dlClientTestResult = await ApiClient.post<DownloadClientTestResult>(`/download-clients/${id}/test`);
+		} catch (e) {
+			dlClientTestResult = { success: false, message: e instanceof Error ? e.message : 'Test failed' };
+		} finally {
+			dlClientTesting = null;
+		}
+	}
+
+	// --- Pull List Schedule ---
+
+	async function savePullListSchedule(field: string, value: any) {
+		pullListSaving = true;
+		pullListMessage = null;
+		try {
+			await ApiClient.put('/settings/pull-list-schedule', { [field]: value });
+			await loadSettings();
+			pullListMessage = 'Schedule updated!';
+		} catch (e) {
+			pullListMessage = e instanceof Error ? e.message : 'Save failed';
+		} finally {
+			pullListSaving = false;
+		}
+	}
+
 	$effect(() => {
 		loadSettings();
 		loadTemplate();
+		loadIndexers();
+		loadDlClients();
 	});
 </script>
 
@@ -353,6 +556,32 @@
 			{/if}
 		</div>
 
+		<!-- Mylar3 Metadata Section -->
+		<div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+			<h2 class="text-xl font-semibold mb-4">Mylar3 Metadata</h2>
+			<p class="text-sm text-gray-400 mb-6">
+				Write Mylar3-compatible metadata files to each series folder. Creates a
+				<code class="text-amber-400 bg-gray-900 px-1 rounded">cvinfo</code> file (ComicVine URL) and downloads a
+				<code class="text-amber-400 bg-gray-900 px-1 rounded">poster.jpg</code> (series cover image)
+				for every series matched to ComicVine.
+			</p>
+
+			<button
+				onclick={writeMylarMetadata}
+				disabled={mylarWriting}
+				class="px-4 py-2 bg-amber-500 hover:bg-amber-600 disabled:bg-gray-600
+					disabled:cursor-not-allowed text-gray-900 font-semibold rounded-lg transition-colors"
+			>
+				{mylarWriting ? 'Starting...' : 'Write Mylar3 Metadata'}
+			</button>
+
+			{#if mylarMessage}
+				<p class="mt-3 text-sm {mylarMessage.includes('Failed') ? 'text-red-400' : 'text-green-400'}">
+					{mylarMessage}
+				</p>
+			{/if}
+		</div>
+
 		<!-- ComicVine API Key Section -->
 		<div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
 			<h2 class="text-xl font-semibold mb-4">ComicVine API</h2>
@@ -457,6 +686,301 @@
 					{/if}
 				</div>
 			{/if}
+		</div>
+
+		<!-- Indexers Section -->
+		<div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+			<div class="flex items-center justify-between mb-4">
+				<h2 class="text-xl font-semibold">Indexers</h2>
+				<button
+					onclick={newIndexer}
+					class="px-3 py-1.5 bg-amber-500 hover:bg-amber-600 text-gray-900 text-sm font-semibold rounded-lg transition-colors"
+				>
+					Add Indexer
+				</button>
+			</div>
+			<p class="text-sm text-gray-400 mb-6">
+				Configure Usenet indexers (Newznab, NZBHydra2, Prowlarr) to search for comics.
+			</p>
+
+			{#if indexerMessage}
+				<p class="mb-4 text-sm text-red-400">{indexerMessage}</p>
+			{/if}
+
+			{#if indexerTestResult}
+				<div class="mb-4 p-3 rounded-lg {indexerTestResult.success ? 'bg-green-900/30 border border-green-700' : 'bg-red-900/30 border border-red-700'}">
+					<p class="text-sm {indexerTestResult.success ? 'text-green-400' : 'text-red-400'}">{indexerTestResult.message}</p>
+				</div>
+			{/if}
+
+			<!-- Indexer edit form -->
+			{#if indexerEditing}
+				<div class="mb-6 p-4 bg-gray-900/50 rounded-lg border border-gray-600 space-y-3">
+					<div class="grid grid-cols-2 gap-3">
+						<div>
+							<label class="block text-xs text-gray-400 mb-1">Name</label>
+							<input type="text" bind:value={indexerEditing.name} placeholder="My Indexer"
+								class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-amber-500" />
+						</div>
+						<div>
+							<label class="block text-xs text-gray-400 mb-1">Type</label>
+							<select bind:value={indexerEditing.type}
+								class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-amber-500">
+								<option value="newznab">Newznab</option>
+								<option value="nzbhydra2">NZBHydra2</option>
+								<option value="prowlarr">Prowlarr</option>
+							</select>
+						</div>
+					</div>
+					<div>
+						<label class="block text-xs text-gray-400 mb-1">URL</label>
+						<input type="text" bind:value={indexerEditing.url} placeholder="https://my-indexer.com"
+							class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-gray-100 font-mono focus:outline-none focus:ring-2 focus:ring-amber-500" />
+					</div>
+					<div>
+						<label class="block text-xs text-gray-400 mb-1">API Key</label>
+						<input type="password" bind:value={indexerEditing.api_key} placeholder={indexerEditing.id ? '(leave blank to keep current)' : 'API key'}
+							class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-amber-500" />
+					</div>
+					<div class="grid grid-cols-2 gap-3">
+						<div>
+							<label class="block text-xs text-gray-400 mb-1">Categories</label>
+							<input type="text" bind:value={indexerEditing.categories} placeholder="7030"
+								class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-gray-100 font-mono focus:outline-none focus:ring-2 focus:ring-amber-500" />
+						</div>
+						<div>
+							<label class="block text-xs text-gray-400 mb-1">Priority</label>
+							<input type="number" bind:value={indexerEditing.priority} min="1" max="100"
+								class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-amber-500" />
+						</div>
+					</div>
+					<div class="flex gap-2 pt-2">
+						<button onclick={saveIndexer} disabled={indexerSaving}
+							class="px-4 py-2 bg-amber-500 hover:bg-amber-600 disabled:bg-gray-600 text-gray-900 font-semibold rounded-lg text-sm transition-colors">
+							{indexerSaving ? 'Saving...' : 'Save'}
+						</button>
+						<button onclick={() => indexerEditing = null}
+							class="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-gray-200 rounded-lg text-sm transition-colors">
+							Cancel
+						</button>
+					</div>
+				</div>
+			{/if}
+
+			<!-- Indexer list -->
+			{#if indexers.length > 0}
+				<div class="divide-y divide-gray-700">
+					{#each indexers as idx (idx.id)}
+						<div class="py-3 flex items-center justify-between gap-4">
+							<div class="flex-1 min-w-0">
+								<div class="flex items-center gap-2">
+									<span class="font-medium text-gray-200">{idx.name}</span>
+									<span class="text-xs px-1.5 py-0.5 rounded bg-gray-700 text-gray-400">{idx.type}</span>
+									{#if !idx.enabled}
+										<span class="text-xs px-1.5 py-0.5 rounded bg-red-900/50 text-red-400">Disabled</span>
+									{/if}
+								</div>
+								<p class="text-xs text-gray-500 mt-0.5 truncate font-mono">{idx.url}</p>
+							</div>
+							<div class="flex items-center gap-1">
+								<button onclick={() => testIndexer(idx.id)} disabled={indexerTesting === idx.id}
+									class="px-2 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 rounded transition-colors">
+									{indexerTesting === idx.id ? '...' : 'Test'}
+								</button>
+								<button onclick={() => editIndexer(idx)}
+									class="px-2 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 rounded transition-colors">
+									Edit
+								</button>
+								<button onclick={() => deleteIndexer(idx.id)}
+									class="px-2 py-1 text-xs bg-gray-700 hover:bg-red-900/50 text-gray-300 hover:text-red-400 rounded transition-colors">
+									Delete
+								</button>
+							</div>
+						</div>
+					{/each}
+				</div>
+			{:else if !indexerEditing}
+				<p class="text-sm text-gray-500">No indexers configured. Add one to enable Usenet search.</p>
+			{/if}
+		</div>
+
+		<!-- Download Clients Section -->
+		<div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+			<div class="flex items-center justify-between mb-4">
+				<h2 class="text-xl font-semibold">Download Clients</h2>
+				<button
+					onclick={newDlClient}
+					class="px-3 py-1.5 bg-amber-500 hover:bg-amber-600 text-gray-900 text-sm font-semibold rounded-lg transition-colors"
+				>
+					Add Client
+				</button>
+			</div>
+			<p class="text-sm text-gray-400 mb-6">
+				Configure SABnzbd to download grabbed NZBs.
+			</p>
+
+			{#if dlClientMessage}
+				<p class="mb-4 text-sm text-red-400">{dlClientMessage}</p>
+			{/if}
+
+			{#if dlClientTestResult}
+				<div class="mb-4 p-3 rounded-lg {dlClientTestResult.success ? 'bg-green-900/30 border border-green-700' : 'bg-red-900/30 border border-red-700'}">
+					<p class="text-sm {dlClientTestResult.success ? 'text-green-400' : 'text-red-400'}">{dlClientTestResult.message}</p>
+				</div>
+			{/if}
+
+			<!-- Download client edit form -->
+			{#if dlClientEditing}
+				<div class="mb-6 p-4 bg-gray-900/50 rounded-lg border border-gray-600 space-y-3">
+					<div>
+						<label class="block text-xs text-gray-400 mb-1">Name</label>
+						<input type="text" bind:value={dlClientEditing.name} placeholder="My SABnzbd"
+							class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-amber-500" />
+					</div>
+					<div>
+						<label class="block text-xs text-gray-400 mb-1">URL</label>
+						<input type="text" bind:value={dlClientEditing.url} placeholder="http://localhost:8080/sabnzbd"
+							class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-gray-100 font-mono focus:outline-none focus:ring-2 focus:ring-amber-500" />
+					</div>
+					<div>
+						<label class="block text-xs text-gray-400 mb-1">API Key</label>
+						<input type="password" bind:value={dlClientEditing.api_key} placeholder={dlClientEditing.id ? '(leave blank to keep current)' : 'API key'}
+							class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-amber-500" />
+					</div>
+					<div class="grid grid-cols-2 gap-3">
+						<div>
+							<label class="block text-xs text-gray-400 mb-1">Category</label>
+							<input type="text" bind:value={dlClientEditing.category} placeholder="comics"
+								class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-amber-500" />
+						</div>
+						<div>
+							<label class="block text-xs text-gray-400 mb-1">Priority</label>
+							<input type="number" bind:value={dlClientEditing.priority} min="1" max="100"
+								class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-amber-500" />
+						</div>
+					</div>
+					<div class="flex gap-2 pt-2">
+						<button onclick={saveDlClient} disabled={dlClientSaving}
+							class="px-4 py-2 bg-amber-500 hover:bg-amber-600 disabled:bg-gray-600 text-gray-900 font-semibold rounded-lg text-sm transition-colors">
+							{dlClientSaving ? 'Saving...' : 'Save'}
+						</button>
+						<button onclick={() => dlClientEditing = null}
+							class="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-gray-200 rounded-lg text-sm transition-colors">
+							Cancel
+						</button>
+					</div>
+				</div>
+			{/if}
+
+			<!-- Download client list -->
+			{#if dlClients.length > 0}
+				<div class="divide-y divide-gray-700">
+					{#each dlClients as dc (dc.id)}
+						<div class="py-3 flex items-center justify-between gap-4">
+							<div class="flex-1 min-w-0">
+								<div class="flex items-center gap-2">
+									<span class="font-medium text-gray-200">{dc.name}</span>
+									<span class="text-xs px-1.5 py-0.5 rounded bg-gray-700 text-gray-400">{dc.type}</span>
+									{#if dc.category}
+										<span class="text-xs px-1.5 py-0.5 rounded bg-gray-700 text-gray-400">cat: {dc.category}</span>
+									{/if}
+									{#if !dc.enabled}
+										<span class="text-xs px-1.5 py-0.5 rounded bg-red-900/50 text-red-400">Disabled</span>
+									{/if}
+								</div>
+								<p class="text-xs text-gray-500 mt-0.5 truncate font-mono">{dc.url}</p>
+							</div>
+							<div class="flex items-center gap-1">
+								<button onclick={() => testDlClient(dc.id)} disabled={dlClientTesting === dc.id}
+									class="px-2 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 rounded transition-colors">
+									{dlClientTesting === dc.id ? '...' : 'Test'}
+								</button>
+								<button onclick={() => editDlClient(dc)}
+									class="px-2 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 rounded transition-colors">
+									Edit
+								</button>
+								<button onclick={() => deleteDlClient(dc.id)}
+									class="px-2 py-1 text-xs bg-gray-700 hover:bg-red-900/50 text-gray-300 hover:text-red-400 rounded transition-colors">
+									Delete
+								</button>
+							</div>
+						</div>
+					{/each}
+				</div>
+			{:else if !dlClientEditing}
+				<p class="text-sm text-gray-500">No download clients configured. Add SABnzbd to enable NZB grabbing.</p>
+			{/if}
+		</div>
+
+		<!-- Pull List Automation Section -->
+		<div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+			<h2 class="text-xl font-semibold mb-4">Pull List Automation</h2>
+			<p class="text-sm text-gray-400 mb-6">
+				Automatically search for and download missing issues from tracked series on a weekly schedule.
+			</p>
+
+			{#if pullListMessage}
+				<p class="mb-4 text-sm {pullListMessage.includes('updated') || pullListMessage.includes('Updated') ? 'text-green-400' : 'text-red-400'}">
+					{pullListMessage}
+				</p>
+			{/if}
+
+			<div class="space-y-4">
+				<!-- Enable toggle -->
+				<div class="flex items-center justify-between">
+					<div>
+						<p class="text-sm font-medium text-gray-200">Enable Weekly Search</p>
+						<p class="text-xs text-gray-500 mt-0.5">Automatically search indexers for wanted issues</p>
+					</div>
+					<button
+						onclick={() => savePullListSchedule('enabled', !settings?.pull_list_enabled)}
+						disabled={pullListSaving}
+						class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors
+							{settings?.pull_list_enabled ? 'bg-amber-500' : 'bg-gray-600'}"
+					>
+						<span class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform
+							{settings?.pull_list_enabled ? 'translate-x-6' : 'translate-x-1'}"></span>
+					</button>
+				</div>
+
+				{#if settings?.pull_list_enabled}
+					<!-- Day selector -->
+					<div class="flex items-center gap-4">
+						<label class="text-sm text-gray-300 w-20">Day</label>
+						<select
+							value={settings?.pull_list_day ?? 3}
+							onchange={(e) => savePullListSchedule('day', parseInt((e.target as HTMLSelectElement).value))}
+							class="px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-amber-500"
+						>
+							{#each dayNames as name, i}
+								<option value={i}>{name}</option>
+							{/each}
+						</select>
+					</div>
+
+					<!-- Hour selector -->
+					<div class="flex items-center gap-4">
+						<label class="text-sm text-gray-300 w-20">Hour</label>
+						<select
+							value={settings?.pull_list_hour ?? 6}
+							onchange={(e) => savePullListSchedule('hour', parseInt((e.target as HTMLSelectElement).value))}
+							class="px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-amber-500"
+						>
+							{#each Array.from({length: 24}, (_, i) => i) as hour}
+								<option value={hour}>{hour === 0 ? '12 AM' : hour < 12 ? `${hour} AM` : hour === 12 ? '12 PM' : `${hour - 12} PM`}</option>
+							{/each}
+						</select>
+					</div>
+
+					<!-- Last run info -->
+					{#if settings?.pull_list_last_run}
+						<div class="flex items-center gap-3 pt-2 border-t border-gray-700">
+							<span class="text-sm text-gray-400">Last run:</span>
+							<span class="text-sm text-gray-300">{settings.pull_list_last_run}</span>
+						</div>
+					{/if}
+				{/if}
+			</div>
 		</div>
 
 		<!-- About Section -->

@@ -1,5 +1,5 @@
 # LongBox Configuration
-port: 8080
+port: 22526
 library_dir: /path/to/your/comics
 data_dir: ~/.longbox
 log_level: info

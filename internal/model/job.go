@@ -6,8 +6,11 @@ import "time"
 type JobType string
 
 const (
-	JobTypeScan            JobType = "scan"
+	JobTypeScan           JobType = "scan"
 	JobTypeMetadataRefresh JobType = "metadata_refresh"
+	JobTypeSearch          JobType = "search"
+	JobTypePullListSearch  JobType = "pull_list_search"
+	JobTypeMylarMetadata   JobType = "mylar_metadata"
 )
 
 // JobStatus tracks the lifecycle of a job.

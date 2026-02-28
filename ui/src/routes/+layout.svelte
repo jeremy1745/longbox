@@ -7,7 +7,8 @@
 		{ href: '/', label: 'Dashboard' },
 		{ href: '/library', label: 'Library' },
 		{ href: '/wanted', label: 'Wanted' },
-		{ href: '/calendar', label: 'Calendar' },
+		{ href: '/downloads', label: 'Downloads' },
+		{ href: '/calendar', label: 'Pull List' },
 		{ href: '/jobs', label: 'Jobs' },
 		{ href: '/settings', label: 'Settings' },
 	];

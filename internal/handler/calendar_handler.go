@@ -1,20 +1,40 @@
 package handler
 
 import (
+	"encoding/json"
 	"net/http"
 
+	"github.com/jeremy/longbox/internal/model"
 	"github.com/jeremy/longbox/internal/repository"
+	"github.com/jeremy/longbox/internal/scheduler"
+	"github.com/jeremy/longbox/internal/service"
 )
 
 type CalendarHandler struct {
-	issueRepo *repository.IssueRepo
+	issueRepo    *repository.IssueRepo
+	seriesRepo   *repository.SeriesRepo
+	wantListRepo *repository.WantListRepo
+	metaSvc      *service.MetadataService
+	sched        *scheduler.Scheduler
 }
 
-func NewCalendarHandler(issueRepo *repository.IssueRepo) *CalendarHandler {
-	return &CalendarHandler{issueRepo: issueRepo}
+func NewCalendarHandler(
+	issueRepo *repository.IssueRepo,
+	seriesRepo *repository.SeriesRepo,
+	wantListRepo *repository.WantListRepo,
+	metaSvc *service.MetadataService,
+	sched *scheduler.Scheduler,
+) *CalendarHandler {
+	return &CalendarHandler{
+		issueRepo:    issueRepo,
+		seriesRepo:   seriesRepo,
+		wantListRepo: wantListRepo,
+		metaSvc:      metaSvc,
+		sched:        sched,
+	}
 }
 
-// Upcoming returns issues with store_date in the given date range.
+// Upcoming returns issues with store_date in the given date range from the LOCAL database.
 // Query params: start (YYYY-MM-DD), end (YYYY-MM-DD), tracked_only (bool)
 func (h *CalendarHandler) Upcoming(w http.ResponseWriter, r *http.Request) {
 	start := r.URL.Query().Get("start")
@@ -36,4 +56,140 @@ func (h *CalendarHandler) Upcoming(w http.ResponseWriter, r *http.Request) {
 		"issues": issues,
 		"total":  len(issues),
 	})
+}
+
+// Releases fetches ALL comics releasing in a date range from ComicVine,
+// cross-referenced with local ownership and tracking data.
+// Query params: start (YYYY-MM-DD), end (YYYY-MM-DD)
+func (h *CalendarHandler) Releases(w http.ResponseWriter, r *http.Request) {
+	start := r.URL.Query().Get("start")
+	end := r.URL.Query().Get("end")
+
+	if start == "" || end == "" {
+		writeError(w, http.StatusBadRequest, "MISSING_DATES", "start and end query params required (YYYY-MM-DD)")
+		return
+	}
+
+	releases, debug, err := h.metaSvc.GetWeeklyReleases(start, end)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "RELEASES_FAILED", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"releases": releases,
+		"total":    len(releases),
+		"debug":    debug,
+	})
+}
+
+// RefreshTracked triggers a background job to refresh metadata for all tracked series.
+func (h *CalendarHandler) RefreshTracked(w http.ResponseWriter, r *http.Request) {
+	tracked, err := h.seriesRepo.ListTracked()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "LIST_TRACKED_FAILED", err.Error())
+		return
+	}
+
+	if len(tracked) == 0 {
+		writeError(w, http.StatusBadRequest, "NO_TRACKED_SERIES",
+			"No tracked series found. Track series from the Library page first, then match them to ComicVine.")
+		return
+	}
+
+	matchedCount := 0
+	for _, s := range tracked {
+		if s.ComicVineID != nil {
+			matchedCount++
+		}
+	}
+
+	if matchedCount == 0 {
+		writeError(w, http.StatusBadRequest, "NO_MATCHED_SERIES",
+			"Tracked series exist but none are matched to ComicVine. Match series from the Library page first.")
+		return
+	}
+
+	job, err := h.sched.Submit(model.JobTypeMetadataRefresh)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "JOB_SUBMIT_FAILED", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"job_id":         job.ID,
+		"tracked_series": len(tracked),
+		"matched_series": matchedCount,
+		"message":        "Refreshing tracked series metadata from ComicVine",
+	})
+}
+
+// TrackSeries tracks a series from the pull list by its ComicVine volume ID.
+// This creates a local series (if needed), populates issues, and marks it tracked.
+// Body: { "series_cv_id": 12345 }
+func (h *CalendarHandler) TrackSeries(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		SeriesCVID int `json:"series_cv_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	if body.SeriesCVID == 0 {
+		writeError(w, http.StatusBadRequest, "MISSING_CV_ID", "series_cv_id is required")
+		return
+	}
+
+	series, wantAdded, err := h.metaSvc.TrackFromComicVine(body.SeriesCVID, h.wantListRepo)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "TRACK_FAILED", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"series":          series,
+		"tracked":         true,
+		"want_list_added": wantAdded,
+	})
+}
+
+// WantIssue adds an issue to the want list.
+// Supports two paths:
+//   - By ComicVine ID: { "comicvine_id": 67890, "series_cv_id": 12345 }
+//   - By local issue ID: { "local_issue_id": 42 }
+func (h *CalendarHandler) WantIssue(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ComicVineID  int   `json:"comicvine_id"`
+		SeriesCVID   int   `json:"series_cv_id"`
+		LocalIssueID int64 `json:"local_issue_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+
+	// Path 1: Want by local issue ID (already exists in DB)
+	if body.LocalIssueID > 0 {
+		item, err := h.wantListRepo.Create(body.LocalIssueID, 0, "")
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "WANT_FAILED", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, item)
+		return
+	}
+
+	// Path 2: Want by ComicVine ID (may need to create series/issue first)
+	if body.ComicVineID == 0 {
+		writeError(w, http.StatusBadRequest, "MISSING_ID", "comicvine_id or local_issue_id is required")
+		return
+	}
+
+	item, err := h.metaSvc.WantIssueFromComicVine(body.ComicVineID, body.SeriesCVID, h.wantListRepo)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "WANT_FAILED", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, item)
 }

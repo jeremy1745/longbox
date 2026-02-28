@@ -97,6 +97,7 @@ export interface Issue {
 	description?: string;
 	cover_date?: string;
 	store_date?: string;
+	cover_url?: string;
 	writers?: string;
 	artists?: string;
 	read_status: 'unread' | 'reading' | 'read';
@@ -106,6 +107,19 @@ export interface Issue {
 	series_title?: string;
 	created_at: string;
 	updated_at: string;
+}
+
+export interface CalendarRefreshResponse {
+	job_id: number;
+	tracked_series: number;
+	matched_series: number;
+	message: string;
+}
+
+export interface TrackFromPullListResponse {
+	series: Series;
+	tracked: boolean;
+	want_list_added: number;
 }
 
 // --- Response types ---
@@ -169,6 +183,10 @@ export interface Settings {
 	comicvine_api_key_set: boolean;
 	comicvine_hourly_remaining: number;
 	library_dir: string;
+	pull_list_enabled: boolean;
+	pull_list_day: number;
+	pull_list_hour: number;
+	pull_list_last_run: string;
 }
 
 export interface APIKeyTestResult {
@@ -179,7 +197,7 @@ export interface APIKeyTestResult {
 
 // --- Job types ---
 
-export type JobType = 'scan' | 'metadata_refresh';
+export type JobType = 'scan' | 'metadata_refresh' | 'search' | 'pull_list_search' | 'mylar_metadata';
 export type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
 
 export interface Job {
@@ -228,6 +246,45 @@ export interface WantListResponse {
 export interface CalendarResponse {
 	issues: Issue[];
 	total: number;
+}
+
+export interface PullListIssue {
+	comicvine_id?: number;
+	comicvine_url?: string;
+	series_name: string;
+	series_cv_id?: number;
+	issue_number: string;
+	title?: string;
+	description?: string;
+	store_date: string;
+	cover_date?: string;
+	cover_url?: string;
+	writers?: string;
+	artists?: string;
+	publisher?: string;
+	local_series_id?: number;
+	local_issue_id?: number;
+	has_file: boolean;
+	file_id?: number;
+	tracked: boolean;
+	wanted: boolean;
+}
+
+export interface ReleaseDebugInfo {
+	source: string;
+	walksoftly_count: number;
+	walksoftly_error?: string;
+	cv_fallback_count?: number;
+	local_count: number;
+	total_results: number;
+	tracked_count: number;
+	week_num?: number;
+}
+
+export interface ReleasesResponse {
+	releases: PullListIssue[];
+	total: number;
+	debug?: ReleaseDebugInfo;
 }
 
 // --- File Organization types ---
@@ -287,9 +344,124 @@ export interface ProgressUpdateResponse {
 	read_status: 'unread' | 'reading' | 'read';
 }
 
+// --- Indexer types ---
+
+export interface Indexer {
+	id: number;
+	name: string;
+	url: string;
+	api_key: string;
+	type: 'newznab' | 'nzbhydra2' | 'prowlarr';
+	priority: number;
+	enabled: boolean;
+	categories: string;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface IndexerListResponse {
+	indexers: Indexer[];
+}
+
+export interface IndexerTestResult {
+	success: boolean;
+	message: string;
+}
+
+// --- Download Client types ---
+
+export interface DownloadClient {
+	id: number;
+	name: string;
+	type: 'sabnzbd';
+	url: string;
+	api_key: string;
+	category: string;
+	priority: number;
+	enabled: boolean;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface DownloadClientListResponse {
+	download_clients: DownloadClient[];
+}
+
+export interface DownloadClientTestResult {
+	success: boolean;
+	message: string;
+	version?: string;
+}
+
+// --- Search Result types ---
+
+export interface SearchResult {
+	title: string;
+	nzb_url: string;
+	guid: string;
+	size: number;
+	publish_date: string;
+	grabs: number;
+	indexer_name: string;
+	indexer_id: number;
+	score: number;
+}
+
+export interface SearchResponse {
+	results: SearchResult[];
+	total: number;
+}
+
+// --- Download History types ---
+
+export type DownloadStatus = 'grabbed' | 'downloading' | 'completed' | 'failed' | 'import_failed';
+
+export interface DownloadHistoryItem {
+	id: number;
+	issue_id?: number;
+	indexer_id?: number;
+	download_client_id?: number;
+	nzb_name: string;
+	nzb_url: string;
+	external_id: string;
+	status: DownloadStatus;
+	size: number;
+	message?: string;
+	grabbed_at: string;
+	completed_at?: string;
+	series_title?: string;
+	issue_number?: string;
+	indexer_name?: string;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface DownloadHistoryResponse {
+	items: DownloadHistoryItem[];
+	total: number;
+	page: number;
+	per_page: number;
+}
+
 // --- SSE Event types ---
 
 export interface SSEEvent {
 	type: string;
 	data: any;
+}
+
+export interface WriteMetadataResult {
+	file_id: number;
+	file_name: string;
+	success: boolean;
+	message: string;
+	skipped: boolean;
+}
+
+export interface WriteMetadataResponse {
+	results: WriteMetadataResult[];
+	total: number;
+	succeeded: number;
+	failed: number;
+	skipped: number;
 }

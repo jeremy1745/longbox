@@ -17,14 +17,21 @@ func NewRouter(
 	issueRepo *repository.IssueRepo,
 	jobRepo *repository.JobRepo,
 	wantListRepo *repository.WantListRepo,
+	indexerRepo *repository.IndexerRepo,
+	dlClientRepo *repository.DownloadClientRepo,
+	dlHistoryRepo *repository.DownloadHistoryRepo,
 	librarySvc *service.LibraryService,
 	coverSvc *service.CoverService,
 	metaSvc *service.MetadataService,
 	organizeSvc *service.FileOrganizerService,
 	readerSvc *service.ReaderService,
+	searchSvc *service.SearchService,
+	metaWriterSvc *service.MetadataWriterService,
+	mylarSvc *service.MylarMetadataService,
 	sched *scheduler.Scheduler,
 	eventBus *scheduler.EventBus,
 	watcher *scanner.Watcher,
+	settingRepo *repository.SettingRepo,
 	frontendFS fs.FS,
 ) http.Handler {
 	r := chi.NewRouter()
@@ -42,17 +49,23 @@ func NewRouter(
 	seriesH := NewSeriesHandler(seriesRepo, issueRepo, wantListRepo)
 	issueH := NewIssueHandler(issueRepo)
 	metaH := NewMetadataHandler(metaSvc)
-	settingsH := NewSettingsHandler(metaSvc, librarySvc, watcher, sched)
+	settingsH := NewSettingsHandler(metaSvc, librarySvc, watcher, sched, settingRepo)
 	jobH := NewJobHandler(jobRepo, sched, eventBus)
 	wantListH := NewWantListHandler(wantListRepo)
-	calendarH := NewCalendarHandler(issueRepo)
+	calendarH := NewCalendarHandler(issueRepo, seriesRepo, wantListRepo, metaSvc, sched)
 	organizeH := NewOrganizeHandler(organizeSvc, librarySvc)
 	readerH := NewReaderHandler(readerSvc, fileRepo, issueRepo)
+	indexerH := NewIndexerHandler(indexerRepo)
+	dlClientH := NewDownloadClientHandler(dlClientRepo)
+	searchH := NewSearchHandler(searchSvc, dlHistoryRepo, sched)
+	metaWriterH := NewMetadataWriterHandler(metaWriterSvc)
+	mylarH := NewMylarMetadataHandler(seriesRepo, sched)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		// Library
 		r.Post("/library/scan", libraryH.Scan)
 		r.Get("/library/stats", libraryH.Stats)
+		r.Post("/library/write-mylar-metadata", mylarH.WriteAll)
 
 		// Series
 		r.Get("/series", seriesH.List)
@@ -83,6 +96,7 @@ func NewRouter(
 		r.Put("/settings/comicvine-api-key", settingsH.UpdateAPIKey)
 		r.Post("/settings/comicvine-api-key/test", settingsH.TestAPIKey)
 		r.Put("/settings/library-dir", settingsH.UpdateLibraryDir)
+		r.Put("/settings/pull-list-schedule", settingsH.UpdatePullListSchedule)
 
 		// Want List
 		r.Get("/want-list", wantListH.List)
@@ -90,8 +104,12 @@ func NewRouter(
 		r.Put("/want-list/{id}", wantListH.Update)
 		r.Delete("/want-list/{id}", wantListH.Remove)
 
-		// Calendar
+		// Calendar / Pull List
 		r.Get("/calendar", calendarH.Upcoming)
+		r.Get("/calendar/releases", calendarH.Releases)
+		r.Post("/calendar/refresh", calendarH.RefreshTracked)
+		r.Post("/calendar/track", calendarH.TrackSeries)
+		r.Post("/calendar/want", calendarH.WantIssue)
 
 		// File Organization
 		r.Get("/library/organize/template", organizeH.GetTemplate)
@@ -112,6 +130,33 @@ func NewRouter(
 
 		// SSE Events
 		r.Get("/events", jobH.Events)
+
+		// Indexers
+		r.Get("/indexers", indexerH.List)
+		r.Post("/indexers", indexerH.Create)
+		r.Put("/indexers/{id}", indexerH.Update)
+		r.Delete("/indexers/{id}", indexerH.Delete)
+		r.Post("/indexers/{id}/test", indexerH.Test)
+
+		// Download Clients
+		r.Get("/download-clients", dlClientH.List)
+		r.Post("/download-clients", dlClientH.Create)
+		r.Put("/download-clients/{id}", dlClientH.Update)
+		r.Delete("/download-clients/{id}", dlClientH.Delete)
+		r.Post("/download-clients/{id}/test", dlClientH.Test)
+
+		// Metadata Writing (ComicInfo.xml)
+		r.Post("/files/{id}/write-metadata", metaWriterH.WriteToFile)
+		r.Post("/files/write-metadata", metaWriterH.WriteToFiles)
+		r.Post("/issues/{id}/write-metadata", metaWriterH.WriteToIssue)
+		r.Post("/series/{id}/write-metadata", metaWriterH.WriteToSeries)
+
+		// Search & Downloads
+		r.Get("/search/issue/{id}", searchH.SearchIssue)
+		r.Get("/search", searchH.SearchQuery)
+		r.Post("/search/grab", searchH.Grab)
+		r.Post("/search/pull-list", searchH.TriggerPullListSearch)
+		r.Get("/downloads", searchH.DownloadHistory)
 	})
 
 	// Serve embedded frontend (SPA with fallback)

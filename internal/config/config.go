@@ -19,7 +19,7 @@ type Config struct {
 func defaults() Config {
 	home, _ := os.UserHomeDir()
 	return Config{
-		Port:       8080,
+		Port:       22526,
 		LibraryDir: filepath.Join(home, "Comics"),
 		DataDir:    filepath.Join(home, ".longbox"),
 		LogLevel:   "info",

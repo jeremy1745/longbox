@@ -61,6 +61,16 @@ func (ci *ComicInfo) Artists() string {
 	return strings.Join(artists, ", ")
 }
 
+// MarshalToXML serializes ComicInfo to pretty-printed XML with the standard header.
+func (ci *ComicInfo) MarshalToXML() ([]byte, error) {
+	ci.XMLName = xml.Name{Local: "ComicInfo"}
+	output, err := xml.MarshalIndent(ci, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshaling ComicInfo.xml: %w", err)
+	}
+	return append([]byte(xml.Header), output...), nil
+}
+
 // ReadComicInfo attempts to find and parse ComicInfo.xml from an archive.
 // Returns nil if no ComicInfo.xml is found.
 func ReadComicInfo(a Archive) (*ComicInfo, error) {
