@@ -283,7 +283,7 @@ func (s *SearchService) reattachAPIKey(nzbURL string) (string, error) {
 		}
 		if strings.ToLower(idxURL.Hostname()) == nzbHost {
 			q := parsed.Query()
-			if q.Get("apikey") == "" && idx.APIKey != "" && idx.Type != model.IndexerTypeProwlarr {
+			if q.Get("apikey") == "" && idx.APIKey != "" {
 				q.Set("apikey", idx.APIKey)
 				parsed.RawQuery = q.Encode()
 			}
