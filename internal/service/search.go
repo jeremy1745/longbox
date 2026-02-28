@@ -72,16 +72,28 @@ func (s *SearchService) SearchForIssue(ctx context.Context, issueID int64) ([]Sc
 
 	queries := buildSearchQueries(series, issue)
 
-	// Run all query variants and merge results
+	// Run all query variants concurrently and merge results
+	type queryResult struct {
+		results []newznab.SearchResult
+	}
+	ch := make(chan queryResult, len(queries))
+	for _, q := range queries {
+		go func(query string) {
+			results, err := s.searchAllIndexers(ctx, query)
+			if err != nil {
+				slog.Warn("search query failed", "query", query, "error", err)
+				ch <- queryResult{}
+				return
+			}
+			ch <- queryResult{results: results}
+		}(q)
+	}
+
 	seen := make(map[string]bool)
 	var allResults []newznab.SearchResult
-	for _, q := range queries {
-		results, err := s.searchAllIndexers(ctx, q)
-		if err != nil {
-			slog.Warn("search query failed", "query", q, "error", err)
-			continue
-		}
-		for _, r := range results {
+	for range queries {
+		qr := <-ch
+		for _, r := range qr.results {
 			if !seen[r.GUID] {
 				seen[r.GUID] = true
 				allResults = append(allResults, r)

@@ -82,6 +82,9 @@ func main() {
 	coverSvc := service.NewCoverService(cfg.CoversDir(), fileRepo)
 	librarySvc := service.NewLibraryService(cfg.LibraryDir, fileRepo, seriesRepo, issueRepo, coverSvc)
 	metaSvc := service.NewMetadataService(cvClient, wsClient, seriesRepo, issueRepo, publisherRepo, wantListRepo, settingRepo, cfg.ComicVineAPIKey, cfg.LibraryDir)
+	if err := metaSvc.EnsureAPIKey(); err != nil {
+		slog.Warn("failed to load ComicVine API key from settings", "error", err)
+	}
 	readerSvc := service.NewReaderService()
 	organizeSvc := service.NewFileOrganizerService(fileRepo, issueRepo, seriesRepo, settingRepo)
 	metaWriterSvc := service.NewMetadataWriterService(fileRepo, issueRepo, seriesRepo)
