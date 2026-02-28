@@ -250,6 +250,59 @@ func (r *WantListRepo) ListWantedIssueIDs() (map[int64]bool, error) {
 	return wanted, nil
 }
 
+// ListSearchable returns want list items eligible for search.
+// Items are excluded if they have a linked comic file, are from an untracked series,
+// have an active download, or were searched within the last cooldownHours.
+// Results are ordered by priority (desc), then least-recently-searched first,
+// and capped at 50 items per run.
+func (r *WantListRepo) ListSearchable(cooldownHours int) ([]model.WantListItem, error) {
+	rows, err := r.read.Query(`
+		SELECT w.id, w.issue_id, w.priority, COALESCE(w.notes,''), w.added_at,
+			i.issue_number, i.series_id, COALESCE(s.title,'') as series_title,
+			COALESCE(i.cover_url,'') as cover_url,
+			COALESCE(i.store_date,'') as store_date,
+			COALESCE(i.cover_date,'') as cover_date
+		FROM want_list w
+		JOIN issues i ON w.issue_id = i.id
+		JOIN series s ON i.series_id = s.id
+		LEFT JOIN comic_files cf ON cf.issue_id = w.issue_id
+		WHERE cf.id IS NULL
+		AND s.tracked = 1
+		AND w.issue_id NOT IN (
+			SELECT issue_id FROM download_history
+			WHERE status IN ('grabbed', 'downloading', 'completed')
+		)
+		AND (w.last_searched_at IS NULL
+			OR w.last_searched_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-' || ? || ' hours'))
+		ORDER BY w.priority DESC, w.last_searched_at ASC NULLS FIRST
+		LIMIT 50`, cooldownHours)
+	if err != nil {
+		return nil, fmt.Errorf("listing searchable want list items: %w", err)
+	}
+	defer rows.Close()
+
+	var items []model.WantListItem
+	for rows.Next() {
+		item, err := scanWantListItemRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, *item)
+	}
+	return items, nil
+}
+
+// MarkSearched updates the last_searched_at timestamp for a want list item.
+func (r *WantListRepo) MarkSearched(issueID int64) error {
+	_, err := r.write.Exec(`
+		UPDATE want_list SET last_searched_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+		WHERE issue_id = ?`, issueID)
+	if err != nil {
+		return fmt.Errorf("marking want list item as searched: %w", err)
+	}
+	return nil
+}
+
 func scanWantListItem(row *sql.Row) (*model.WantListItem, error) {
 	item := &model.WantListItem{}
 	err := row.Scan(

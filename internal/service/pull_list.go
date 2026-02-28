@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 
+	"github.com/jeremy/longbox/internal/model"
 	"github.com/jeremy/longbox/internal/repository"
 )
 
@@ -162,90 +164,111 @@ func (s *PullListService) RunWeeklySearch(
 	return result, nil
 }
 
-// SearchMissing is a lightweight periodic search that refreshes the pull list
-// (DB-only, no ComicVine API calls) and searches for all wanted issues.
-// Designed to run frequently (e.g. every 10 minutes) to fill gaps as NZBs appear.
+// SearchMissing searches for wanted issues that haven't been searched recently.
+// Uses a 6-hour cooldown to avoid re-querying indexers, caps at 50 items per run,
+// and searches with 3 concurrent workers.
 func (s *PullListService) SearchMissing(
 	ctx context.Context,
 	progress func(processed, total int, message string),
 ) (*PullListResult, error) {
-	// Step 1: Refresh the pull list (DB-only — adds missing issues to want list)
-	if progress != nil {
-		progress(0, 0, "Refreshing pull list...")
-	}
-	if err := s.RefreshPullList(); err != nil {
-		slog.Warn("failed to refresh pull list", "error", err)
-	}
-
-	// Step 2: Load all want list items
-	items, _, err := s.wantListRepo.List(1, 10000, "priority", "desc")
+	// Step 1: Remove want list items for issues that now have files
+	removed, err := s.wantListRepo.RemoveFulfilled()
 	if err != nil {
-		return nil, fmt.Errorf("listing want list: %w", err)
+		slog.Warn("failed to remove fulfilled want list items", "error", err)
+	} else if removed > 0 {
+		slog.Info("removed fulfilled issues from want list", "count", removed)
 	}
 
-	// Step 3: Filter to items without an active download
-	type searchTarget struct {
-		issueID int64
-		label   string
-	}
-	var targets []searchTarget
-
-	for _, item := range items {
-		exists, err := s.dlHistoryRepo.ExistsForIssue(item.IssueID)
-		if err != nil {
-			slog.Warn("error checking download history", "issue_id", item.IssueID, "error", err)
-			continue
-		}
-		if exists {
-			continue
-		}
-		label := fmt.Sprintf("%s #%s", item.SeriesTitle, item.IssueNumber)
-		targets = append(targets, searchTarget{issueID: item.IssueID, label: label})
+	// Step 2: Get searchable items (cooldown, no file, tracked, no active download, limit 50)
+	items, err := s.wantListRepo.ListSearchable(6)
+	if err != nil {
+		return nil, fmt.Errorf("listing searchable want list items: %w", err)
 	}
 
 	result := &PullListResult{
-		IssuesSearched: len(targets),
+		IssuesSearched: len(items),
 	}
-	total := len(targets)
 
-	if total == 0 {
+	if len(items) == 0 {
 		if progress != nil {
 			progress(0, 0, "No wanted issues to search for")
 		}
 		return result, nil
 	}
 
+	total := len(items)
 	slog.Info("starting missing issue search", "targets", total)
 
-	// Step 4: Search and grab each target
-	for i, target := range targets {
-		select {
-		case <-ctx.Done():
-			return result, ctx.Err()
-		default:
-		}
+	// Step 3: Search concurrently with 3 workers
+	type workerResult struct {
+		grabbed *model.DownloadHistoryItem
+		label   string
+		issueID int64
+		err     error
+	}
 
+	targets := make(chan model.WantListItem, total)
+	results := make(chan workerResult, total)
+
+	var wg sync.WaitGroup
+	const numWorkers = 3
+	for w := 0; w < numWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for item := range targets {
+				if ctx.Err() != nil {
+					return
+				}
+				label := fmt.Sprintf("%s #%s", item.SeriesTitle, item.IssueNumber)
+				grabbed, err := s.searchSvc.AutoSearchAndGrab(ctx, item.IssueID)
+				_ = s.wantListRepo.MarkSearched(item.IssueID)
+				results <- workerResult{grabbed: grabbed, label: label, issueID: item.IssueID, err: err}
+			}
+		}()
+	}
+
+	// Feed targets
+	go func() {
+		for _, item := range items {
+			targets <- item
+		}
+		close(targets)
+	}()
+
+	// Close results when all workers finish
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Collect results
+	var mu sync.Mutex
+	processed := 0
+	for r := range results {
+		processed++
 		if progress != nil {
-			progress(i, total, fmt.Sprintf("Searching for %s", target.label))
+			mu.Lock()
+			progress(processed, total, fmt.Sprintf("Searched for %s", r.label))
+			mu.Unlock()
 		}
 
-		grabbed, err := s.searchSvc.AutoSearchAndGrab(ctx, target.issueID)
-		if err != nil {
+		if r.err != nil {
 			slog.Warn("auto-grab failed",
-				"issue_id", target.issueID,
-				"label", target.label,
-				"error", err,
+				"issue_id", r.issueID,
+				"label", r.label,
+				"error", r.err,
 			)
 			result.Failed++
 			continue
 		}
 
-		if grabbed != nil {
+		if r.grabbed != nil {
 			result.Grabbed++
 			result.ResultsFound++
 			slog.Info("auto-grabbed missing issue",
-				"label", target.label,
-				"nzb", grabbed.NZBName,
+				"label", r.label,
+				"nzb", r.grabbed.NZBName,
 			)
 		} else {
 			result.Skipped++
