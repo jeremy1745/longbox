@@ -1,6 +1,7 @@
 package newznab
 
 import (
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -28,11 +29,15 @@ func NewClient(baseURL, apiKey string, isProwlarr bool) *Client {
 	if u != "" && !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
 		u = "https://" + u
 	}
+	timeout := 30 * time.Second
+	if isProwlarr {
+		timeout = 120 * time.Second // Prowlarr fans out to multiple indexers
+	}
 	return &Client{
 		baseURL:    u,
 		apiKey:     apiKey,
 		isProwlarr: isProwlarr,
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		httpClient: &http.Client{Timeout: timeout},
 		limiter:    NewRateLimiter(5),
 	}
 }
@@ -40,6 +45,10 @@ func NewClient(baseURL, apiKey string, isProwlarr bool) *Client {
 // Search queries the indexer for NZBs matching the query within the given categories.
 func (c *Client) Search(query string, categories []string) ([]SearchResult, error) {
 	c.limiter.Wait()
+
+	if c.isProwlarr {
+		return c.searchProwlarr(query, categories)
+	}
 
 	params := url.Values{}
 	params.Set("t", "search")
@@ -93,9 +102,7 @@ func (c *Client) Search(query string, categories []string) ([]SearchResult, erro
 		// Use link as NZB URL; if empty, construct from GUID
 		if result.NZBURL == "" && result.GUID != "" {
 			result.NZBURL = fmt.Sprintf("%s/api?t=get&id=%s", c.baseURL, result.GUID)
-			if !c.isProwlarr {
-				result.NZBURL += "&apikey=" + c.apiKey
-			}
+			result.NZBURL += "&apikey=" + c.apiKey
 		}
 
 		results = append(results, result)
@@ -105,6 +112,75 @@ func (c *Client) Search(query string, categories []string) ([]SearchResult, erro
 		"query", query,
 		"results", len(results),
 		"total", resp.Channel.Response.Total,
+	)
+
+	return results, nil
+}
+
+// searchProwlarr uses Prowlarr's native JSON API to search across all its indexers.
+func (c *Client) searchProwlarr(query string, categories []string) ([]SearchResult, error) {
+	params := url.Values{}
+	params.Set("query", query)
+	params.Set("type", "search")
+	params.Set("limit", "100")
+	for _, cat := range categories {
+		for _, c := range strings.Split(cat, ",") {
+			c = strings.TrimSpace(c)
+			if c != "" {
+				params.Add("categories", c)
+			}
+		}
+	}
+
+	reqURL := fmt.Sprintf("%s/api/v1/search?%s", c.baseURL, params.Encode())
+
+	req, err := http.NewRequest("GET", reqURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating prowlarr request: %w", err)
+	}
+	req.Header.Set("User-Agent", "LongBox/1.0 (Comic Library Manager)")
+	req.Header.Set("X-Api-Key", c.apiKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("prowlarr search request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("prowlarr returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var prowlarrResults []prowlarrSearchResult
+	if err := json.NewDecoder(resp.Body).Decode(&prowlarrResults); err != nil {
+		return nil, fmt.Errorf("parsing prowlarr response: %w", err)
+	}
+
+	results := make([]SearchResult, 0, len(prowlarrResults))
+	for _, pr := range prowlarrResults {
+		result := SearchResult{
+			Title:   pr.Title,
+			NZBURL:  pr.DownloadURL,
+			GUID:    pr.GUID,
+			Size:    pr.Size,
+			Grabs:   pr.Grabs,
+			InfoURL: pr.InfoURL,
+		}
+		if pr.PublishDate != "" {
+			if t, err := time.Parse(time.RFC3339, pr.PublishDate); err == nil {
+				result.PublishDate = t
+			}
+		}
+		if len(pr.Categories) > 0 {
+			result.Category = pr.Categories[0].Name
+		}
+		results = append(results, result)
+	}
+
+	slog.Debug("prowlarr search complete",
+		"query", query,
+		"results", len(results),
 	)
 
 	return results, nil

@@ -57,8 +57,28 @@ type SearchResult struct {
 	Category    string    `json:"category"`
 	Grabs       int       `json:"grabs"`
 	GUID        string    `json:"guid"`
+	InfoURL     string    `json:"info_url,omitempty"`
 	IndexerName string    `json:"indexer_name"`
 	IndexerID   int64     `json:"indexer_id"`
+}
+
+// prowlarrSearchResult maps the JSON response from Prowlarr's native /api/v1/search endpoint.
+type prowlarrSearchResult struct {
+	GUID        string             `json:"guid"`
+	Title       string             `json:"title"`
+	Size        int64              `json:"size"`
+	Grabs       int                `json:"grabs"`
+	PublishDate string             `json:"publishDate"`
+	DownloadURL string             `json:"downloadUrl"`
+	InfoURL     string             `json:"infoUrl"`
+	IndexerID   int                `json:"indexerId"`
+	Indexer     string             `json:"indexer"`
+	Categories  []prowlarrCategory `json:"categories"`
+}
+
+type prowlarrCategory struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
 }
 
 // CapsResponse wraps the Newznab capabilities XML response (used for testing connections).
