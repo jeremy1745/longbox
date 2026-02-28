@@ -254,6 +254,33 @@ func (h *SettingsHandler) UpdatePullListSchedule(w http.ResponseWriter, r *http.
 	})
 }
 
+// UpdateAutoSearch saves the auto-search-on-add setting.
+// PUT /api/v1/settings/auto-search
+// Body: {"enabled": true}
+func (h *SettingsHandler) UpdateAutoSearch(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+
+	val := "false"
+	if req.Enabled {
+		val = "true"
+	}
+	if err := h.settingRepo.Set("auto_search_on_add", val); err != nil {
+		writeError(w, http.StatusInternalServerError, "SAVE_FAILED", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":             "updated",
+		"auto_search_on_add": req.Enabled,
+	})
+}
+
 // slackSettingKeys is the whitelist of allowed Slack setting keys.
 var slackSettingKeys = map[string]bool{
 	"slack_enabled":                              true,

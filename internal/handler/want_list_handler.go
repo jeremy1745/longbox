@@ -2,19 +2,27 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jeremy/longbox/internal/repository"
+	"github.com/jeremy/longbox/internal/service"
 )
 
 type WantListHandler struct {
 	wantListRepo *repository.WantListRepo
+	searchSvc    *service.SearchService
+	settingRepo  *repository.SettingRepo
 }
 
-func NewWantListHandler(wantListRepo *repository.WantListRepo) *WantListHandler {
-	return &WantListHandler{wantListRepo: wantListRepo}
+func NewWantListHandler(wantListRepo *repository.WantListRepo, searchSvc *service.SearchService, settingRepo *repository.SettingRepo) *WantListHandler {
+	return &WantListHandler{
+		wantListRepo: wantListRepo,
+		searchSvc:    searchSvc,
+		settingRepo:  settingRepo,
+	}
 }
 
 func (h *WantListHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -64,6 +72,8 @@ func (h *WantListHandler) Add(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "ADD_FAILED", err.Error())
 		return
 	}
+
+	triggerAutoSearch(h.searchSvc, h.settingRepo, body.IssueID, fmt.Sprintf("want-list issue %d", body.IssueID))
 
 	writeJSON(w, http.StatusCreated, item)
 }

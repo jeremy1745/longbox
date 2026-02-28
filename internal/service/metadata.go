@@ -1113,6 +1113,10 @@ func (s *MetadataService) GetSettings() map[string]interface{} {
 	lastRun, _ := s.settingRepo.Get("pull_list_last_run")
 	settings["pull_list_last_run"] = lastRun
 
+	// Auto-search on want list add
+	autoSearch, _ := s.settingRepo.Get("auto_search_on_add")
+	settings["auto_search_on_add"] = autoSearch == "true"
+
 	return settings
 }
 

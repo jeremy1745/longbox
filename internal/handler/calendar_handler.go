@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/jeremy/longbox/internal/model"
@@ -16,6 +17,8 @@ type CalendarHandler struct {
 	wantListRepo *repository.WantListRepo
 	metaSvc      *service.MetadataService
 	sched        *scheduler.Scheduler
+	searchSvc    *service.SearchService
+	settingRepo  *repository.SettingRepo
 }
 
 func NewCalendarHandler(
@@ -24,6 +27,8 @@ func NewCalendarHandler(
 	wantListRepo *repository.WantListRepo,
 	metaSvc *service.MetadataService,
 	sched *scheduler.Scheduler,
+	searchSvc *service.SearchService,
+	settingRepo *repository.SettingRepo,
 ) *CalendarHandler {
 	return &CalendarHandler{
 		issueRepo:    issueRepo,
@@ -31,6 +36,8 @@ func NewCalendarHandler(
 		wantListRepo: wantListRepo,
 		metaSvc:      metaSvc,
 		sched:        sched,
+		searchSvc:    searchSvc,
+		settingRepo:  settingRepo,
 	}
 }
 
@@ -175,6 +182,7 @@ func (h *CalendarHandler) WantIssue(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "WANT_FAILED", err.Error())
 			return
 		}
+		triggerAutoSearch(h.searchSvc, h.settingRepo, body.LocalIssueID, fmt.Sprintf("calendar-want issue %d", body.LocalIssueID))
 		writeJSON(w, http.StatusCreated, item)
 		return
 	}
@@ -190,6 +198,8 @@ func (h *CalendarHandler) WantIssue(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "WANT_FAILED", err.Error())
 		return
 	}
+
+	triggerAutoSearch(h.searchSvc, h.settingRepo, item.IssueID, fmt.Sprintf("calendar-want cv-issue %d", body.ComicVineID))
 
 	writeJSON(w, http.StatusCreated, item)
 }
