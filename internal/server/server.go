@@ -13,17 +13,31 @@ import (
 
 type Server struct {
 	httpServer *http.Server
+	shutdownCh chan struct{}
 }
 
-func New(port int, handler http.Handler) *Server {
+func New(port int) *Server {
 	return &Server{
 		httpServer: &http.Server{
 			Addr:         fmt.Sprintf(":%d", port),
-			Handler:      handler,
 			ReadTimeout:  15 * time.Second,
 			WriteTimeout: 60 * time.Second,
 			IdleTimeout:  60 * time.Second,
 		},
+		shutdownCh: make(chan struct{}),
+	}
+}
+
+func (s *Server) SetHandler(handler http.Handler) {
+	s.httpServer.Handler = handler
+}
+
+func (s *Server) RequestShutdown() {
+	select {
+	case <-s.shutdownCh:
+		// already closed
+	default:
+		close(s.shutdownCh)
 	}
 }
 
@@ -47,6 +61,8 @@ func (s *Server) Start() error {
 		return fmt.Errorf("server error: %w", err)
 	case sig := <-stop:
 		slog.Info("shutdown signal received", "signal", sig)
+	case <-s.shutdownCh:
+		slog.Info("shutdown requested via API")
 	}
 
 	// Graceful shutdown with timeout

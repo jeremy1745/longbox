@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"io/fs"
 	"net/http"
 	"time"
@@ -11,6 +12,11 @@ import (
 	"github.com/jeremy/longbox/internal/scheduler"
 	"github.com/jeremy/longbox/internal/service"
 )
+
+// ShutdownRequester is implemented by the server to allow API-triggered shutdown.
+type ShutdownRequester interface {
+	RequestShutdown()
+}
 
 func NewRouter(
 	fileRepo *repository.FileRepo,
@@ -34,6 +40,7 @@ func NewRouter(
 	watcher *scanner.Watcher,
 	settingRepo *repository.SettingRepo,
 	authSvc *service.AuthService,
+	shutdownReq ShutdownRequester,
 	frontendFS fs.FS,
 ) http.Handler {
 	r := chi.NewRouter()
@@ -83,12 +90,23 @@ func NewRouter(
 			r.Get("/auth/me", authH.Me)
 			r.Put("/auth/users/{id}/password", authH.ChangePassword)
 
-			// Admin-only auth routes
+			// Admin-only routes
 			r.Group(func(r chi.Router) {
 				r.Use(AdminOnly)
 				r.Get("/auth/users", authH.ListUsers)
 				r.Post("/auth/users", authH.CreateUser)
 				r.Delete("/auth/users/{id}", authH.DeleteUser)
+				r.Post("/admin/shutdown", func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode(map[string]string{"message": "server is shutting down"})
+					if f, ok := w.(http.Flusher); ok {
+						f.Flush()
+					}
+					go func() {
+						time.Sleep(500 * time.Millisecond)
+						shutdownReq.RequestShutdown()
+					}()
+				})
 			})
 
 			// Library
@@ -135,7 +153,7 @@ func NewRouter(
 			r.Put("/settings/auto-scan", settingsH.UpdateAutoScan)
 			r.Get("/settings/slack", settingsH.GetSlackSettings)
 			r.Put("/settings/slack", settingsH.UpdateSlackSettings)
-			r.Post("/settings/slack/test", settingsH.TestSlackWebhook)
+			r.Post("/settings/slack/test", settingsH.TestSlack)
 
 			// Want List
 			r.Get("/want-list", wantListH.List)

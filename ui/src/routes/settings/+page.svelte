@@ -78,13 +78,18 @@
 	let slackSettings = $state<SlackSettings | null>(null);
 	let slackSaving = $state(false);
 	let slackMessage = $state<string | null>(null);
-	let slackWebhookInput = $state('');
+	let slackTokenInput = $state('');
+	let slackChannelInput = $state('');
 	let slackTesting = $state(false);
 	let slackTestResult = $state<SlackTestResult | null>(null);
 
 	// Mylar3 metadata state
 	let mylarWriting = $state(false);
 	let mylarMessage = $state<string | null>(null);
+
+	// Shutdown state
+	let shutdownConfirming = $state(false);
+	let shutdownTriggered = $state(false);
 
 	const auth = getAuthState();
 
@@ -459,6 +464,7 @@
 	async function loadSlackSettings() {
 		try {
 			slackSettings = await ApiClient.get<SlackSettings>('/settings/slack');
+			slackChannelInput = slackSettings.slack_channel || '';
 		} catch { /* ignore */ }
 	}
 
@@ -476,15 +482,15 @@
 		}
 	}
 
-	async function saveSlackWebhook() {
-		if (!slackWebhookInput.trim()) return;
+	async function saveSlackToken() {
+		if (!slackTokenInput.trim()) return;
 		slackSaving = true;
 		slackMessage = null;
 		try {
-			await ApiClient.put('/settings/slack', { slack_webhook_url: slackWebhookInput.trim() });
-			slackWebhookInput = '';
+			await ApiClient.put('/settings/slack', { slack_bot_token: slackTokenInput.trim() });
+			slackTokenInput = '';
 			await loadSlackSettings();
-			slackMessage = 'Webhook URL saved!';
+			slackMessage = 'Bot token saved!';
 		} catch (e) {
 			slackMessage = e instanceof Error ? e.message : 'Save failed';
 		} finally {
@@ -492,7 +498,21 @@
 		}
 	}
 
-	async function testSlackWebhook() {
+	async function saveSlackChannel() {
+		slackSaving = true;
+		slackMessage = null;
+		try {
+			await ApiClient.put('/settings/slack', { slack_channel: slackChannelInput.trim() });
+			await loadSlackSettings();
+			slackMessage = 'Channel saved!';
+		} catch (e) {
+			slackMessage = e instanceof Error ? e.message : 'Save failed';
+		} finally {
+			slackSaving = false;
+		}
+	}
+
+	async function testSlack() {
 		slackTesting = true;
 		slackTestResult = null;
 		try {
@@ -571,6 +591,12 @@
 		} catch (e) {
 			passwordMessage = e instanceof Error ? e.message : 'Failed to change password';
 		}
+	}
+
+	async function shutdownServer() {
+		shutdownTriggered = true;
+		shutdownConfirming = false;
+		await ApiClient.shutdownServer();
 	}
 
 	$effect(() => {
@@ -1368,34 +1394,54 @@
 				</div>
 
 				{#if slackSettings?.slack_enabled}
-					<!-- Webhook URL -->
+					<!-- Bot Token -->
 					<div class="space-y-2">
-						<label class="text-sm font-medium text-gray-300">Webhook URL</label>
+						<label class="text-sm font-medium text-gray-300">Bot Token</label>
 						<div class="flex gap-2">
 							<input
 								type="password"
-								bind:value={slackWebhookInput}
-								placeholder={slackSettings?.slack_webhook_set ? '••••••••••••' : 'https://hooks.slack.com/services/...'}
+								bind:value={slackTokenInput}
+								placeholder={slackSettings?.slack_token_set ? '••••••••••••' : 'xoxb-...'}
 								class="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-gray-100 placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-amber-500"
 							/>
 							<button
-								onclick={saveSlackWebhook}
-								disabled={slackSaving || !slackWebhookInput.trim()}
+								onclick={saveSlackToken}
+								disabled={slackSaving || !slackTokenInput.trim()}
 								class="px-4 py-2 bg-amber-500 hover:bg-amber-600 disabled:bg-gray-600 disabled:text-gray-400 text-gray-900 text-sm font-semibold rounded transition-colors"
 							>
 								Save
 							</button>
 						</div>
-						{#if slackSettings?.slack_webhook_set}
+						{#if slackSettings?.slack_token_set}
 							<p class="text-xs text-green-400">Configured</p>
 						{/if}
 					</div>
 
-					<!-- Test button -->
-					{#if slackSettings?.slack_webhook_set}
+					<!-- Channel -->
+					<div class="space-y-2">
+						<label class="text-sm font-medium text-gray-300">Channel</label>
+						<div class="flex gap-2">
+							<input
+								type="text"
+								bind:value={slackChannelInput}
+								placeholder="#longbox or C01234567"
+								class="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-gray-100 placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-amber-500"
+							/>
+							<button
+								onclick={saveSlackChannel}
+								disabled={slackSaving}
+								class="px-4 py-2 bg-amber-500 hover:bg-amber-600 disabled:bg-gray-600 disabled:text-gray-400 text-gray-900 text-sm font-semibold rounded transition-colors"
+							>
+								Save
+							</button>
+						</div>
+					</div>
+
+					<!-- Test button + per-event toggles -->
+					{#if slackSettings?.slack_token_set && slackSettings?.slack_channel}
 						<div class="flex items-center gap-3">
 							<button
-								onclick={testSlackWebhook}
+								onclick={testSlack}
 								disabled={slackTesting}
 								class="px-4 py-2 bg-gray-600 hover:bg-gray-500 disabled:bg-gray-700 disabled:text-gray-500 text-gray-100 text-sm rounded transition-colors"
 							>
@@ -1548,6 +1594,38 @@
 				{/if}
 			{:else}
 				<p class="text-sm text-gray-400">Authentication is enabled. Contact an admin to manage users.</p>
+			{/if}
+		</div>
+
+		<!-- Server Section -->
+		<div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+			<h2 class="text-xl font-semibold mb-4">Server</h2>
+			{#if shutdownTriggered}
+				<p class="text-sm text-amber-400">Server is shutting down...</p>
+			{:else if shutdownConfirming}
+				<p class="text-sm text-gray-400 mb-4">Are you sure you want to shut down the server? You will lose access to the web UI.</p>
+				<div class="flex gap-2">
+					<button
+						onclick={shutdownServer}
+						class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm font-semibold rounded-lg transition-colors"
+					>
+						Confirm Shutdown
+					</button>
+					<button
+						onclick={() => shutdownConfirming = false}
+						class="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-gray-200 text-sm rounded-lg transition-colors"
+					>
+						Cancel
+					</button>
+				</div>
+			{:else}
+				<p class="text-sm text-gray-400 mb-4">Stop the LongBox server process. You will need to restart it manually.</p>
+				<button
+					onclick={() => shutdownConfirming = true}
+					class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm font-semibold rounded-lg transition-colors"
+				>
+					Shutdown Server
+				</button>
 			{/if}
 		</div>
 

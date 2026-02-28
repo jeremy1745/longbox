@@ -389,7 +389,8 @@ func (h *SettingsHandler) UpdateMissingSearch(w http.ResponseWriter, r *http.Req
 // slackSettingKeys is the whitelist of allowed Slack setting keys.
 var slackSettingKeys = map[string]bool{
 	"slack_enabled":                              true,
-	"slack_webhook_url":                          true,
+	"slack_bot_token":                            true,
+	"slack_channel":                              true,
 	"slack_notify_scan_complete":                 true,
 	"slack_notify_metadata_refresh_complete":     true,
 	"slack_notify_pull_list_search_complete":     true,
@@ -403,15 +404,16 @@ var slackSettingKeys = map[string]bool{
 // GET /api/v1/settings/slack
 func (h *SettingsHandler) GetSlackSettings(w http.ResponseWriter, r *http.Request) {
 	enabled, _ := h.settingRepo.Get("slack_enabled")
-	webhookURL, _ := h.settingRepo.Get("slack_webhook_url")
+	token, _ := h.settingRepo.Get("slack_bot_token")
+	channel, _ := h.settingRepo.Get("slack_channel")
 
-	// Mask the webhook URL
-	maskedURL := ""
-	if webhookURL != "" {
-		if len(webhookURL) > 12 {
-			maskedURL = webhookURL[:12] + strings.Repeat("*", len(webhookURL)-12)
+	// Mask the bot token — show first 8 chars
+	maskedToken := ""
+	if token != "" {
+		if len(token) > 8 {
+			maskedToken = token[:8] + strings.Repeat("*", len(token)-8)
 		} else {
-			maskedURL = strings.Repeat("*", len(webhookURL))
+			maskedToken = strings.Repeat("*", len(token))
 		}
 	}
 
@@ -432,10 +434,11 @@ func (h *SettingsHandler) GetSlackSettings(w http.ResponseWriter, r *http.Reques
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"slack_enabled":     enabled == "true",
-		"slack_webhook_url": maskedURL,
-		"slack_webhook_set": webhookURL != "",
-		"toggles":           toggles,
+		"slack_enabled":   enabled == "true",
+		"slack_bot_token": maskedToken,
+		"slack_token_set": token != "",
+		"slack_channel":   channel,
+		"toggles":         toggles,
 	})
 }
 
@@ -463,21 +466,30 @@ func (h *SettingsHandler) UpdateSlackSettings(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, map[string]interface{}{"status": "updated"})
 }
 
-// TestSlackWebhook sends a test message to the configured Slack webhook.
+// TestSlack sends a test message to the configured Slack channel.
 // POST /api/v1/settings/slack/test
-func (h *SettingsHandler) TestSlackWebhook(w http.ResponseWriter, r *http.Request) {
-	webhookURL, err := h.settingRepo.Get("slack_webhook_url")
-	if err != nil || webhookURL == "" {
+func (h *SettingsHandler) TestSlack(w http.ResponseWriter, r *http.Request) {
+	token, err := h.settingRepo.Get("slack_bot_token")
+	if err != nil || token == "" {
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"success": false,
-			"message": "No Slack webhook URL configured",
+			"message": "No Slack bot token configured",
 		})
 		return
 	}
 
-	client := slack.NewClient(webhookURL)
-	if err := client.TestWebhook(); err != nil {
-		slog.Warn("slack test webhook failed", "error", err)
+	channel, err := h.settingRepo.Get("slack_channel")
+	if err != nil || channel == "" {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"success": false,
+			"message": "No Slack channel configured",
+		})
+		return
+	}
+
+	client := slack.NewClient(token, channel)
+	if err := client.Test(); err != nil {
+		slog.Warn("slack test failed", "error", err)
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"success": false,
 			"message": err.Error(),

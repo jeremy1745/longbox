@@ -66,6 +66,17 @@ export class ApiClient {
 		}
 		return res.json();
 	}
+
+	static async shutdownServer(): Promise<void> {
+		try {
+			await fetch(`${BASE_URL}/admin/shutdown`, {
+				method: 'POST',
+				credentials: 'include'
+			});
+		} catch {
+			// Expected — server may close connection during shutdown
+		}
+	}
 }
 
 // --- Types ---
@@ -475,8 +486,9 @@ export interface DownloadHistoryResponse {
 
 export interface SlackSettings {
 	slack_enabled: boolean;
-	slack_webhook_url: string;
-	slack_webhook_set: boolean;
+	slack_bot_token: string;
+	slack_token_set: boolean;
+	slack_channel: string;
 	toggles: Record<string, boolean>;
 }
 

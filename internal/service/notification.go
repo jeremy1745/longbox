@@ -68,8 +68,12 @@ func (s *NotificationService) handleEvent(evt scheduler.Event) {
 		return
 	}
 
-	webhookURL, err := s.settingRepo.Get("slack_webhook_url")
-	if err != nil || webhookURL == "" {
+	token, err := s.settingRepo.Get("slack_bot_token")
+	if err != nil || token == "" {
+		return
+	}
+	channel, err := s.settingRepo.Get("slack_channel")
+	if err != nil || channel == "" {
 		return
 	}
 
@@ -84,7 +88,7 @@ func (s *NotificationService) handleEvent(evt scheduler.Event) {
 		return
 	}
 
-	client := slack.NewClient(webhookURL)
+	client := slack.NewClient(token, channel)
 	if err := client.Send(slack.Message{Text: message}); err != nil {
 		slog.Warn("failed to send slack notification", "event", evt.Type, "error", err)
 	}

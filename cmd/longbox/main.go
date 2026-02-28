@@ -90,6 +90,12 @@ func main() {
 	if err := metaSvc.EnsureAPIKey(); err != nil {
 		slog.Warn("failed to load ComicVine API key from settings", "error", err)
 	}
+
+	// Load library dir from DB settings (overrides config file)
+	if dbLibDir, err := settingRepo.Get("library_dir"); err == nil && dbLibDir != "" {
+		librarySvc.SetLibraryDir(dbLibDir)
+		slog.Info("loaded library directory from settings", "dir", dbLibDir)
+	}
 	readerSvc := service.NewReaderService()
 	organizeSvc := service.NewFileOrganizerService(fileRepo, issueRepo, seriesRepo, settingRepo)
 	metaWriterSvc := service.NewMetadataWriterService(fileRepo, issueRepo, seriesRepo)
@@ -184,6 +190,9 @@ func main() {
 		}
 	}()
 
+	// Create server (before router so we can pass it for shutdown support)
+	srv := server.New(cfg.Port)
+
 	// Router
 	router := handler.NewRouter(
 		fileRepo,
@@ -207,11 +216,12 @@ func main() {
 		watcher,
 		settingRepo,
 		authSvc,
+		srv,
 		frontendFS,
 	)
 
 	// Start server
-	srv := server.New(cfg.Port, router)
+	srv.SetHandler(router)
 	slog.Info("longbox starting", "port", cfg.Port, "library", cfg.LibraryDir)
 
 	if err := srv.Start(); err != nil {
