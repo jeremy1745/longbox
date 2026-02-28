@@ -4,16 +4,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	Port            int    `yaml:"port"`
-	LibraryDir      string `yaml:"library_dir"`
-	DataDir         string `yaml:"data_dir"`
-	LogLevel        string `yaml:"log_level"`
-	ComicVineAPIKey string `yaml:"comicvine_api_key"`
+	Port                int    `yaml:"port"`
+	LibraryDir          string `yaml:"library_dir"`
+	DataDir             string `yaml:"data_dir"`
+	LogLevel            string `yaml:"log_level"`
+	ComicVineAPIKey     string `yaml:"comicvine_api_key"`
+	SessionLifetimeDays int    `yaml:"session_lifetime_days"`
 }
 
 func defaults() Config {
@@ -55,6 +57,9 @@ func Load(path string) (*Config, error) {
 	if v := os.Getenv("LONGBOX_COMICVINE_API_KEY"); v != "" {
 		cfg.ComicVineAPIKey = v
 	}
+	if v := os.Getenv("LONGBOX_SESSION_LIFETIME_DAYS"); v != "" {
+		fmt.Sscanf(v, "%d", &cfg.SessionLifetimeDays)
+	}
 
 	// Ensure data directory exists
 	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
@@ -74,4 +79,12 @@ func (c *Config) DatabasePath() string {
 
 func (c *Config) CoversDir() string {
 	return filepath.Join(c.DataDir, "covers")
+}
+
+func (c *Config) SessionLifetime() time.Duration {
+	days := c.SessionLifetimeDays
+	if days <= 0 {
+		days = 30
+	}
+	return time.Duration(days) * 24 * time.Hour
 }

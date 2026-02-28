@@ -5,10 +5,19 @@ export interface ApiError {
 	message: string;
 }
 
+function handleResponse(res: Response): void {
+	if (res.status === 401 && typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
+		window.location.href = '/login';
+	}
+}
+
 export class ApiClient {
 	static async get<T>(path: string): Promise<T> {
-		const res = await fetch(`${BASE_URL}${path}`);
+		const res = await fetch(`${BASE_URL}${path}`, {
+			credentials: 'include'
+		});
 		if (!res.ok) {
+			handleResponse(res);
 			const body = await res.json().catch(() => null);
 			throw new Error(body?.error?.message || `HTTP ${res.status}`);
 		}
@@ -19,9 +28,11 @@ export class ApiClient {
 		const res = await fetch(`${BASE_URL}${path}`, {
 			method: 'POST',
 			headers: body ? { 'Content-Type': 'application/json' } : {},
-			body: body ? JSON.stringify(body) : undefined
+			body: body ? JSON.stringify(body) : undefined,
+			credentials: 'include'
 		});
 		if (!res.ok) {
+			handleResponse(res);
 			const data = await res.json().catch(() => null);
 			throw new Error(data?.error?.message || `HTTP ${res.status}`);
 		}
@@ -32,9 +43,11 @@ export class ApiClient {
 		const res = await fetch(`${BASE_URL}${path}`, {
 			method: 'PUT',
 			headers: { 'Content-Type': 'application/json' },
-			body: body ? JSON.stringify(body) : undefined
+			body: body ? JSON.stringify(body) : undefined,
+			credentials: 'include'
 		});
 		if (!res.ok) {
+			handleResponse(res);
 			const data = await res.json().catch(() => null);
 			throw new Error(data?.error?.message || `HTTP ${res.status}`);
 		}
@@ -43,9 +56,11 @@ export class ApiClient {
 
 	static async delete<T>(path: string): Promise<T> {
 		const res = await fetch(`${BASE_URL}${path}`, {
-			method: 'DELETE'
+			method: 'DELETE',
+			credentials: 'include'
 		});
 		if (!res.ok) {
+			handleResponse(res);
 			const data = await res.json().catch(() => null);
 			throw new Error(data?.error?.message || `HTTP ${res.status}`);
 		}

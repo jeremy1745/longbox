@@ -13,6 +13,7 @@
 		type DownloadClientListResponse,
 		type DownloadClientTestResult,
 	} from '$lib/api/client';
+	import { getAuthState, type AuthUser } from '$lib/stores/auth.svelte';
 
 	let settings = $state<Settings | null>(null);
 	let loading = $state(true);
@@ -62,6 +63,17 @@
 	// Mylar3 metadata state
 	let mylarWriting = $state(false);
 	let mylarMessage = $state<string | null>(null);
+
+	const auth = getAuthState();
+
+	// User management state
+	let users = $state<AuthUser[]>([]);
+	let userEditing = $state<{ username: string; password: string } | null>(null);
+	let userSaving = $state(false);
+	let userMessage = $state<string | null>(null);
+	let passwordChanging = $state<number | null>(null);
+	let newPasswordInput = $state('');
+	let passwordMessage = $state<string | null>(null);
 
 	const defaultTemplate = '{series}/{series} #{number|pad:3}.{format}';
 
@@ -373,11 +385,73 @@
 		}
 	}
 
+	// --- User management functions ---
+
+	async function loadUsers() {
+		try {
+			const data = await ApiClient.get<{ users: AuthUser[] }>('/auth/users');
+			users = data.users || [];
+		} catch { /* ignore */ }
+	}
+
+	function newUser() {
+		userEditing = { username: '', password: '' };
+		userMessage = null;
+	}
+
+	async function saveUser() {
+		if (!userEditing) return;
+		userSaving = true;
+		userMessage = null;
+		try {
+			await ApiClient.post('/auth/users', userEditing);
+			userEditing = null;
+			await loadUsers();
+			userMessage = 'User created successfully!';
+		} catch (e) {
+			userMessage = e instanceof Error ? e.message : 'Failed to create user';
+		} finally {
+			userSaving = false;
+		}
+	}
+
+	async function deleteUser(id: number) {
+		userMessage = null;
+		try {
+			await ApiClient.delete(`/auth/users/${id}`);
+			await loadUsers();
+		} catch (e) {
+			userMessage = e instanceof Error ? e.message : 'Delete failed';
+		}
+	}
+
+	function startPasswordChange(id: number) {
+		passwordChanging = id;
+		newPasswordInput = '';
+		passwordMessage = null;
+	}
+
+	async function savePasswordChange() {
+		if (passwordChanging == null || !newPasswordInput) return;
+		passwordMessage = null;
+		try {
+			await ApiClient.put(`/auth/users/${passwordChanging}/password`, { password: newPasswordInput });
+			passwordChanging = null;
+			newPasswordInput = '';
+			passwordMessage = 'Password changed successfully!';
+		} catch (e) {
+			passwordMessage = e instanceof Error ? e.message : 'Failed to change password';
+		}
+	}
+
 	$effect(() => {
 		loadSettings();
 		loadTemplate();
 		loadIndexers();
 		loadDlClients();
+		if (auth.user?.is_admin) {
+			loadUsers();
+		}
 	});
 </script>
 
@@ -981,6 +1055,123 @@
 					{/if}
 				{/if}
 			</div>
+		</div>
+
+		<!-- User Management Section -->
+		<div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+			<div class="flex items-center justify-between mb-4">
+				<h2 class="text-xl font-semibold">User Management</h2>
+				{#if auth.user?.is_admin}
+					<button
+						onclick={newUser}
+						class="px-3 py-1.5 bg-amber-500 hover:bg-amber-600 text-gray-900 text-sm font-semibold rounded-lg transition-colors"
+					>
+						Add User
+					</button>
+				{/if}
+			</div>
+
+			{#if !auth.authEnabled}
+				<p class="text-sm text-gray-400 mb-4">
+					Authentication is currently disabled. Create an admin account to enable it.
+				</p>
+				<a
+					href="/setup"
+					class="inline-block px-4 py-2 bg-amber-500 hover:bg-amber-600 text-gray-900 font-semibold rounded-lg transition-colors text-sm"
+				>
+					Enable Authentication
+				</a>
+			{:else if auth.user?.is_admin}
+				<p class="text-sm text-gray-400 mb-6">
+					Manage user accounts. Only admins can add or remove users.
+				</p>
+
+				{#if userMessage}
+					<p class="mb-4 text-sm {userMessage.includes('success') ? 'text-green-400' : 'text-red-400'}">{userMessage}</p>
+				{/if}
+
+				{#if passwordMessage}
+					<p class="mb-4 text-sm {passwordMessage.includes('success') ? 'text-green-400' : 'text-red-400'}">{passwordMessage}</p>
+				{/if}
+
+				<!-- New user form -->
+				{#if userEditing}
+					<div class="mb-6 p-4 bg-gray-900/50 rounded-lg border border-gray-600 space-y-3">
+						<div>
+							<label class="block text-xs text-gray-400 mb-1">Username</label>
+							<input type="text" bind:value={userEditing.username} placeholder="username"
+								class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-amber-500" />
+						</div>
+						<div>
+							<label class="block text-xs text-gray-400 mb-1">Password</label>
+							<input type="password" bind:value={userEditing.password} placeholder="minimum 8 characters"
+								autocomplete="new-password"
+								class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-amber-500" />
+						</div>
+						<div class="flex gap-2 pt-2">
+							<button onclick={saveUser} disabled={userSaving || !userEditing.username.trim() || !userEditing.password}
+								class="px-4 py-2 bg-amber-500 hover:bg-amber-600 disabled:bg-gray-600 text-gray-900 font-semibold rounded-lg text-sm transition-colors">
+								{userSaving ? 'Creating...' : 'Create User'}
+							</button>
+							<button onclick={() => userEditing = null}
+								class="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-gray-200 rounded-lg text-sm transition-colors">
+								Cancel
+							</button>
+						</div>
+					</div>
+				{/if}
+
+				<!-- User list -->
+				{#if users.length > 0}
+					<div class="divide-y divide-gray-700">
+						{#each users as u (u.id)}
+							<div class="py-3">
+								<div class="flex items-center justify-between gap-4">
+									<div class="flex-1 min-w-0">
+										<div class="flex items-center gap-2">
+											<span class="font-medium text-gray-200">{u.username}</span>
+											{#if u.is_admin}
+												<span class="text-xs px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400">Admin</span>
+											{/if}
+										</div>
+									</div>
+									<div class="flex items-center gap-1">
+										<button onclick={() => startPasswordChange(u.id)}
+											class="px-2 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 rounded transition-colors">
+											Password
+										</button>
+										{#if u.id !== auth.user?.id}
+											<button onclick={() => deleteUser(u.id)}
+												class="px-2 py-1 text-xs bg-gray-700 hover:bg-red-900/50 text-gray-300 hover:text-red-400 rounded transition-colors">
+												Delete
+											</button>
+										{/if}
+									</div>
+								</div>
+
+								<!-- Inline password change -->
+								{#if passwordChanging === u.id}
+									<div class="mt-3 flex gap-2">
+										<input type="password" bind:value={newPasswordInput} placeholder="New password (min 8 chars)"
+											autocomplete="new-password"
+											class="flex-1 px-3 py-1.5 bg-gray-700 border border-gray-600 rounded text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-amber-500" />
+										<button onclick={savePasswordChange} disabled={!newPasswordInput || newPasswordInput.length < 8}
+											class="px-3 py-1.5 bg-amber-500 hover:bg-amber-600 disabled:bg-gray-600 text-gray-900 font-semibold rounded text-sm transition-colors">
+											Save
+										</button>
+										<button onclick={() => passwordChanging = null}
+											class="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-200 rounded text-sm transition-colors">
+											Cancel
+										</button>
+									</div>
+								{/if}
+							</div>
+						{/each}
+					</div>
+				{/if}
+			{:else}
+				<p class="text-sm text-gray-400">Authentication is enabled. Contact an admin to manage users.</p>
+			{/if}
 		</div>
 
 		<!-- About Section -->
