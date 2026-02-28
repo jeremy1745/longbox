@@ -17,12 +17,61 @@
 	let grabbing = $state<string | null>(null);
 	let grabMessage = $state<{ text: string; success: boolean } | null>(null);
 
+	type SortColumn = 'title' | 'indexer' | 'size' | 'age' | 'grabs' | 'score';
+	type SortDir = 'asc' | 'desc';
+	let sortColumn = $state<SortColumn>('score');
+	let sortDir = $state<SortDir>('desc');
+
+	function toggleSort(col: SortColumn) {
+		if (sortColumn === col) {
+			sortDir = sortDir === 'desc' ? 'asc' : 'desc';
+		} else {
+			sortColumn = col;
+			sortDir = col === 'title' || col === 'indexer' ? 'asc' : 'desc';
+		}
+	}
+
+	const sortColumns: { key: SortColumn; label: string; align: string }[] = [
+		{ key: 'title', label: 'Title', align: 'text-left' },
+		{ key: 'indexer', label: 'Indexer', align: 'text-left' },
+		{ key: 'size', label: 'Size', align: 'text-right' },
+		{ key: 'age', label: 'Age', align: 'text-right' },
+		{ key: 'grabs', label: 'Grabs', align: 'text-right' },
+		{ key: 'score', label: 'Score', align: 'text-right' },
+	];
+
+	let sortedResults = $derived.by(() => {
+		const sorted = [...results];
+		const dir = sortDir === 'asc' ? 1 : -1;
+		sorted.sort((a, b) => {
+			switch (sortColumn) {
+				case 'title':
+					return dir * a.title.localeCompare(b.title);
+				case 'indexer':
+					return dir * a.indexer_name.localeCompare(b.indexer_name);
+				case 'size':
+					return dir * (a.size - b.size);
+				case 'age':
+					return dir * (new Date(a.publish_date).getTime() - new Date(b.publish_date).getTime());
+				case 'grabs':
+					return dir * ((a.grabs || 0) - (b.grabs || 0));
+				case 'score':
+					return dir * (a.score - b.score);
+				default:
+					return 0;
+			}
+		});
+		return sorted;
+	});
+
 	async function search() {
 		if (!issueId) return;
 		loading = true;
 		error = null;
 		results = [];
 		grabMessage = null;
+		sortColumn = 'score';
+		sortDir = 'desc';
 		try {
 			const data = await ApiClient.get<SearchResponse>(`/search/issue/${issueId}`);
 			results = data.results || [];
@@ -152,17 +201,24 @@
 					<table class="w-full text-sm">
 						<thead>
 							<tr class="text-left text-gray-400 border-b border-gray-700">
-								<th class="pb-2 pr-4">Title</th>
-								<th class="pb-2 pr-4">Indexer</th>
-								<th class="pb-2 pr-4 text-right">Size</th>
-								<th class="pb-2 pr-4 text-right">Age</th>
-								<th class="pb-2 pr-4 text-right">Grabs</th>
-								<th class="pb-2 pr-4 text-right">Score</th>
+								{#each sortColumns as col (col.key)}
+									<th class="pb-2 pr-4 {col.align}">
+										<button
+											onclick={() => toggleSort(col.key)}
+											class="hover:text-gray-200 transition-colors inline-flex items-center gap-1"
+										>
+											{col.label}
+											{#if sortColumn === col.key}
+												<span class="text-amber-400">{sortDir === 'asc' ? '\u25B2' : '\u25BC'}</span>
+											{/if}
+										</button>
+									</th>
+								{/each}
 								<th class="pb-2 w-20"></th>
 							</tr>
 						</thead>
 						<tbody class="divide-y divide-gray-700/50">
-							{#each results as result (result.guid)}
+							{#each sortedResults as result (result.guid)}
 								<tr class="hover:bg-gray-750 transition-colors">
 									<td class="py-2.5 pr-4">
 										<span class="text-gray-200 block truncate max-w-xs" title={result.title}>

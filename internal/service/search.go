@@ -315,17 +315,38 @@ func (s *SearchService) AutoSearchAndGrab(ctx context.Context, issueID int64) (*
 		return nil, nil
 	}
 
-	// Grab the highest-scoring result if it meets the minimum threshold
+	// Filter to results meeting the minimum score threshold
 	const minScore = 50
-	best := results[0]
-	if best.Score < minScore {
-		slog.Debug("best result score below threshold",
+	var qualified []ScoredResult
+	for _, r := range results {
+		if r.Score >= minScore {
+			qualified = append(qualified, r)
+		}
+	}
+	if len(qualified) == 0 {
+		slog.Debug("no results meet score threshold",
 			"issue_id", issueID,
-			"best_score", best.Score,
+			"best_score", results[0].Score,
 			"min_score", minScore,
 		)
 		return nil, nil
 	}
+
+	// Sort qualified results by grabs descending, ties broken by score
+	sort.Slice(qualified, func(i, j int) bool {
+		if qualified[i].Grabs != qualified[j].Grabs {
+			return qualified[i].Grabs > qualified[j].Grabs
+		}
+		return qualified[i].Score > qualified[j].Score
+	})
+
+	best := qualified[0]
+	slog.Info("auto-grab selected",
+		"issue_id", issueID,
+		"title", best.Title,
+		"grabs", best.Grabs,
+		"score", best.Score,
+	)
 
 	return s.GrabResult(ctx, best.NZBURL, best.Title, best.Size, best.IndexerID, &issueID)
 }

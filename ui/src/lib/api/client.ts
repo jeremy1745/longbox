@@ -209,6 +209,12 @@ export interface Settings {
 	pull_list_hour: number;
 	pull_list_last_run: string;
 	auto_search_on_add: boolean;
+	auto_scan_enabled: boolean;
+	auto_scan_interval: number;
+	auto_scan_last_run: string;
+	missing_search_enabled: boolean;
+	missing_search_interval: number;
+	missing_search_last_run: string;
 }
 
 export interface APIKeyTestResult {
@@ -219,7 +225,7 @@ export interface APIKeyTestResult {
 
 // --- Job types ---
 
-export type JobType = 'scan' | 'metadata_refresh' | 'search' | 'pull_list_search' | 'mylar_metadata';
+export type JobType = 'scan' | 'metadata_refresh' | 'search' | 'pull_list_search' | 'mylar_metadata' | 'missing_search';
 export type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
 
 export interface Job {

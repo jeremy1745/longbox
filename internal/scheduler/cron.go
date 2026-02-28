@@ -86,6 +86,12 @@ func (cs *CronScheduler) tick() {
 
 	// Check if pull list search should run
 	cs.checkPullListSchedule()
+
+	// Check if missing issue search should run
+	cs.checkMissingSearch()
+
+	// Check if automated library scan should run
+	cs.checkAutoScan()
 }
 
 func (cs *CronScheduler) checkPullListSchedule() {
@@ -139,4 +145,76 @@ func (cs *CronScheduler) checkPullListSchedule() {
 
 	slog.Info("scheduled pull list search submitted", "job_id", job.ID)
 	_ = fmt.Sprintf("job %d", job.ID) // suppress unused import
+}
+
+func (cs *CronScheduler) checkMissingSearch() {
+	enabled, _ := cs.settingRepo.Get("missing_search_enabled")
+	if enabled != "true" {
+		return
+	}
+
+	intervalStr, _ := cs.settingRepo.Get("missing_search_interval")
+	interval := 10 // default: 10 minutes
+	if i, err := strconv.Atoi(intervalStr); err == nil && i >= 1 && i <= 1440 {
+		interval = i
+	}
+
+	// Check if enough time has elapsed since last run
+	lastRunStr, _ := cs.settingRepo.Get("missing_search_last_run")
+	if lastRunStr != "" {
+		lastRun, err := time.Parse(time.RFC3339, lastRunStr)
+		if err == nil && time.Since(lastRun) < time.Duration(interval)*time.Minute {
+			return
+		}
+	}
+
+	slog.Info("triggering missing issue search", "interval_min", interval)
+
+	job, err := cs.scheduler.Submit(model.JobTypeMissingSearch)
+	if err != nil {
+		slog.Warn("failed to submit missing search job", "error", err)
+		return
+	}
+
+	// Record that we ran now
+	if err := cs.settingRepo.Set("missing_search_last_run", time.Now().UTC().Format(time.RFC3339)); err != nil {
+		slog.Warn("failed to record missing search last run", "error", err)
+	}
+
+	slog.Info("missing issue search submitted", "job_id", job.ID)
+}
+
+func (cs *CronScheduler) checkAutoScan() {
+	enabled, _ := cs.settingRepo.Get("auto_scan_enabled")
+	if enabled != "true" {
+		return
+	}
+
+	intervalStr, _ := cs.settingRepo.Get("auto_scan_interval")
+	interval := 60 // default: 60 minutes
+	if i, err := strconv.Atoi(intervalStr); err == nil && i >= 5 && i <= 1440 {
+		interval = i
+	}
+
+	lastRunStr, _ := cs.settingRepo.Get("auto_scan_last_run")
+	if lastRunStr != "" {
+		lastRun, err := time.Parse(time.RFC3339, lastRunStr)
+		if err == nil && time.Since(lastRun) < time.Duration(interval)*time.Minute {
+			return
+		}
+	}
+
+	slog.Info("triggering automated library scan", "interval_min", interval)
+
+	job, err := cs.scheduler.Submit(model.JobTypeScan)
+	if err != nil {
+		slog.Warn("failed to submit auto scan job", "error", err)
+		return
+	}
+
+	if err := cs.settingRepo.Set("auto_scan_last_run", time.Now().UTC().Format(time.RFC3339)); err != nil {
+		slog.Warn("failed to record auto scan last run", "error", err)
+	}
+
+	slog.Info("automated library scan submitted", "job_id", job.ID)
 }

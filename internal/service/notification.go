@@ -122,6 +122,12 @@ func (s *NotificationService) mapJobEvent(evt scheduler.Event) (string, string) 
 	case model.JobTypePullListSearch:
 		return "slack_notify_pull_list_search_complete",
 			fmt.Sprintf("Pull list search completed — processed %d items", job.ProcessedItems)
+	case model.JobTypeMissingSearch:
+		if job.ProcessedItems == 0 {
+			return "", "" // don't notify if nothing was found
+		}
+		return "slack_notify_missing_search_complete",
+			fmt.Sprintf("Missing issue search completed — grabbed %d of %d issues", job.ProcessedItems, job.TotalItems)
 	default:
 		return "", ""
 	}

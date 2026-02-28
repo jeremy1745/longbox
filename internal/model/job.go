@@ -11,6 +11,7 @@ const (
 	JobTypeSearch          JobType = "search"
 	JobTypePullListSearch  JobType = "pull_list_search"
 	JobTypeMylarMetadata   JobType = "mylar_metadata"
+	JobTypeMissingSearch   JobType = "missing_search"
 )
 
 // JobStatus tracks the lifecycle of a job.

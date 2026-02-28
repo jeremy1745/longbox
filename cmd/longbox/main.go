@@ -66,6 +66,11 @@ func main() {
 	seriesRepo := repository.NewSeriesRepo(db.Read, db.Write)
 	issueRepo := repository.NewIssueRepo(db.Read, db.Write)
 	jobRepo := repository.NewJobRepo(db.Read, db.Write)
+	if cleaned, err := jobRepo.CleanupOrphaned(); err != nil {
+		slog.Warn("failed to clean up orphaned jobs", "error", err)
+	} else if cleaned > 0 {
+		slog.Info("cleaned up orphaned jobs from previous run", "count", cleaned)
+	}
 	wantListRepo := repository.NewWantListRepo(db.Read, db.Write)
 	settingRepo := repository.NewSettingRepo(db.Read, db.Write)
 	publisherRepo := repository.NewPublisherRepo(db.Read, db.Write)
@@ -122,6 +127,12 @@ func main() {
 	})
 	sched.RegisterHandler(model.JobTypePullListSearch, func(ctx context.Context, progress scheduler.ProgressFunc) error {
 		_, err := pullListSvc.RunWeeklySearch(ctx, func(processed, total int, message string) {
+			progress(processed, total, message)
+		})
+		return err
+	})
+	sched.RegisterHandler(model.JobTypeMissingSearch, func(ctx context.Context, progress scheduler.ProgressFunc) error {
+		_, err := pullListSvc.SearchMissing(ctx, func(processed, total int, message string) {
 			progress(processed, total, message)
 		})
 		return err

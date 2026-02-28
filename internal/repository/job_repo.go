@@ -146,6 +146,22 @@ func (r *JobRepo) ActiveJobs() ([]model.Job, error) {
 	return jobs, nil
 }
 
+// CleanupOrphaned marks any pending/running jobs as failed on startup,
+// since they can't possibly still be running after a restart.
+func (r *JobRepo) CleanupOrphaned() (int, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := r.write.Exec(`
+		UPDATE jobs SET status = ?, completed_at = ?, message = 'Interrupted by server restart'
+		WHERE status IN (?, ?)`,
+		string(model.JobStatusFailed), now,
+		string(model.JobStatusPending), string(model.JobStatusRunning))
+	if err != nil {
+		return 0, fmt.Errorf("cleaning up orphaned jobs: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 func scanJob(row *sql.Row) (*model.Job, error) {
 	j := &model.Job{}
 	var startedAt, completedAt, createdAt sql.NullString

@@ -281,6 +281,111 @@ func (h *SettingsHandler) UpdateAutoSearch(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+// UpdateAutoScan saves the automated library scan settings.
+// PUT /api/v1/settings/auto-scan
+// Body: {"enabled": true, "interval": 60}
+func (h *SettingsHandler) UpdateAutoScan(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled  *bool `json:"enabled"`
+		Interval *int  `json:"interval"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+
+	if req.Enabled != nil {
+		val := "false"
+		if *req.Enabled {
+			val = "true"
+		}
+		if err := h.settingRepo.Set("auto_scan_enabled", val); err != nil {
+			writeError(w, http.StatusInternalServerError, "SAVE_FAILED", err.Error())
+			return
+		}
+	}
+
+	if req.Interval != nil {
+		if *req.Interval < 5 || *req.Interval > 1440 {
+			writeError(w, http.StatusBadRequest, "INVALID_INTERVAL", "interval must be 5-1440 minutes")
+			return
+		}
+		if err := h.settingRepo.Set("auto_scan_interval", strconv.Itoa(*req.Interval)); err != nil {
+			writeError(w, http.StatusInternalServerError, "SAVE_FAILED", err.Error())
+			return
+		}
+	}
+
+	enabled, _ := h.settingRepo.Get("auto_scan_enabled")
+	intervalStr, _ := h.settingRepo.Get("auto_scan_interval")
+	lastRun, _ := h.settingRepo.Get("auto_scan_last_run")
+
+	interval := 60
+	if i, err := strconv.Atoi(intervalStr); err == nil {
+		interval = i
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":              "updated",
+		"auto_scan_enabled":   enabled == "true",
+		"auto_scan_interval":  interval,
+		"auto_scan_last_run":  lastRun,
+	})
+}
+
+// UpdateMissingSearch saves missing issue search settings.
+// PUT /api/v1/settings/missing-search
+// Body: {"enabled": true, "interval": 10}
+func (h *SettingsHandler) UpdateMissingSearch(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled  *bool `json:"enabled"`
+		Interval *int  `json:"interval"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+
+	if req.Enabled != nil {
+		val := "false"
+		if *req.Enabled {
+			val = "true"
+		}
+		if err := h.settingRepo.Set("missing_search_enabled", val); err != nil {
+			writeError(w, http.StatusInternalServerError, "SAVE_FAILED", err.Error())
+			return
+		}
+	}
+
+	if req.Interval != nil {
+		if *req.Interval < 1 || *req.Interval > 1440 {
+			writeError(w, http.StatusBadRequest, "INVALID_INTERVAL", "interval must be 1-1440 minutes")
+			return
+		}
+		if err := h.settingRepo.Set("missing_search_interval", strconv.Itoa(*req.Interval)); err != nil {
+			writeError(w, http.StatusInternalServerError, "SAVE_FAILED", err.Error())
+			return
+		}
+	}
+
+	// Return current state
+	enabled, _ := h.settingRepo.Get("missing_search_enabled")
+	intervalStr, _ := h.settingRepo.Get("missing_search_interval")
+	lastRun, _ := h.settingRepo.Get("missing_search_last_run")
+
+	interval := 10
+	if i, err := strconv.Atoi(intervalStr); err == nil {
+		interval = i
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":                   "updated",
+		"missing_search_enabled":   enabled == "true",
+		"missing_search_interval":  interval,
+		"missing_search_last_run":  lastRun,
+	})
+}
+
 // slackSettingKeys is the whitelist of allowed Slack setting keys.
 var slackSettingKeys = map[string]bool{
 	"slack_enabled":                              true,
@@ -291,6 +396,7 @@ var slackSettingKeys = map[string]bool{
 	"slack_notify_download_grabbed":              true,
 	"slack_notify_download_complete":             true,
 	"slack_notify_download_failed":               true,
+	"slack_notify_missing_search_complete":       true,
 }
 
 // GetSlackSettings returns Slack notification configuration.
@@ -316,6 +422,7 @@ func (h *SettingsHandler) GetSlackSettings(w http.ResponseWriter, r *http.Reques
 		"slack_notify_download_grabbed",
 		"slack_notify_download_complete",
 		"slack_notify_download_failed",
+		"slack_notify_missing_search_complete",
 	}
 	toggles := make(map[string]bool, len(toggleKeys))
 	for _, key := range toggleKeys {

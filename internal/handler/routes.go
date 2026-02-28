@@ -131,6 +131,8 @@ func NewRouter(
 			r.Put("/settings/library-dir", settingsH.UpdateLibraryDir)
 			r.Put("/settings/pull-list-schedule", settingsH.UpdatePullListSchedule)
 			r.Put("/settings/auto-search", settingsH.UpdateAutoSearch)
+			r.Put("/settings/missing-search", settingsH.UpdateMissingSearch)
+			r.Put("/settings/auto-scan", settingsH.UpdateAutoScan)
 			r.Get("/settings/slack", settingsH.GetSlackSettings)
 			r.Put("/settings/slack", settingsH.UpdateSlackSettings)
 			r.Post("/settings/slack/test", settingsH.TestSlackWebhook)

@@ -174,6 +174,21 @@ func (r *WantListRepo) AddMissingForSeries(seriesID int64) (int, error) {
 	return int(n), nil
 }
 
+// RemoveFulfilled removes want list items for issues that now have a file in the library.
+func (r *WantListRepo) RemoveFulfilled() (int, error) {
+	res, err := r.write.Exec(`
+		DELETE FROM want_list
+		WHERE issue_id IN (
+			SELECT w.issue_id FROM want_list w
+			JOIN comic_files cf ON cf.issue_id = w.issue_id
+		)`)
+	if err != nil {
+		return 0, fmt.Errorf("removing fulfilled want list items: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 // RemoveForSeries removes all want list entries for issues in a given series.
 func (r *WantListRepo) RemoveForSeries(seriesID int64) (int, error) {
 	res, err := r.write.Exec(`

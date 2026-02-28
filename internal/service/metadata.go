@@ -1166,6 +1166,34 @@ func (s *MetadataService) GetSettings() map[string]interface{} {
 	autoSearch, _ := s.settingRepo.Get("auto_search_on_add")
 	settings["auto_search_on_add"] = autoSearch == "true"
 
+	// Auto scan settings
+	autoScanEnabled, _ := s.settingRepo.Get("auto_scan_enabled")
+	settings["auto_scan_enabled"] = autoScanEnabled == "true"
+
+	autoScanIntervalStr, _ := s.settingRepo.Get("auto_scan_interval")
+	autoScanInterval := 60 // default: 60 minutes
+	if i, err := strconv.Atoi(autoScanIntervalStr); err == nil && i >= 5 && i <= 1440 {
+		autoScanInterval = i
+	}
+	settings["auto_scan_interval"] = autoScanInterval
+
+	autoScanLastRun, _ := s.settingRepo.Get("auto_scan_last_run")
+	settings["auto_scan_last_run"] = autoScanLastRun
+
+	// Missing issue search settings
+	missingEnabled, _ := s.settingRepo.Get("missing_search_enabled")
+	settings["missing_search_enabled"] = missingEnabled == "true"
+
+	missingIntervalStr, _ := s.settingRepo.Get("missing_search_interval")
+	missingInterval := 10 // default: 10 minutes
+	if i, err := strconv.Atoi(missingIntervalStr); err == nil && i >= 1 && i <= 1440 {
+		missingInterval = i
+	}
+	settings["missing_search_interval"] = missingInterval
+
+	missingLastRun, _ := s.settingRepo.Get("missing_search_last_run")
+	settings["missing_search_last_run"] = missingLastRun
+
 	return settings
 }
 

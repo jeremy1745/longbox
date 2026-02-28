@@ -121,7 +121,13 @@ func (s *Scheduler) execute(jobID int64, jobType model.JobType, handler JobFunc)
 
 	duration := time.Since(startTime)
 
-	if err != nil {
+	// Check if the job was already cancelled (by Cancel()) before writing final status
+	currentJob, _ := s.jobRepo.GetByID(jobID)
+	alreadyCancelled := currentJob != nil && currentJob.Status == model.JobStatusCancelled
+
+	if alreadyCancelled {
+		slog.Info("job cancelled", "job_id", jobID, "type", jobType)
+	} else if err != nil {
 		if ctx.Err() == context.Canceled {
 			slog.Info("job cancelled", "job_id", jobID, "type", jobType)
 			s.jobRepo.MarkCancelled(jobID)
@@ -156,6 +162,13 @@ func (s *Scheduler) Cancel(jobID int64) error {
 		return fmt.Errorf("job %d is not running", jobID)
 	}
 
+	// Mark cancelled in the DB immediately so the UI reflects it
+	if err := s.jobRepo.MarkCancelled(jobID); err != nil {
+		slog.Warn("failed to mark job cancelled", "job_id", jobID, "error", err)
+	}
+	s.broadcastJobUpdate(jobID)
+
+	// Signal the goroutine to stop
 	cancel()
 	return nil
 }

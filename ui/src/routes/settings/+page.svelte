@@ -58,6 +58,10 @@
 	let dlClientTesting = $state<number | null>(null);
 	let dlClientTestResult = $state<DownloadClientTestResult | null>(null);
 
+	// Auto scan state
+	let autoScanSaving = $state(false);
+	let autoScanMessage = $state<string | null>(null);
+
 	// Pull list schedule state
 	let pullListSaving = $state(false);
 	let pullListMessage = $state<string | null>(null);
@@ -65,6 +69,10 @@
 	// Auto-search state
 	let autoSearchSaving = $state(false);
 	let autoSearchMessage = $state<string | null>(null);
+
+	// Missing search state
+	let missingSearchSaving = $state(false);
+	let missingSearchMessage = $state<string | null>(null);
 
 	// Slack notification state
 	let slackSettings = $state<SlackSettings | null>(null);
@@ -382,6 +390,22 @@
 		}
 	}
 
+	// --- Auto Scan ---
+
+	async function saveAutoScan(field: string, value: any) {
+		autoScanSaving = true;
+		autoScanMessage = null;
+		try {
+			await ApiClient.put('/settings/auto-scan', { [field]: value });
+			await loadSettings();
+			autoScanMessage = 'Setting updated!';
+		} catch (e) {
+			autoScanMessage = e instanceof Error ? e.message : 'Save failed';
+		} finally {
+			autoScanSaving = false;
+		}
+	}
+
 	// --- Pull List Schedule ---
 
 	async function savePullListSchedule(field: string, value: any) {
@@ -411,6 +435,22 @@
 			autoSearchMessage = e instanceof Error ? e.message : 'Save failed';
 		} finally {
 			autoSearchSaving = false;
+		}
+	}
+
+	// --- Missing search ---
+
+	async function saveMissingSearch(field: string, value: any) {
+		missingSearchSaving = true;
+		missingSearchMessage = null;
+		try {
+			await ApiClient.put('/settings/missing-search', { [field]: value });
+			await loadSettings();
+			missingSearchMessage = 'Setting updated!';
+		} catch (e) {
+			missingSearchMessage = e instanceof Error ? e.message : 'Save failed';
+		} finally {
+			missingSearchSaving = false;
 		}
 	}
 
@@ -471,6 +511,7 @@
 		{ key: 'slack_notify_download_grabbed', label: 'Download Grabbed', desc: 'When an NZB is grabbed from an indexer' },
 		{ key: 'slack_notify_download_complete', label: 'Download Complete', desc: 'When a download finishes successfully' },
 		{ key: 'slack_notify_download_failed', label: 'Download Failed', desc: 'When a download fails' },
+		{ key: 'slack_notify_missing_search_complete', label: 'Missing Search Found', desc: 'When the missing issue search grabs new issues' },
 	];
 
 	// --- User management functions ---
@@ -1075,6 +1116,66 @@
 			{/if}
 		</div>
 
+		<!-- Auto Scan Section -->
+		<div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+			<h2 class="text-xl font-semibold mb-4">Automated Library Scan</h2>
+			<p class="text-sm text-gray-400 mb-6">
+				Automatically scan the library directory for new or changed files on a recurring schedule.
+			</p>
+
+			{#if autoScanMessage}
+				<p class="mb-4 text-sm {autoScanMessage.includes('updated') || autoScanMessage.includes('Updated') ? 'text-green-400' : 'text-red-400'}">
+					{autoScanMessage}
+				</p>
+			{/if}
+
+			<div class="space-y-4">
+				<div class="flex items-center justify-between">
+					<div>
+						<p class="text-sm font-medium text-gray-200">Enable Automated Scan</p>
+						<p class="text-xs text-gray-500 mt-0.5">Scan the library directory for new files on a schedule</p>
+					</div>
+					<button
+						onclick={() => saveAutoScan('enabled', !settings?.auto_scan_enabled)}
+						disabled={autoScanSaving}
+						class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors
+							{settings?.auto_scan_enabled ? 'bg-amber-500' : 'bg-gray-600'}"
+					>
+						<span class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform
+							{settings?.auto_scan_enabled ? 'translate-x-6' : 'translate-x-1'}"></span>
+					</button>
+				</div>
+
+				{#if settings?.auto_scan_enabled}
+					<!-- Interval selector -->
+					<div class="flex items-center gap-4">
+						<label class="text-sm text-gray-300 w-20">Interval</label>
+						<select
+							value={settings?.auto_scan_interval ?? 60}
+							onchange={(e) => saveAutoScan('interval', parseInt((e.target as HTMLSelectElement).value))}
+							class="px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-amber-500"
+						>
+							<option value={15}>Every 15 minutes</option>
+							<option value={30}>Every 30 minutes</option>
+							<option value={60}>Every hour</option>
+							<option value={120}>Every 2 hours</option>
+							<option value={360}>Every 6 hours</option>
+							<option value={720}>Every 12 hours</option>
+							<option value={1440}>Every 24 hours</option>
+						</select>
+					</div>
+
+					<!-- Last run info -->
+					{#if settings?.auto_scan_last_run}
+						<div class="flex items-center gap-3 pt-2 border-t border-gray-700">
+							<span class="text-sm text-gray-400">Last run:</span>
+							<span class="text-sm text-gray-300">{new Date(settings.auto_scan_last_run).toLocaleString()}</span>
+						</div>
+					{/if}
+				{/if}
+			</div>
+		</div>
+
 		<!-- Pull List Automation Section -->
 		<div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
 			<h2 class="text-xl font-semibold mb-4">Pull List Automation</h2>
@@ -1173,6 +1274,65 @@
 					<span class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform
 						{settings?.auto_search_on_add ? 'translate-x-6' : 'translate-x-1'}"></span>
 				</button>
+			</div>
+		</div>
+
+		<!-- Missing Issue Search Section -->
+		<div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+			<h2 class="text-xl font-semibold mb-4">Missing Issue Search</h2>
+			<p class="text-sm text-gray-400 mb-6">
+				Periodically search indexers for missing issues in tracked series. Fills gaps (e.g. missing #10 between #8 and #11) as NZBs become available.
+			</p>
+
+			{#if missingSearchMessage}
+				<p class="mb-4 text-sm {missingSearchMessage.includes('updated') || missingSearchMessage.includes('Updated') ? 'text-green-400' : 'text-red-400'}">
+					{missingSearchMessage}
+				</p>
+			{/if}
+
+			<div class="space-y-4">
+				<!-- Enable toggle -->
+				<div class="flex items-center justify-between">
+					<div>
+						<p class="text-sm font-medium text-gray-200">Enable Missing Search</p>
+						<p class="text-xs text-gray-500 mt-0.5">Automatically search for wanted issues on a recurring interval</p>
+					</div>
+					<button
+						onclick={() => saveMissingSearch('enabled', !settings?.missing_search_enabled)}
+						disabled={missingSearchSaving}
+						class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors
+							{settings?.missing_search_enabled ? 'bg-amber-500' : 'bg-gray-600'}"
+					>
+						<span class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform
+							{settings?.missing_search_enabled ? 'translate-x-6' : 'translate-x-1'}"></span>
+					</button>
+				</div>
+
+				{#if settings?.missing_search_enabled}
+					<!-- Interval selector -->
+					<div class="flex items-center gap-4">
+						<label class="text-sm text-gray-300 w-20">Interval</label>
+						<select
+							value={settings?.missing_search_interval ?? 10}
+							onchange={(e) => saveMissingSearch('interval', parseInt((e.target as HTMLSelectElement).value))}
+							class="px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-amber-500"
+						>
+							<option value={5}>Every 5 minutes</option>
+							<option value={10}>Every 10 minutes</option>
+							<option value={15}>Every 15 minutes</option>
+							<option value={30}>Every 30 minutes</option>
+							<option value={60}>Every hour</option>
+						</select>
+					</div>
+
+					<!-- Last run info -->
+					{#if settings?.missing_search_last_run}
+						<div class="flex items-center gap-3 pt-2 border-t border-gray-700">
+							<span class="text-sm text-gray-400">Last run:</span>
+							<span class="text-sm text-gray-300">{new Date(settings.missing_search_last_run).toLocaleString()}</span>
+						</div>
+					{/if}
+				{/if}
 			</div>
 		</div>
 
