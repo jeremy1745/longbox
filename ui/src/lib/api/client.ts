@@ -208,6 +208,7 @@ export interface Settings {
 	pull_list_day: number;
 	pull_list_hour: number;
 	pull_list_last_run: string;
+	auto_search_on_add: boolean;
 }
 
 export interface APIKeyTestResult {

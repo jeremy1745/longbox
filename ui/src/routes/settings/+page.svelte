@@ -62,6 +62,10 @@
 	let pullListSaving = $state(false);
 	let pullListMessage = $state<string | null>(null);
 
+	// Auto-search state
+	let autoSearchSaving = $state(false);
+	let autoSearchMessage = $state<string | null>(null);
+
 	// Slack notification state
 	let slackSettings = $state<SlackSettings | null>(null);
 	let slackSaving = $state(false);
@@ -391,6 +395,22 @@
 			pullListMessage = e instanceof Error ? e.message : 'Save failed';
 		} finally {
 			pullListSaving = false;
+		}
+	}
+
+	// --- Auto-search on add ---
+
+	async function saveAutoSearch(enabled: boolean) {
+		autoSearchSaving = true;
+		autoSearchMessage = null;
+		try {
+			await ApiClient.put('/settings/auto-search', { enabled });
+			await loadSettings();
+			autoSearchMessage = 'Setting updated!';
+		} catch (e) {
+			autoSearchMessage = e instanceof Error ? e.message : 'Save failed';
+		} finally {
+			autoSearchSaving = false;
 		}
 	}
 
@@ -1123,6 +1143,36 @@
 						</div>
 					{/if}
 				{/if}
+			</div>
+		</div>
+
+		<!-- Auto-Search on Add Section -->
+		<div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+			<h2 class="text-xl font-semibold mb-4">Auto-Search</h2>
+			<p class="text-sm text-gray-400 mb-6">
+				Automatically search indexers and grab NZBs when an issue is added to the want list.
+			</p>
+
+			{#if autoSearchMessage}
+				<p class="mb-4 text-sm {autoSearchMessage.includes('updated') || autoSearchMessage.includes('Updated') ? 'text-green-400' : 'text-red-400'}">
+					{autoSearchMessage}
+				</p>
+			{/if}
+
+			<div class="flex items-center justify-between">
+				<div>
+					<p class="text-sm font-medium text-gray-200">Search on Want List Add</p>
+					<p class="text-xs text-gray-500 mt-0.5">When adding an issue to the want list, immediately search and grab</p>
+				</div>
+				<button
+					onclick={() => saveAutoSearch(!settings?.auto_search_on_add)}
+					disabled={autoSearchSaving}
+					class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors
+						{settings?.auto_search_on_add ? 'bg-amber-500' : 'bg-gray-600'}"
+				>
+					<span class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform
+						{settings?.auto_search_on_add ? 'translate-x-6' : 'translate-x-1'}"></span>
+				</button>
 			</div>
 		</div>
 
