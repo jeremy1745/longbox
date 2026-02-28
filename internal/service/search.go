@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/jeremy/longbox/internal/model"
 	"github.com/jeremy/longbox/internal/newznab"
@@ -67,15 +70,28 @@ func (s *SearchService) SearchForIssue(ctx context.Context, issueID int64) ([]Sc
 		return nil, fmt.Errorf("series %d not found", issue.SeriesID)
 	}
 
-	query := buildSearchQuery(series, issue)
-	results, err := s.searchAllIndexers(ctx, query)
-	if err != nil {
-		return nil, err
+	queries := buildSearchQueries(series, issue)
+
+	// Run all query variants and merge results
+	seen := make(map[string]bool)
+	var allResults []newznab.SearchResult
+	for _, q := range queries {
+		results, err := s.searchAllIndexers(ctx, q)
+		if err != nil {
+			slog.Warn("search query failed", "query", q, "error", err)
+			continue
+		}
+		for _, r := range results {
+			if !seen[r.GUID] {
+				seen[r.GUID] = true
+				allResults = append(allResults, r)
+			}
+		}
 	}
 
 	// Score results against the specific issue
-	scored := make([]ScoredResult, len(results))
-	for i, r := range results {
+	scored := make([]ScoredResult, len(allResults))
+	for i, r := range allResults {
 		scored[i] = ScoredResult{
 			SearchResult: r,
 			Score:        scoreResult(r, series, issue),
@@ -101,13 +117,13 @@ func (s *SearchService) SearchQuery(ctx context.Context, query string) ([]Scored
 	for i, r := range results {
 		scored[i] = ScoredResult{
 			SearchResult: r,
-			Score:        50, // neutral score for raw query
+			Score:        scoreRawResult(r),
 		}
 	}
 
-	// Sort by publish date (newest first)
+	// Sort by score descending
 	sort.Slice(scored, func(i, j int) bool {
-		return scored[i].PublishDate.After(scored[j].PublishDate)
+		return scored[i].Score > scored[j].Score
 	})
 
 	return scored, nil
@@ -355,19 +371,46 @@ func (s *SearchService) searchAllIndexers(ctx context.Context, query string) ([]
 	return deduped, nil
 }
 
-func buildSearchQuery(series *model.Series, issue *model.Issue) string {
-	parts := []string{series.Title}
-
-	if series.Year != nil {
-		parts = append(parts, fmt.Sprintf("%d", *series.Year))
+// buildSearchQueries returns multiple query strings to try against indexers.
+// Older comics use varied naming so we cast a wider net with several strategies.
+func buildSearchQueries(series *model.Series, issue *model.Issue) []string {
+	seen := make(map[string]bool)
+	var queries []string
+	add := func(q string) {
+		if !seen[q] {
+			seen[q] = true
+			queries = append(queries, q)
+		}
 	}
 
-	if issue.IssueNumber != "" {
-		parts = append(parts, "#"+issue.IssueNumber)
+	title := series.Title
+	num := issue.IssueNumber
+
+	// Strategy 1: title + issue (broadest — catches most NZBs)
+	if num != "" {
+		add(fmt.Sprintf("%s #%s", title, num))
+	} else {
+		add(title)
 	}
 
-	return strings.Join(parts, " ")
+	// Strategy 2: title + year + issue (catches posts that include the year)
+	if series.Year != nil && num != "" {
+		add(fmt.Sprintf("%s %d #%s", title, *series.Year, num))
+	} else if series.Year != nil {
+		add(fmt.Sprintf("%s %d", title, *series.Year))
+	}
+
+	// Strategy 3: zero-padded issue number variant (common in older NZB naming)
+	if num != "" && len(num) < 3 {
+		padded := fmt.Sprintf("%03s", num)
+		add(fmt.Sprintf("%s #%s", title, padded))
+	}
+
+	return queries
 }
+
+// yearPattern matches 4-digit years (1900–2099) in NZB titles.
+var yearPattern = regexp.MustCompile(`(?:^|[\s._(-])(\d{4})(?:[\s._)\-]|$)`)
 
 func scoreResult(result newznab.SearchResult, series *model.Series, issue *model.Issue) int {
 	score := 0
@@ -412,25 +455,87 @@ func scoreResult(result newznab.SearchResult, series *model.Series, issue *model
 		}
 	}
 
-	// Title contains year
+	// Year / volume disambiguation
 	if series.Year != nil {
 		yearStr := fmt.Sprintf("%d", *series.Year)
 		if strings.Contains(titleLower, yearStr) {
-			score += 10
+			score += 15 // NZB title contains the correct series year
+		}
+		// Check for a different year that may indicate wrong volume
+		matches := yearPattern.FindAllStringSubmatch(result.Title, -1)
+		for _, m := range matches {
+			if y, err := strconv.Atoi(m[1]); err == nil && y >= 1900 && y <= 2099 {
+				diff := y - *series.Year
+				if diff < 0 {
+					diff = -diff
+				}
+				if diff > 3 {
+					score -= 20 // likely wrong volume/series
+					break
+				}
+			}
 		}
 	}
 
-	// Size in expected range for comics (20MB - 2GB)
-	if result.Size >= 20*1024*1024 && result.Size <= 2*1024*1024*1024 {
-		score += 10
+	// Size scoring — tighter buckets for single issues
+	sizeMB := result.Size / (1024 * 1024)
+	switch {
+	case sizeMB >= 20 && sizeMB <= 300:
+		score += 10 // single issue sweet spot
+	case sizeMB > 300 && sizeMB <= 800:
+		score += 5 // annual / oversized issue
+	case sizeMB < 10:
+		score -= 10 // corrupt or incomplete
+	case sizeMB > 800:
+		score -= 10 // likely a collection pack
 	}
 
-	// Recency bonus (posted in last 7 days)
+	// Recency bonus
 	if !result.PublishDate.IsZero() {
-		// Use a fixed reference for relative comparison
-		age := 168 // hours in a week
-		_ = age
+		age := time.Since(result.PublishDate)
+		switch {
+		case age < 30*24*time.Hour:
+			score += 5
+		case age < 90*24*time.Hour:
+			score += 3
+		}
+	}
+
+	// Publisher match
+	if series.PublisherName != "" {
+		pubLower := strings.ToLower(series.PublisherName)
+		if strings.Contains(titleLower, pubLower) {
+			score += 5
+		}
+	}
+
+	// Grab count bonus
+	if result.Grabs > 100 {
 		score += 5
+	} else if result.Grabs > 10 {
+		score += 3
+	} else if result.Grabs > 0 {
+		score += 1
+	}
+
+	return score
+}
+
+// scoreRawResult scores a result from a manual/raw search query using size and grab signals.
+func scoreRawResult(result newznab.SearchResult) int {
+	score := 50 // baseline
+
+	// Size scoring
+	sizeMB := result.Size / (1024 * 1024)
+	switch {
+	case sizeMB >= 20 && sizeMB <= 300:
+		score += 10
+	case sizeMB > 300 && sizeMB <= 800:
+		score += 5
+	case sizeMB < 10:
+		score -= 10
+	case sizeMB > 800:
+		score -= 10
 	}
 
 	// Grab count bonus
