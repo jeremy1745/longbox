@@ -80,6 +80,59 @@ func (r *UserRepo) Count() (int, error) {
 	return count, nil
 }
 
+// CreateIfAllowed atomically checks for duplicate username, determines admin
+// status based on user count, and inserts the user — all in one transaction.
+// This prevents a race where two concurrent registrations both see count=0.
+func (r *UserRepo) CreateIfAllowed(u *model.User) error {
+	tx, err := r.write.Begin()
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Check for duplicate username inside the transaction
+	var existing int
+	err = tx.QueryRow(`SELECT COUNT(*) FROM users WHERE username = ?`, u.Username).Scan(&existing)
+	if err != nil {
+		return fmt.Errorf("checking existing user: %w", err)
+	}
+	if existing > 0 {
+		return fmt.Errorf("username already taken")
+	}
+
+	// Count users to determine admin status
+	var count int
+	err = tx.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("counting users: %w", err)
+	}
+	u.IsAdmin = count == 0
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := tx.Exec(`
+		INSERT INTO users (username, password_hash, is_admin, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?)`,
+		u.Username, u.PasswordHash, u.IsAdmin, now, now,
+	)
+	if err != nil {
+		return fmt.Errorf("inserting user: %w", err)
+	}
+
+	id, err := res.LastInsertId()
+	if err != nil {
+		return fmt.Errorf("getting last insert id: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing transaction: %w", err)
+	}
+
+	u.ID = id
+	u.CreatedAt, _ = time.Parse(time.RFC3339, now)
+	u.UpdatedAt = u.CreatedAt
+	return nil
+}
+
 func (r *UserRepo) Delete(id int64) error {
 	_, err := r.write.Exec(`DELETE FROM users WHERE id = ?`, id)
 	return err

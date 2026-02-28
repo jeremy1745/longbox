@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
@@ -143,6 +144,11 @@ func (s *SearchService) SearchQuery(ctx context.Context, query string) ([]Scored
 
 // GrabResult sends an NZB to the first enabled download client and records the grab.
 func (s *SearchService) GrabResult(ctx context.Context, nzbURL, nzbName string, size int64, indexerID int64, issueID *int64) (*model.DownloadHistoryItem, error) {
+	// Validate NZB URL against configured indexer hosts to prevent SSRF
+	if err := s.validateNZBURL(nzbURL); err != nil {
+		return nil, err
+	}
+
 	// Check for duplicate grabs
 	if issueID != nil {
 		exists, err := s.dlHistoryRepo.ExistsForIssue(*issueID)
@@ -163,9 +169,16 @@ func (s *SearchService) GrabResult(ctx context.Context, nzbURL, nzbName string, 
 		return nil, fmt.Errorf("no enabled download client configured")
 	}
 
+	// Re-add API key that was stripped from the frontend-facing URL
+	grabURL, err := s.reattachAPIKey(nzbURL)
+	if err != nil {
+		slog.Warn("failed to reattach API key to NZB URL", "error", err)
+		grabURL = nzbURL
+	}
+
 	// Send to SABnzbd
 	sabClient := sabnzbd.NewClient(dc.URL, dc.APIKey)
-	nzoID, err := sabClient.SendURL(nzbURL, nzbName, dc.Category)
+	nzoID, err := sabClient.SendURL(grabURL, nzbName, dc.Category)
 	if err != nil {
 		return nil, fmt.Errorf("sending to SABnzbd: %w", err)
 	}
@@ -198,6 +211,87 @@ func (s *SearchService) GrabResult(ctx context.Context, nzbURL, nzbName string, 
 	)
 
 	return item, nil
+}
+
+// validateNZBURL checks that the NZB URL's host matches a configured indexer,
+// preventing SSRF attacks where a crafted URL could probe internal services.
+func (s *SearchService) validateNZBURL(nzbURL string) error {
+	parsed, err := url.Parse(nzbURL)
+	if err != nil {
+		return fmt.Errorf("invalid NZB URL: %w", err)
+	}
+
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("NZB URL must use http or https scheme")
+	}
+
+	nzbHost := strings.ToLower(parsed.Hostname())
+	if nzbHost == "" {
+		return fmt.Errorf("NZB URL has no host")
+	}
+
+	indexers, err := s.indexerRepo.List()
+	if err != nil {
+		return fmt.Errorf("loading indexers for URL validation: %w", err)
+	}
+
+	for _, idx := range indexers {
+		idxURL, err := url.Parse(idx.URL)
+		if err != nil {
+			continue
+		}
+		if strings.ToLower(idxURL.Hostname()) == nzbHost {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("NZB URL host %q does not match any configured indexer", nzbHost)
+}
+
+// stripAPIKey removes apikey/api_key query parameters from a URL so that
+// indexer credentials are not exposed to the frontend.
+func stripAPIKey(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	q := parsed.Query()
+	q.Del("apikey")
+	q.Del("api_key")
+	parsed.RawQuery = q.Encode()
+	return parsed.String()
+}
+
+// reattachAPIKey looks up the indexer for the given NZB URL host and
+// re-adds its API key to the URL before sending to the download client.
+func (s *SearchService) reattachAPIKey(nzbURL string) (string, error) {
+	parsed, err := url.Parse(nzbURL)
+	if err != nil {
+		return nzbURL, err
+	}
+
+	nzbHost := strings.ToLower(parsed.Hostname())
+	indexers, err := s.indexerRepo.List()
+	if err != nil {
+		return nzbURL, err
+	}
+
+	for _, idx := range indexers {
+		idxURL, err := url.Parse(idx.URL)
+		if err != nil {
+			continue
+		}
+		if strings.ToLower(idxURL.Hostname()) == nzbHost {
+			q := parsed.Query()
+			if q.Get("apikey") == "" && idx.APIKey != "" && idx.Type != model.IndexerTypeProwlarr {
+				q.Set("apikey", idx.APIKey)
+				parsed.RawQuery = q.Encode()
+			}
+			return parsed.String(), nil
+		}
+	}
+
+	return nzbURL, nil
 }
 
 // AutoSearchAndGrab searches for an issue and grabs the best result.
@@ -351,10 +445,11 @@ func (s *SearchService) searchAllIndexers(ctx context.Context, query string) ([]
 				return
 			}
 
-			// Tag results with indexer info
+			// Tag results with indexer info and strip API keys from URLs
 			for i := range results {
 				results[i].IndexerName = idx.Name
 				results[i].IndexerID = idx.ID
+				results[i].NZBURL = stripAPIKey(results[i].NZBURL)
 			}
 
 			mu.Lock()

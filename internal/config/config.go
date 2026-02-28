@@ -61,12 +61,12 @@ func Load(path string) (*Config, error) {
 		fmt.Sscanf(v, "%d", &cfg.SessionLifetimeDays)
 	}
 
-	// Ensure data directory exists
-	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
+	// Ensure data directory exists (0700: only owner can access DB with API keys)
+	if err := os.MkdirAll(cfg.DataDir, 0700); err != nil {
 		return nil, fmt.Errorf("creating data directory: %w", err)
 	}
 	// Ensure covers subdirectory exists
-	if err := os.MkdirAll(filepath.Join(cfg.DataDir, "covers"), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(cfg.DataDir, "covers"), 0700); err != nil {
 		return nil, fmt.Errorf("creating covers directory: %w", err)
 	}
 

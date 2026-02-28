@@ -38,33 +38,18 @@ func (s *AuthService) Register(username, password string) (*model.User, error) {
 		return nil, fmt.Errorf("password must be at least 8 characters")
 	}
 
-	existing, err := s.userRepo.GetByUsername(username)
-	if err != nil {
-		return nil, fmt.Errorf("checking existing user: %w", err)
-	}
-	if existing != nil {
-		return nil, fmt.Errorf("username already taken")
-	}
-
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return nil, fmt.Errorf("hashing password: %w", err)
 	}
 
-	// First user becomes admin
-	count, err := s.userRepo.Count()
-	if err != nil {
-		return nil, fmt.Errorf("counting users: %w", err)
-	}
-
 	user := &model.User{
 		Username:     username,
 		PasswordHash: string(hash),
-		IsAdmin:      count == 0,
 	}
 
-	if err := s.userRepo.Create(user); err != nil {
-		return nil, fmt.Errorf("creating user: %w", err)
+	if err := s.userRepo.CreateIfAllowed(user); err != nil {
+		return nil, err
 	}
 
 	return user, nil

@@ -3,6 +3,7 @@ package handler
 import (
 	"io/fs"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jeremy/longbox/internal/repository"
@@ -41,7 +42,8 @@ func NewRouter(
 	r.Use(Recovery)
 	r.Use(RequestID)
 	r.Use(Logger)
-	r.Use(CORS)
+	r.Use(SecurityHeaders)
+	r.Use(MaxBodySize)
 
 	// Handlers
 	libraryH := NewLibraryHandler(librarySvc, fileRepo, seriesRepo, sched)
@@ -63,11 +65,14 @@ func NewRouter(
 	mylarH := NewMylarMetadataHandler(seriesRepo, sched)
 	authH := NewAuthHandler(authSvc)
 
+	// Rate limiter: 5 attempts per minute for auth endpoints
+	authLimiter := NewRateLimiter(5, 1*time.Minute)
+
 	r.Route("/api/v1", func(r chi.Router) {
 		// Public auth routes (no auth required)
 		r.Get("/auth/status", authH.Status)
-		r.Post("/auth/login", authH.Login)
-		r.Post("/auth/register", authH.Register)
+		r.Post("/auth/login", authLimiter.RateLimit(authH.Login))
+		r.Post("/auth/register", authLimiter.RateLimit(authH.Register))
 
 		// Protected routes (auth required when enabled)
 		r.Group(func(r chi.Router) {
