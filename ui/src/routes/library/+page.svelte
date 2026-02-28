@@ -20,8 +20,8 @@
 	let allSeries = $state<Series[]>([]);
 	let browseLoading = $state(false);
 	let browseLoaded = $state(false);
-	// Breadcrumb path: [] = publishers, [publisher] = years, [publisher, year] = series
-	let browsePath = $state<(string | number)[]>([]);
+	// Breadcrumb path: [] = publishers, [publisher] = series
+	let browsePath = $state<string[]>([]);
 
 	// Derived: unique publishers sorted alphabetically
 	let publishers = $derived(() => {
@@ -39,40 +39,14 @@
 		return [...pubMap.values()].sort((a, b) => a.name.localeCompare(b.name));
 	});
 
-	// Derived: years for selected publisher
-	let years = $derived(() => {
-		if (browsePath.length < 1) return [];
-		const pub = browsePath[0] as string;
-		const yearMap = new Map<number | string, { year: number | string; seriesCount: number; fileCount: number }>();
-		for (const s of allSeries) {
-			const sPub = s.publisher_name || 'Unknown Publisher';
-			if (sPub !== pub) continue;
-			const yr = s.year ?? 'Unknown';
-			const existing = yearMap.get(yr);
-			if (existing) {
-				existing.seriesCount++;
-				existing.fileCount += s.file_count;
-			} else {
-				yearMap.set(yr, { year: yr, seriesCount: 1, fileCount: s.file_count });
-			}
-		}
-		return [...yearMap.values()].sort((a, b) => {
-			if (a.year === 'Unknown') return 1;
-			if (b.year === 'Unknown') return -1;
-			return (a.year as number) - (b.year as number);
-		});
-	});
-
-	// Derived: series for selected publisher + year
+	// Derived: series for selected publisher
 	let filteredSeries = $derived(() => {
-		if (browsePath.length < 2) return [];
-		const pub = browsePath[0] as string;
-		const yr = browsePath[1];
+		if (browsePath.length < 1) return [];
+		const pub = browsePath[0];
 		return allSeries
 			.filter(s => {
 				const sPub = s.publisher_name || 'Unknown Publisher';
-				const sYr = s.year ?? 'Unknown';
-				return sPub === pub && sYr === yr;
+				return sPub === pub;
 			})
 			.sort((a, b) => a.title.localeCompare(b.title));
 	});
@@ -130,7 +104,7 @@
 		}
 	}
 
-	function navigateTo(...path: (string | number)[]) {
+	function navigateTo(...path: string[]) {
 		browsePath = path;
 	}
 
@@ -177,7 +151,7 @@
 					onclick={() => switchView('browse')}
 					class="px-3 py-1.5 text-sm rounded-md transition-colors flex items-center gap-1.5
 						{viewMode === 'browse' ? 'bg-gray-600 text-white' : 'bg-gray-700 text-gray-400 hover:bg-gray-600'}"
-					title="Browse by Publisher / Year"
+					title="Browse by Publisher"
 				>
 					<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
@@ -213,12 +187,6 @@
 					class="px-3 py-1.5 text-sm rounded-md transition-colors {sortBy === 'title' ? 'bg-amber-500 text-gray-900' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}"
 				>
 					A-Z {sortBy === 'title' ? (order === 'asc' ? '↑' : '↓') : ''}
-				</button>
-				<button
-					onclick={() => toggleSort('year')}
-					class="px-3 py-1.5 text-sm rounded-md transition-colors {sortBy === 'year' ? 'bg-amber-500 text-gray-900' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}"
-				>
-					Year {sortBy === 'year' ? (order === 'asc' ? '↑' : '↓') : ''}
 				</button>
 				<button
 					onclick={() => toggleSort('issue_count')}
@@ -300,18 +268,7 @@
 					<svg class="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
 					</svg>
-					<button
-						onclick={() => navigateTo(browsePath[0])}
-						class="transition-colors {browsePath.length === 1 ? 'text-amber-400 font-semibold' : 'text-gray-400 hover:text-amber-300'}"
-					>
-						{browsePath[0]}
-					</button>
-				{/if}
-				{#if browsePath.length >= 2}
-					<svg class="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-					</svg>
-					<span class="text-amber-400 font-semibold">{browsePath[1]}</span>
+					<span class="text-amber-400 font-semibold">{browsePath[0]}</span>
 				{/if}
 			</nav>
 
@@ -349,41 +306,8 @@
 					</div>
 				{/if}
 
-			<!-- Level 1: Years for a publisher -->
+			<!-- Level 1: Series for a publisher -->
 			{:else if browsePath.length === 1}
-				<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
-					{#each years() as yr (yr.year)}
-						<button
-							onclick={() => navigateTo(browsePath[0], yr.year)}
-							class="group block rounded-lg overflow-hidden bg-gray-800 shadow-lg hover:shadow-xl hover:ring-2 hover:ring-amber-400/50 transition-all text-left"
-						>
-							<div class="relative aspect-[3/2] bg-gradient-to-br from-gray-700 to-gray-800 flex items-center justify-center">
-								<span class="text-4xl font-bold text-gray-600 group-hover:text-amber-500/50 transition-colors">
-									{yr.year}
-								</span>
-								<div class="absolute top-2 right-2 bg-gray-900/80 backdrop-blur-sm text-gray-100 text-xs font-bold px-2 py-0.5 rounded-full shadow">
-									{yr.seriesCount} series
-								</div>
-							</div>
-							<div class="p-3">
-								<p class="text-sm text-gray-200 font-medium">
-									{yr.year}
-								</p>
-								<p class="text-xs text-gray-500 mt-0.5">
-									{yr.fileCount} file{yr.fileCount !== 1 ? 's' : ''}
-								</p>
-							</div>
-						</button>
-					{/each}
-				</div>
-				{#if years().length === 0}
-					<div class="flex flex-col items-center justify-center py-20 text-gray-400">
-						<p class="text-lg font-medium">No years found</p>
-					</div>
-				{/if}
-
-			<!-- Level 2: Series for a publisher + year -->
-			{:else if browsePath.length === 2}
 				<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
 					{#each filteredSeries() as s (s.id)}
 						<SeriesCard series={s} />

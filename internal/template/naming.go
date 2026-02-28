@@ -27,7 +27,6 @@ type TemplateContext struct {
 	SortSeries string
 	Number     string
 	Title      string
-	Year       string
 	Publisher  string
 	Format     string
 	CoverDate  string
@@ -184,7 +183,6 @@ var validVariables = map[string]bool{
 	"sort_series": true,
 	"number":      true,
 	"title":       true,
-	"year":        true,
 	"publisher":   true,
 	"format":      true,
 	"cover_date":  true,
@@ -207,8 +205,6 @@ func resolveVariable(name string, ctx TemplateContext) string {
 		return ctx.Number
 	case "title":
 		return ctx.Title
-	case "year":
-		return ctx.Year
 	case "publisher":
 		return ctx.Publisher
 	case "format":

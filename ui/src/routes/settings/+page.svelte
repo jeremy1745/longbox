@@ -84,7 +84,6 @@
 		{ name: '{sort_series}', desc: 'Sort-friendly title' },
 		{ name: '{number}', desc: 'Issue number' },
 		{ name: '{title}', desc: 'Issue title' },
-		{ name: '{year}', desc: 'Series start year' },
 		{ name: '{publisher}', desc: 'Publisher name' },
 		{ name: '{format}', desc: 'File extension' },
 		{ name: '{cover_date}', desc: 'Cover date' },

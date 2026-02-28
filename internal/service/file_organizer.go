@@ -135,9 +135,6 @@ func (s *FileOrganizerService) Preview(libraryDir, templateStr string) ([]Rename
 			StoreDate:  issue.StoreDate,
 			Publisher:  series.PublisherName,
 		}
-		if series.Year != nil {
-			ctx.Year = fmt.Sprintf("%d", *series.Year)
-		}
 		if issue.Writers != "" {
 			// Use first writer only for filename
 			ctx.Writers = strings.SplitN(issue.Writers, ",", 2)[0]
