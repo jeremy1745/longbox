@@ -21,4 +21,4 @@ clean:
 release: ui-build
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o dist/longbox-linux-amd64 ./cmd/longbox
 	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o dist/longbox-darwin-arm64 ./cmd/longbox
-	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o dist/longbox-windows-amd64.exe ./cmd/longbox
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "-H windowsgui" -o dist/longbox-windows-amd64.exe ./cmd/longbox

@@ -18,7 +18,14 @@ type JobFunc func(ctx context.Context, progress ProgressFunc) error
 // ProgressFunc is called by jobs to report progress.
 type ProgressFunc func(processed, total int, message string)
 
-// Scheduler manages background job execution.
+type queuedJob struct {
+	id      int64
+	jobType model.JobType
+	handler JobFunc
+}
+
+// Scheduler manages background job execution with a serial queue.
+// Only one job runs at a time; additional submissions are queued.
 type Scheduler struct {
 	jobRepo  *repository.JobRepo
 	eventBus *EventBus
@@ -26,15 +33,22 @@ type Scheduler struct {
 	mu       sync.Mutex
 	running  map[int64]context.CancelFunc // active job ID → cancel func
 	handlers map[model.JobType]JobFunc
+
+	queue  chan queuedJob
+	stopCh chan struct{}
 }
 
 func NewScheduler(jobRepo *repository.JobRepo, eventBus *EventBus) *Scheduler {
-	return &Scheduler{
+	s := &Scheduler{
 		jobRepo:  jobRepo,
 		eventBus: eventBus,
 		running:  make(map[int64]context.CancelFunc),
 		handlers: make(map[model.JobType]JobFunc),
+		queue:    make(chan queuedJob, 100),
+		stopCh:   make(chan struct{}),
 	}
+	go s.processQueue()
+	return s
 }
 
 // RegisterHandler registers a handler function for a job type.
@@ -42,15 +56,15 @@ func (s *Scheduler) RegisterHandler(jobType model.JobType, fn JobFunc) {
 	s.handlers[jobType] = fn
 }
 
-// Submit creates a new job and starts it in the background.
-// Returns the job immediately (in pending/running state).
+// Submit creates a new job and queues it for execution.
+// Returns the job immediately in pending state.
 func (s *Scheduler) Submit(jobType model.JobType) (*model.Job, error) {
 	handler, ok := s.handlers[jobType]
 	if !ok {
 		return nil, fmt.Errorf("no handler registered for job type %q", jobType)
 	}
 
-	// Check if a job of this type is already running
+	// Check if a job of this type is already running or queued
 	s.mu.Lock()
 	for id := range s.running {
 		job, err := s.jobRepo.GetByID(id)
@@ -61,7 +75,7 @@ func (s *Scheduler) Submit(jobType model.JobType) (*model.Job, error) {
 	}
 	s.mu.Unlock()
 
-	// Create job record
+	// Create job record (starts as pending)
 	job, err := s.jobRepo.Create(jobType)
 	if err != nil {
 		return nil, fmt.Errorf("creating job: %w", err)
@@ -70,10 +84,27 @@ func (s *Scheduler) Submit(jobType model.JobType) (*model.Job, error) {
 	// Broadcast job created event
 	s.eventBus.Publish(Event{Type: "job:created", Data: job})
 
-	// Run in background
-	go s.execute(job.ID, jobType, handler)
+	// Queue for execution
+	s.queue <- queuedJob{id: job.ID, jobType: jobType, handler: handler}
 
 	return job, nil
+}
+
+// processQueue runs jobs one at a time from the queue.
+func (s *Scheduler) processQueue() {
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case queued := <-s.queue:
+			// Check if the job was cancelled while waiting in the queue
+			job, err := s.jobRepo.GetByID(queued.id)
+			if err != nil || job == nil || job.Status == model.JobStatusCancelled {
+				continue
+			}
+			s.execute(queued.id, queued.jobType, queued.handler)
+		}
+	}
 }
 
 func (s *Scheduler) execute(jobID int64, jobType model.JobType, handler JobFunc) {
@@ -152,15 +183,11 @@ func (s *Scheduler) broadcastJobUpdate(jobID int64) {
 	s.eventBus.Publish(Event{Type: "job:updated", Data: job})
 }
 
-// Cancel stops a running job.
+// Cancel stops a running job, or removes a pending job from the queue.
 func (s *Scheduler) Cancel(jobID int64) error {
 	s.mu.Lock()
 	cancel, ok := s.running[jobID]
 	s.mu.Unlock()
-
-	if !ok {
-		return fmt.Errorf("job %d is not running", jobID)
-	}
 
 	// Mark cancelled in the DB immediately so the UI reflects it
 	if err := s.jobRepo.MarkCancelled(jobID); err != nil {
@@ -168,8 +195,13 @@ func (s *Scheduler) Cancel(jobID int64) error {
 	}
 	s.broadcastJobUpdate(jobID)
 
-	// Signal the goroutine to stop
-	cancel()
+	if ok {
+		// Signal the running goroutine to stop
+		cancel()
+	}
+	// If not running, it was pending in the queue — the DB status is now
+	// cancelled, so processQueue will skip it when it's dequeued.
+
 	return nil
 }
 
@@ -193,8 +225,10 @@ func (s *Scheduler) ActiveCount() int {
 	return len(s.running)
 }
 
-// Shutdown cancels all running jobs and waits briefly for them to finish.
+// Shutdown cancels all running jobs and stops the queue processor.
 func (s *Scheduler) Shutdown() {
+	close(s.stopCh)
+
 	s.mu.Lock()
 	for id, cancel := range s.running {
 		slog.Info("cancelling job for shutdown", "job_id", id)
