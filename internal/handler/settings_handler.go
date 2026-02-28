@@ -15,6 +15,7 @@ import (
 	"github.com/jeremy/longbox/internal/scanner"
 	"github.com/jeremy/longbox/internal/scheduler"
 	"github.com/jeremy/longbox/internal/service"
+	"github.com/jeremy/longbox/internal/slack"
 )
 
 type SettingsHandler struct {
@@ -250,5 +251,108 @@ func (h *SettingsHandler) UpdatePullListSchedule(w http.ResponseWriter, r *http.
 		"pull_list_day":       dayInt,
 		"pull_list_hour":      hourInt,
 		"pull_list_last_run":  lastRun,
+	})
+}
+
+// slackSettingKeys is the whitelist of allowed Slack setting keys.
+var slackSettingKeys = map[string]bool{
+	"slack_enabled":                              true,
+	"slack_webhook_url":                          true,
+	"slack_notify_scan_complete":                 true,
+	"slack_notify_metadata_refresh_complete":     true,
+	"slack_notify_pull_list_search_complete":     true,
+	"slack_notify_download_grabbed":              true,
+	"slack_notify_download_complete":             true,
+	"slack_notify_download_failed":               true,
+}
+
+// GetSlackSettings returns Slack notification configuration.
+// GET /api/v1/settings/slack
+func (h *SettingsHandler) GetSlackSettings(w http.ResponseWriter, r *http.Request) {
+	enabled, _ := h.settingRepo.Get("slack_enabled")
+	webhookURL, _ := h.settingRepo.Get("slack_webhook_url")
+
+	// Mask the webhook URL
+	maskedURL := ""
+	if webhookURL != "" {
+		if len(webhookURL) > 12 {
+			maskedURL = webhookURL[:12] + strings.Repeat("*", len(webhookURL)-12)
+		} else {
+			maskedURL = strings.Repeat("*", len(webhookURL))
+		}
+	}
+
+	toggleKeys := []string{
+		"slack_notify_scan_complete",
+		"slack_notify_metadata_refresh_complete",
+		"slack_notify_pull_list_search_complete",
+		"slack_notify_download_grabbed",
+		"slack_notify_download_complete",
+		"slack_notify_download_failed",
+	}
+	toggles := make(map[string]bool, len(toggleKeys))
+	for _, key := range toggleKeys {
+		val, _ := h.settingRepo.Get(key)
+		// Default to true (enabled) unless explicitly "false"
+		toggles[key] = val != "false"
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"slack_enabled":     enabled == "true",
+		"slack_webhook_url": maskedURL,
+		"slack_webhook_set": webhookURL != "",
+		"toggles":           toggles,
+	})
+}
+
+// UpdateSlackSettings saves Slack notification settings.
+// PUT /api/v1/settings/slack
+func (h *SettingsHandler) UpdateSlackSettings(w http.ResponseWriter, r *http.Request) {
+	var req map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+
+	for key, val := range req {
+		if !slackSettingKeys[key] {
+			writeError(w, http.StatusBadRequest, "INVALID_KEY", fmt.Sprintf("unknown setting key: %s", key))
+			return
+		}
+		strVal := fmt.Sprintf("%v", val)
+		if err := h.settingRepo.Set(key, strVal); err != nil {
+			writeError(w, http.StatusInternalServerError, "SAVE_FAILED", err.Error())
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"status": "updated"})
+}
+
+// TestSlackWebhook sends a test message to the configured Slack webhook.
+// POST /api/v1/settings/slack/test
+func (h *SettingsHandler) TestSlackWebhook(w http.ResponseWriter, r *http.Request) {
+	webhookURL, err := h.settingRepo.Get("slack_webhook_url")
+	if err != nil || webhookURL == "" {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"success": false,
+			"message": "No Slack webhook URL configured",
+		})
+		return
+	}
+
+	client := slack.NewClient(webhookURL)
+	if err := client.TestWebhook(); err != nil {
+		slog.Warn("slack test webhook failed", "error", err)
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"message": "Test message sent successfully",
 	})
 }

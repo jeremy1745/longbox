@@ -97,6 +97,10 @@ func main() {
 	// Search service (needs eventBus for SSE updates)
 	searchSvc := service.NewSearchService(indexerRepo, dlClientRepo, dlHistoryRepo, issueRepo, seriesRepo, eventBus)
 
+	// Notification service (Slack webhooks)
+	notifSvc := service.NewNotificationService(settingRepo, eventBus, dlHistoryRepo)
+	notifSvc.Start()
+
 	// Pull list service
 	pullListSvc := service.NewPullListService(seriesRepo, issueRepo, wantListRepo, dlHistoryRepo, searchSvc, metaSvc)
 
@@ -202,6 +206,7 @@ func main() {
 
 	// Shutdown
 	close(sessionCleanupDone)
+	notifSvc.Stop()
 	cronSched.Stop()
 	sched.Shutdown()
 	if watcher != nil {

@@ -458,6 +458,20 @@ export interface DownloadHistoryResponse {
 	per_page: number;
 }
 
+// --- Slack Settings types ---
+
+export interface SlackSettings {
+	slack_enabled: boolean;
+	slack_webhook_url: string;
+	slack_webhook_set: boolean;
+	toggles: Record<string, boolean>;
+}
+
+export interface SlackTestResult {
+	success: boolean;
+	message: string;
+}
+
 // --- SSE Event types ---
 
 export interface SSEEvent {

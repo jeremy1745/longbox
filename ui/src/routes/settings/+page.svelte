@@ -12,6 +12,8 @@
 		type DownloadClient,
 		type DownloadClientListResponse,
 		type DownloadClientTestResult,
+		type SlackSettings,
+		type SlackTestResult,
 	} from '$lib/api/client';
 	import { getAuthState, type AuthUser } from '$lib/stores/auth.svelte';
 
@@ -59,6 +61,14 @@
 	// Pull list schedule state
 	let pullListSaving = $state(false);
 	let pullListMessage = $state<string | null>(null);
+
+	// Slack notification state
+	let slackSettings = $state<SlackSettings | null>(null);
+	let slackSaving = $state(false);
+	let slackMessage = $state<string | null>(null);
+	let slackWebhookInput = $state('');
+	let slackTesting = $state(false);
+	let slackTestResult = $state<SlackTestResult | null>(null);
 
 	// Mylar3 metadata state
 	let mylarWriting = $state(false);
@@ -384,6 +394,65 @@
 		}
 	}
 
+	// --- Slack notification functions ---
+
+	async function loadSlackSettings() {
+		try {
+			slackSettings = await ApiClient.get<SlackSettings>('/settings/slack');
+		} catch { /* ignore */ }
+	}
+
+	async function saveSlackSetting(key: string, value: boolean) {
+		slackSaving = true;
+		slackMessage = null;
+		try {
+			await ApiClient.put('/settings/slack', { [key]: value });
+			await loadSlackSettings();
+			slackMessage = 'Setting updated!';
+		} catch (e) {
+			slackMessage = e instanceof Error ? e.message : 'Save failed';
+		} finally {
+			slackSaving = false;
+		}
+	}
+
+	async function saveSlackWebhook() {
+		if (!slackWebhookInput.trim()) return;
+		slackSaving = true;
+		slackMessage = null;
+		try {
+			await ApiClient.put('/settings/slack', { slack_webhook_url: slackWebhookInput.trim() });
+			slackWebhookInput = '';
+			await loadSlackSettings();
+			slackMessage = 'Webhook URL saved!';
+		} catch (e) {
+			slackMessage = e instanceof Error ? e.message : 'Save failed';
+		} finally {
+			slackSaving = false;
+		}
+	}
+
+	async function testSlackWebhook() {
+		slackTesting = true;
+		slackTestResult = null;
+		try {
+			slackTestResult = await ApiClient.post<SlackTestResult>('/settings/slack/test');
+		} catch (e) {
+			slackTestResult = { success: false, message: e instanceof Error ? e.message : 'Test failed' };
+		} finally {
+			slackTesting = false;
+		}
+	}
+
+	const slackEventToggles = [
+		{ key: 'slack_notify_scan_complete', label: 'Scan Complete', desc: 'When a library scan finishes' },
+		{ key: 'slack_notify_metadata_refresh_complete', label: 'Metadata Refresh Complete', desc: 'When a metadata refresh finishes' },
+		{ key: 'slack_notify_pull_list_search_complete', label: 'Pull List Search Complete', desc: 'When a pull list search finishes' },
+		{ key: 'slack_notify_download_grabbed', label: 'Download Grabbed', desc: 'When an NZB is grabbed from an indexer' },
+		{ key: 'slack_notify_download_complete', label: 'Download Complete', desc: 'When a download finishes successfully' },
+		{ key: 'slack_notify_download_failed', label: 'Download Failed', desc: 'When a download fails' },
+	];
+
 	// --- User management functions ---
 
 	async function loadUsers() {
@@ -448,6 +517,7 @@
 		loadTemplate();
 		loadIndexers();
 		loadDlClients();
+		loadSlackSettings();
 		if (auth.user?.is_admin) {
 			loadUsers();
 		}
@@ -1050,6 +1120,104 @@
 						<div class="flex items-center gap-3 pt-2 border-t border-gray-700">
 							<span class="text-sm text-gray-400">Last run:</span>
 							<span class="text-sm text-gray-300">{settings.pull_list_last_run}</span>
+						</div>
+					{/if}
+				{/if}
+			</div>
+		</div>
+
+		<!-- Notifications Section -->
+		<div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+			<h2 class="text-xl font-semibold mb-4">Notifications</h2>
+			<p class="text-sm text-gray-400 mb-6">
+				Send notifications to a Slack channel when key events occur.
+			</p>
+
+			{#if slackMessage}
+				<p class="mb-4 text-sm {slackMessage.includes('updated') || slackMessage.includes('saved') || slackMessage.includes('Saved') || slackMessage.includes('Updated') ? 'text-green-400' : 'text-red-400'}">
+					{slackMessage}
+				</p>
+			{/if}
+
+			<div class="space-y-4">
+				<!-- Global enable toggle -->
+				<div class="flex items-center justify-between">
+					<div>
+						<p class="text-sm font-medium text-gray-200">Enable Slack Notifications</p>
+						<p class="text-xs text-gray-500 mt-0.5">Send event notifications to a Slack channel</p>
+					</div>
+					<button
+						onclick={() => saveSlackSetting('slack_enabled', !slackSettings?.slack_enabled)}
+						disabled={slackSaving}
+						class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors
+							{slackSettings?.slack_enabled ? 'bg-amber-500' : 'bg-gray-600'}"
+					>
+						<span class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform
+							{slackSettings?.slack_enabled ? 'translate-x-6' : 'translate-x-1'}"></span>
+					</button>
+				</div>
+
+				{#if slackSettings?.slack_enabled}
+					<!-- Webhook URL -->
+					<div class="space-y-2">
+						<label class="text-sm font-medium text-gray-300">Webhook URL</label>
+						<div class="flex gap-2">
+							<input
+								type="password"
+								bind:value={slackWebhookInput}
+								placeholder={slackSettings?.slack_webhook_set ? '••••••••••••' : 'https://hooks.slack.com/services/...'}
+								class="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-gray-100 placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-amber-500"
+							/>
+							<button
+								onclick={saveSlackWebhook}
+								disabled={slackSaving || !slackWebhookInput.trim()}
+								class="px-4 py-2 bg-amber-500 hover:bg-amber-600 disabled:bg-gray-600 disabled:text-gray-400 text-gray-900 text-sm font-semibold rounded transition-colors"
+							>
+								Save
+							</button>
+						</div>
+						{#if slackSettings?.slack_webhook_set}
+							<p class="text-xs text-green-400">Configured</p>
+						{/if}
+					</div>
+
+					<!-- Test button -->
+					{#if slackSettings?.slack_webhook_set}
+						<div class="flex items-center gap-3">
+							<button
+								onclick={testSlackWebhook}
+								disabled={slackTesting}
+								class="px-4 py-2 bg-gray-600 hover:bg-gray-500 disabled:bg-gray-700 disabled:text-gray-500 text-gray-100 text-sm rounded transition-colors"
+							>
+								{slackTesting ? 'Sending...' : 'Send Test Message'}
+							</button>
+							{#if slackTestResult}
+								<span class="text-sm {slackTestResult.success ? 'text-green-400' : 'text-red-400'}">
+									{slackTestResult.message}
+								</span>
+							{/if}
+						</div>
+
+						<!-- Per-event toggles -->
+						<div class="pt-4 border-t border-gray-700 space-y-3">
+							<p class="text-sm font-medium text-gray-300">Event Notifications</p>
+							{#each slackEventToggles as toggle}
+								<div class="flex items-center justify-between">
+									<div>
+										<p class="text-sm text-gray-200">{toggle.label}</p>
+										<p class="text-xs text-gray-500 mt-0.5">{toggle.desc}</p>
+									</div>
+									<button
+										onclick={() => saveSlackSetting(toggle.key, !(slackSettings?.toggles?.[toggle.key] ?? true))}
+										disabled={slackSaving}
+										class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors
+											{(slackSettings?.toggles?.[toggle.key] ?? true) ? 'bg-amber-500' : 'bg-gray-600'}"
+									>
+										<span class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform
+											{(slackSettings?.toggles?.[toggle.key] ?? true) ? 'translate-x-6' : 'translate-x-1'}"></span>
+									</button>
+								</div>
+							{/each}
 						</div>
 					{/if}
 				{/if}

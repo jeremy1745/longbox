@@ -121,6 +121,9 @@ func NewRouter(
 			r.Post("/settings/comicvine-api-key/test", settingsH.TestAPIKey)
 			r.Put("/settings/library-dir", settingsH.UpdateLibraryDir)
 			r.Put("/settings/pull-list-schedule", settingsH.UpdatePullListSchedule)
+			r.Get("/settings/slack", settingsH.GetSlackSettings)
+			r.Put("/settings/slack", settingsH.UpdateSlackSettings)
+			r.Post("/settings/slack/test", settingsH.TestSlackWebhook)
 
 			// Want List
 			r.Get("/want-list", wantListH.List)
