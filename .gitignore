@@ -1,6 +1,6 @@
 # Binary
-longbox
-longbox.exe
+/longbox
+/longbox.exe
 
 # Database & data
 *.db
