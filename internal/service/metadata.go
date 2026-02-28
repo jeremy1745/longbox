@@ -1093,8 +1093,23 @@ func (s *MetadataService) WantIssueBySeriesAndNumber(seriesCVID int, issueNumber
 	if err != nil {
 		return nil, fmt.Errorf("finding issue by number: %w", err)
 	}
+
+	// Future issues may not exist on ComicVine yet (walksoftly gets data from
+	// publisher solicitations). Create a minimal issue record so it can be wanted.
 	if issue == nil {
-		return nil, fmt.Errorf("issue #%s not found in series %q (CV %d)", issueNumber, series.Title, seriesCVID)
+		issue = &model.Issue{
+			SeriesID:    series.ID,
+			IssueNumber: issueNumber,
+			SortNumber:  scanner.SortNumber(issueNumber),
+			ReadStatus:  "unread",
+		}
+		if err := s.issueRepo.Create(issue); err != nil {
+			return nil, fmt.Errorf("creating issue #%s: %w", issueNumber, err)
+		}
+		slog.Info("created placeholder issue for future release",
+			"series_id", series.ID,
+			"issue_number", issueNumber,
+		)
 	}
 
 	// Add to want list (may already be there from TrackFromComicVine's AddMissingForSeries)
