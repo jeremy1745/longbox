@@ -37,6 +37,47 @@ func (h *IssueHandler) Get(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, issue)
 }
 
+// UpdateSkipStatus sets the skip status of an issue.
+// PUT /api/v1/issues/{id}/skip-status
+func (h *IssueHandler) UpdateSkipStatus(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid issue ID")
+		return
+	}
+
+	var body struct {
+		SkipStatus *string `json:"skip_status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+
+	// Validate skip_status
+	if body.SkipStatus != nil {
+		switch *body.SkipStatus {
+		case "skipped", "ignored":
+			// valid
+		default:
+			writeError(w, http.StatusBadRequest, "INVALID_STATUS", "skip_status must be 'skipped', 'ignored', or null")
+			return
+		}
+	}
+
+	if err := h.issueRepo.SetSkipStatus(id, body.SkipStatus); err != nil {
+		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", err.Error())
+		return
+	}
+
+	issue, err := h.issueRepo.GetByID(id)
+	if err != nil || issue == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"status": "updated"})
+		return
+	}
+	writeJSON(w, http.StatusOK, issue)
+}
+
 func (h *IssueHandler) UpdateReadStatus(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {

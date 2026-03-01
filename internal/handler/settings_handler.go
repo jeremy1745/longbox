@@ -386,6 +386,45 @@ func (h *SettingsHandler) UpdateMissingSearch(w http.ResponseWriter, r *http.Req
 	})
 }
 
+// UpdatePostProcessScript saves the post-processing script path.
+// PUT /api/v1/settings/post-process-script
+func (h *SettingsHandler) UpdatePostProcessScript(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ScriptPath string `json:"script_path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+
+	path := strings.TrimSpace(req.ScriptPath)
+
+	// Allow clearing the script
+	if path != "" {
+		// Validate the script exists and is executable
+		info, err := os.Stat(path)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "SCRIPT_NOT_FOUND",
+				fmt.Sprintf("script not found: %s", path))
+			return
+		}
+		if info.IsDir() {
+			writeError(w, http.StatusBadRequest, "NOT_A_FILE", "path is a directory, not a script")
+			return
+		}
+	}
+
+	if err := h.settingRepo.Set("post_process_script", path); err != nil {
+		writeError(w, http.StatusInternalServerError, "SAVE_FAILED", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":              "updated",
+		"post_process_script": path,
+	})
+}
+
 // slackSettingKeys is the whitelist of allowed Slack setting keys.
 var slackSettingKeys = map[string]bool{
 	"slack_enabled":                              true,

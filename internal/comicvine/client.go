@@ -197,6 +197,54 @@ func (c *Client) GetVolumeIssues(volumeID int) ([]Issue, error) {
 	return allIssues, nil
 }
 
+// SearchStoryArcs searches for story arcs by name.
+func (c *Client) SearchStoryArcs(query string, page int) ([]SearchResult, int, error) {
+	params := url.Values{}
+	params.Set("query", query)
+	params.Set("resources", "story_arc")
+	params.Set("limit", "10")
+	params.Set("offset", fmt.Sprintf("%d", (page-1)*10))
+	params.Set("field_list", "id,name,description,image,resource_type")
+
+	body, err := c.get("search", params)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	var resp APIResponse[[]SearchResult]
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, 0, fmt.Errorf("parsing response: %w", err)
+	}
+
+	if resp.StatusCode != 1 {
+		return nil, 0, fmt.Errorf("API error: %s (code %d)", resp.Error, resp.StatusCode)
+	}
+
+	return resp.Results, resp.NumberOfTotalResults, nil
+}
+
+// GetStoryArc fetches a story arc by ComicVine ID.
+func (c *Client) GetStoryArc(cvID int) (*StoryArc, error) {
+	params := url.Values{}
+	params.Set("field_list", "id,name,description,image,issues")
+
+	body, err := c.get(fmt.Sprintf("story_arc/4045-%d", cvID), params)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp APIResponse[StoryArc]
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("parsing response: %w", err)
+	}
+
+	if resp.StatusCode != 1 {
+		return nil, fmt.Errorf("API error: %s (code %d)", resp.Error, resp.StatusCode)
+	}
+
+	return &resp.Results, nil
+}
+
 // GetIssuesByStoreDate fetches all issues from ComicVine with store_date in the given range.
 // Dates should be in YYYY-MM-DD format. This returns ALL comics releasing in that window.
 func (c *Client) GetIssuesByStoreDate(startDate, endDate string) ([]Issue, error) {

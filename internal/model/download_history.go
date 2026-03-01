@@ -20,6 +20,7 @@ type DownloadHistoryItem struct {
 	IndexerID        *int64         `json:"indexer_id,omitempty"`
 	DownloadClientID *int64         `json:"download_client_id,omitempty"`
 	NZBName          string         `json:"nzb_name"`
+	NZBGuid          string         `json:"nzb_guid,omitempty"`
 	NZBURL           string         `json:"nzb_url,omitempty"`
 	ExternalID       string         `json:"external_id,omitempty"`
 	Status           DownloadStatus `json:"status"`

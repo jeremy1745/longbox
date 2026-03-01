@@ -1,12 +1,16 @@
 package service
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/jeremy/longbox/internal/archive"
 	"github.com/jeremy/longbox/internal/model"
@@ -24,6 +28,7 @@ type ImportService struct {
 	fileRepo      *repository.FileRepo
 	issueRepo     *repository.IssueRepo
 	seriesRepo    *repository.SeriesRepo
+	settingRepo   *repository.SettingRepo
 	libraryDir    string
 }
 
@@ -35,6 +40,7 @@ func NewImportService(
 	fileRepo *repository.FileRepo,
 	issueRepo *repository.IssueRepo,
 	seriesRepo *repository.SeriesRepo,
+	settingRepo *repository.SettingRepo,
 	libraryDir string,
 ) *ImportService {
 	return &ImportService{
@@ -45,6 +51,7 @@ func NewImportService(
 		fileRepo:      fileRepo,
 		issueRepo:     issueRepo,
 		seriesRepo:    seriesRepo,
+		settingRepo:   settingRepo,
 		libraryDir:    libraryDir,
 	}
 }
@@ -167,7 +174,77 @@ func (s *ImportService) importFile(item *model.DownloadHistoryItem, srcPath, lib
 		"issue_id", item.IssueID,
 	)
 
+	// Run post-process script if configured
+	s.runPostProcessScript(targetPath, item)
+
 	return nil
+}
+
+// runPostProcessScript executes the user-configured post-processing script after import.
+func (s *ImportService) runPostProcessScript(filePath string, item *model.DownloadHistoryItem) {
+	if s.settingRepo == nil {
+		return
+	}
+
+	scriptPath, err := s.settingRepo.Get("post_process_script")
+	if err != nil || scriptPath == "" {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, scriptPath)
+	cmd.Env = append(os.Environ(),
+		"LONGBOX_FILE_PATH="+filePath,
+	)
+
+	// Enrich with metadata if available
+	if item.IssueID != nil {
+		issue, err := s.issueRepo.GetByID(*item.IssueID)
+		if err == nil && issue != nil {
+			cmd.Env = append(cmd.Env,
+				"LONGBOX_ISSUE_NUMBER="+issue.IssueNumber,
+			)
+			if issue.ComicVineID != nil {
+				cmd.Env = append(cmd.Env,
+					fmt.Sprintf("LONGBOX_COMICVINE_ID=%d", *issue.ComicVineID),
+				)
+			}
+			series, err := s.seriesRepo.GetByID(issue.SeriesID)
+			if err == nil && series != nil {
+				cmd.Env = append(cmd.Env,
+					"LONGBOX_SERIES="+series.Title,
+				)
+			}
+		}
+	}
+
+	// Pass metadata as JSON on stdin
+	stdinData := map[string]interface{}{
+		"file_path": filePath,
+		"nzb_name":  item.NZBName,
+	}
+	if item.IssueID != nil {
+		stdinData["issue_id"] = *item.IssueID
+	}
+	stdinJSON, _ := json.Marshal(stdinData)
+	cmd.Stdin = strings.NewReader(string(stdinJSON))
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		slog.Warn("post-process script failed",
+			"script", scriptPath,
+			"error", err,
+			"output", string(output),
+		)
+		return
+	}
+
+	slog.Info("post-process script completed",
+		"script", scriptPath,
+		"file", filePath,
+	)
 }
 
 // buildTargetPath determines where the file should go in the library.

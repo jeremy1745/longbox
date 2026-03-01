@@ -41,7 +41,7 @@ func (r *IssueRepo) GetByID(id int64) (*model.Issue, error) {
 	row := r.read.QueryRow(`
 		SELECT i.id, i.series_id, i.issue_number, i.sort_number, COALESCE(i.title,''), i.comicvine_id,
 			COALESCE(i.description,''), COALESCE(i.cover_date,''), COALESCE(i.store_date,''), COALESCE(i.cover_url,''), COALESCE(i.writers,''), COALESCE(i.artists,''),
-			i.read_status, i.rating, i.last_read_page, i.metadata_locked, i.created_at, i.updated_at,
+			i.read_status, i.skip_status, i.rating, i.last_read_page, i.metadata_locked, i.created_at, i.updated_at,
 			CASE WHEN cf.id IS NOT NULL THEN 1 ELSE 0 END as has_file,
 			cf.id as file_id,
 			s.title as series_title
@@ -57,7 +57,7 @@ func (r *IssueRepo) FindBySeriesAndNumber(seriesID int64, number string) (*model
 	row := r.read.QueryRow(`
 		SELECT i.id, i.series_id, i.issue_number, i.sort_number, COALESCE(i.title,''), i.comicvine_id,
 			COALESCE(i.description,''), COALESCE(i.cover_date,''), COALESCE(i.store_date,''), COALESCE(i.cover_url,''), COALESCE(i.writers,''), COALESCE(i.artists,''),
-			i.read_status, i.rating, i.last_read_page, i.metadata_locked, i.created_at, i.updated_at,
+			i.read_status, i.skip_status, i.rating, i.last_read_page, i.metadata_locked, i.created_at, i.updated_at,
 			0 as has_file, NULL as file_id, '' as series_title
 		FROM issues i
 		WHERE i.series_id = ? AND i.issue_number = ?`, seriesID, number)
@@ -69,7 +69,7 @@ func (r *IssueRepo) ListBySeries(seriesID int64) ([]model.Issue, error) {
 	rows, err := r.read.Query(`
 		SELECT i.id, i.series_id, i.issue_number, i.sort_number, COALESCE(i.title,''), i.comicvine_id,
 			COALESCE(i.description,''), COALESCE(i.cover_date,''), COALESCE(i.store_date,''), COALESCE(i.cover_url,''), COALESCE(i.writers,''), COALESCE(i.artists,''),
-			i.read_status, i.rating, i.last_read_page, i.metadata_locked, i.created_at, i.updated_at,
+			i.read_status, i.skip_status, i.rating, i.last_read_page, i.metadata_locked, i.created_at, i.updated_at,
 			CASE WHEN cf.id IS NOT NULL THEN 1 ELSE 0 END as has_file,
 			cf.id as file_id,
 			s.title as series_title
@@ -126,7 +126,7 @@ func (r *IssueRepo) FindByComicVineID(cvID int64) (*model.Issue, error) {
 	row := r.read.QueryRow(`
 		SELECT i.id, i.series_id, i.issue_number, i.sort_number, COALESCE(i.title,''), i.comicvine_id,
 			COALESCE(i.description,''), COALESCE(i.cover_date,''), COALESCE(i.store_date,''), COALESCE(i.cover_url,''), COALESCE(i.writers,''), COALESCE(i.artists,''),
-			i.read_status, i.rating, i.last_read_page, i.metadata_locked, i.created_at, i.updated_at,
+			i.read_status, i.skip_status, i.rating, i.last_read_page, i.metadata_locked, i.created_at, i.updated_at,
 			0 as has_file, NULL as file_id, '' as series_title
 		FROM issues i
 		WHERE i.comicvine_id = ?`, cvID)
@@ -144,7 +144,7 @@ func (r *IssueRepo) ListByDateRange(start, end string, trackedOnly bool) ([]mode
 	query := fmt.Sprintf(`
 		SELECT i.id, i.series_id, i.issue_number, i.sort_number, COALESCE(i.title,''), i.comicvine_id,
 			COALESCE(i.description,''), COALESCE(i.cover_date,''), COALESCE(i.store_date,''), COALESCE(i.cover_url,''), COALESCE(i.writers,''), COALESCE(i.artists,''),
-			i.read_status, i.rating, i.last_read_page, i.metadata_locked, i.created_at, i.updated_at,
+			i.read_status, i.skip_status, i.rating, i.last_read_page, i.metadata_locked, i.created_at, i.updated_at,
 			CASE WHEN cf.id IS NOT NULL THEN 1 ELSE 0 END as has_file,
 			cf.id as file_id,
 			s.title as series_title
@@ -180,13 +180,39 @@ func (r *IssueRepo) UpdateLastReadPage(id int64, page int) error {
 	return err
 }
 
+// SetSkipStatus sets the skip status of an issue.
+func (r *IssueRepo) SetSkipStatus(id int64, status *string) error {
+	_, err := r.write.Exec(`UPDATE issues SET skip_status = ?, updated_at = ? WHERE id = ?`,
+		status, time.Now().UTC().Format(time.RFC3339), id)
+	return err
+}
+
+// BulkSetSkipStatus updates skip_status for all issues in a series matching a filter.
+func (r *IssueRepo) BulkSetSkipStatus(seriesID int64, fromStatus, toStatus *string) (int64, error) {
+	var res sql.Result
+	var err error
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	if fromStatus == nil {
+		res, err = r.write.Exec(`UPDATE issues SET skip_status = ?, updated_at = ? WHERE series_id = ? AND skip_status IS NULL`,
+			toStatus, now, seriesID)
+	} else {
+		res, err = r.write.Exec(`UPDATE issues SET skip_status = ?, updated_at = ? WHERE series_id = ? AND skip_status = ?`,
+			toStatus, now, seriesID, *fromStatus)
+	}
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 func scanIssue(row *sql.Row) (*model.Issue, error) {
 	i := &model.Issue{}
 	var createdAt, updatedAt string
 	err := row.Scan(
 		&i.ID, &i.SeriesID, &i.IssueNumber, &i.SortNumber, &i.Title, &i.ComicVineID,
 		&i.Description, &i.CoverDate, &i.StoreDate, &i.CoverURL, &i.Writers, &i.Artists,
-		&i.ReadStatus, &i.Rating, &i.LastReadPage, &i.MetadataLocked, &createdAt, &updatedAt,
+		&i.ReadStatus, &i.SkipStatus, &i.Rating, &i.LastReadPage, &i.MetadataLocked, &createdAt, &updatedAt,
 		&i.HasFile, &i.FileID, &i.SeriesTitle,
 	)
 	if err == sql.ErrNoRows {
@@ -206,7 +232,7 @@ func scanIssueRow(rows *sql.Rows) (*model.Issue, error) {
 	err := rows.Scan(
 		&i.ID, &i.SeriesID, &i.IssueNumber, &i.SortNumber, &i.Title, &i.ComicVineID,
 		&i.Description, &i.CoverDate, &i.StoreDate, &i.CoverURL, &i.Writers, &i.Artists,
-		&i.ReadStatus, &i.Rating, &i.LastReadPage, &i.MetadataLocked, &createdAt, &updatedAt,
+		&i.ReadStatus, &i.SkipStatus, &i.Rating, &i.LastReadPage, &i.MetadataLocked, &createdAt, &updatedAt,
 		&i.HasFile, &i.FileID, &i.SeriesTitle,
 	)
 	if err != nil {

@@ -78,6 +78,23 @@ type PersonCredit struct {
 	Role string `json:"role"`
 }
 
+// StoryArc represents a story arc from ComicVine.
+type StoryArc struct {
+	ID          int              `json:"id"`
+	Name        string           `json:"name"`
+	Description string           `json:"description"`
+	Image       *Image           `json:"image"`
+	SiteURL     string           `json:"site_detail_url"`
+	Issues      []StoryArcIssueRef `json:"issues"`
+}
+
+// StoryArcIssueRef is a brief issue reference within a story arc.
+type StoryArcIssueRef struct {
+	ID          int    `json:"id"`
+	Name        string `json:"name"`
+	IssueNumber string `json:"issue_number"`
+}
+
 // SearchResult is the format for search results.
 type SearchResult struct {
 	ID          int        `json:"id"`

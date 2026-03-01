@@ -80,6 +80,11 @@ func (s *MetadataService) HasAPIKey() bool {
 	return s.cv.HasAPIKey()
 }
 
+// FindIssueByCVID finds a local issue by its ComicVine ID.
+func (s *MetadataService) FindIssueByCVID(cvID int64) (*model.Issue, error) {
+	return s.issueRepo.FindByComicVineID(cvID)
+}
+
 // GetAPIKey returns the current API key (masked for display).
 func (s *MetadataService) GetAPIKeyMasked() string {
 	dbKey, _ := s.settingRepo.Get("comicvine_api_key")
@@ -182,6 +187,52 @@ func (s *MetadataService) GetVolume(cvID int) (*comicvine.Volume, error) {
 		return nil, fmt.Errorf("ComicVine API key not configured")
 	}
 	return s.cv.GetVolume(cvID)
+}
+
+// VolumeIssuePreview is a lightweight issue representation for browse previews.
+type VolumeIssuePreview struct {
+	ComicVineID int    `json:"comicvine_id"`
+	IssueNumber string `json:"issue_number"`
+	Title       string `json:"title,omitempty"`
+	CoverDate   string `json:"cover_date,omitempty"`
+	StoreDate   string `json:"store_date,omitempty"`
+	CoverURL    string `json:"cover_url,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+// GetVolumeIssuesPreview fetches all issues for a ComicVine volume without persisting.
+func (s *MetadataService) GetVolumeIssuesPreview(cvVolumeID int) ([]VolumeIssuePreview, error) {
+	if !s.cv.HasAPIKey() {
+		return nil, fmt.Errorf("ComicVine API key not configured")
+	}
+
+	cvIssues, err := s.cv.GetVolumeIssues(cvVolumeID)
+	if err != nil {
+		return nil, fmt.Errorf("fetching volume issues: %w", err)
+	}
+
+	var out []VolumeIssuePreview
+	for _, ci := range cvIssues {
+		coverURL := ""
+		if ci.Image != nil {
+			coverURL = ci.Image.SmallURL
+		}
+		desc := comicvine.StripHTML(ci.Description)
+		if len(desc) > 300 {
+			desc = desc[:300] + "..."
+		}
+		out = append(out, VolumeIssuePreview{
+			ComicVineID: ci.ID,
+			IssueNumber: ci.IssueNumber,
+			Title:       ci.Name,
+			CoverDate:   ci.CoverDate,
+			StoreDate:   ci.StoreDate,
+			CoverURL:    coverURL,
+			Description: desc,
+		})
+	}
+
+	return out, nil
 }
 
 // MatchSeriesToVolume matches a local series to a ComicVine volume and applies metadata.
@@ -943,7 +994,7 @@ func (s *MetadataService) buildLocalOnlyResults(
 // TrackFromComicVine ensures a local series exists for the given ComicVine volume ID,
 // populates it with metadata and issues from ComicVine, marks it as tracked,
 // and adds missing issues to the want list. Returns the series and count of want list items added.
-func (s *MetadataService) TrackFromComicVine(cvVolumeID int, wantListRepo *repository.WantListRepo) (*model.Series, int, error) {
+func (s *MetadataService) TrackFromComicVine(cvVolumeID int, wantListRepo *repository.WantListRepo, wantAll ...bool) (*model.Series, int, error) {
 	if !s.cv.HasAPIKey() {
 		return nil, 0, fmt.Errorf("ComicVine API key not configured")
 	}
@@ -995,9 +1046,10 @@ func (s *MetadataService) TrackFromComicVine(cvVolumeID int, wantListRepo *repos
 		return nil, 0, fmt.Errorf("tracking series: %w", err)
 	}
 
-	// Step 6: Add missing issues to the want list
+	// Step 6: Add missing issues to the want list (unless wantAll=false)
 	wantAdded := 0
-	if wantListRepo != nil {
+	shouldWantAll := len(wantAll) == 0 || wantAll[0]
+	if wantListRepo != nil && shouldWantAll {
 		added, err := wantListRepo.AddMissingForSeries(series.ID)
 		if err != nil {
 			slog.Warn("failed to add missing issues to want list", "series_id", series.ID, "error", err)
@@ -1193,6 +1245,21 @@ func (s *MetadataService) GetSettings() map[string]interface{} {
 
 	missingLastRun, _ := s.settingRepo.Get("missing_search_last_run")
 	settings["missing_search_last_run"] = missingLastRun
+
+	// Post-process script
+	postProcessScript, _ := s.settingRepo.Get("post_process_script")
+	settings["post_process_script"] = postProcessScript
+
+	// Backup settings
+	backupOnStart, _ := s.settingRepo.Get("backup_on_start")
+	settings["backup_on_start"] = backupOnStart == "true"
+
+	backupRetentionStr, _ := s.settingRepo.Get("backup_retention")
+	backupRetention := 5
+	if r, err := strconv.Atoi(backupRetentionStr); err == nil && r > 0 {
+		backupRetention = r
+	}
+	settings["backup_retention"] = backupRetention
 
 	return settings
 }

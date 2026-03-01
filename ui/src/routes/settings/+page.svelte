@@ -87,6 +87,20 @@
 	let mylarWriting = $state(false);
 	let mylarMessage = $state<string | null>(null);
 
+	// Post-processing state
+	let postProcessInput = $state('');
+	let postProcessSaving = $state(false);
+	let postProcessMessage = $state<string | null>(null);
+
+	// Backup state
+	let backups = $state<{ name: string; size: number; created_at: string }[]>([]);
+	let backupCreating = $state(false);
+	let backupMessage = $state<string | null>(null);
+	let backupOnStartInput = $state(false);
+	let backupRetentionInput = $state(5);
+	let backupSettingSaving = $state(false);
+	let backupSettingMessage = $state<string | null>(null);
+
 	// Shutdown state
 	let shutdownConfirming = $state(false);
 	let shutdownTriggered = $state(false);
@@ -213,6 +227,67 @@
 
 	function basename(path: string): string {
 		return path.split('/').pop() || path;
+	}
+
+	async function savePostProcessScript() {
+		postProcessSaving = true;
+		postProcessMessage = null;
+		try {
+			await ApiClient.put('/settings/post-process-script', { script_path: postProcessInput.trim() });
+			postProcessMessage = postProcessInput.trim() ? 'Post-processing script saved!' : 'Post-processing script cleared.';
+			await loadSettings();
+		} catch (e) {
+			postProcessMessage = e instanceof Error ? e.message : 'Failed to save';
+		} finally {
+			postProcessSaving = false;
+		}
+	}
+
+	async function loadBackups() {
+		try {
+			const data = await ApiClient.get<{ backups: typeof backups }>('/admin/backups');
+			backups = data.backups || [];
+		} catch { /* ignore */ }
+	}
+
+	async function createBackup() {
+		backupCreating = true;
+		backupMessage = null;
+		try {
+			const data = await ApiClient.post<{ name: string; message: string }>('/admin/backup');
+			backupMessage = data.message || 'Backup created!';
+			await loadBackups();
+		} catch (e) {
+			backupMessage = e instanceof Error ? e.message : 'Backup failed';
+		} finally {
+			backupCreating = false;
+		}
+	}
+
+	async function deleteBackup(name: string) {
+		if (!confirm(`Delete backup ${name}?`)) return;
+		try {
+			await ApiClient.delete(`/admin/backups/${encodeURIComponent(name)}`);
+			backups = backups.filter(b => b.name !== name);
+		} catch (e) {
+			backupMessage = e instanceof Error ? e.message : 'Delete failed';
+		}
+	}
+
+	async function saveBackupSettings() {
+		backupSettingSaving = true;
+		backupSettingMessage = null;
+		try {
+			await ApiClient.put('/settings/backup', {
+				backup_on_start: backupOnStartInput,
+				backup_retention: backupRetentionInput
+			});
+			backupSettingMessage = 'Backup settings saved!';
+		} catch (e) {
+			backupSettingMessage = e instanceof Error ? e.message : 'Failed to save';
+		} finally {
+			backupSettingSaving = false;
+		}
 	}
 
 	async function writeMylarMetadata() {
@@ -600,11 +675,18 @@
 	}
 
 	$effect(() => {
-		loadSettings();
+		loadSettings().then(() => {
+			if (settings) {
+				postProcessInput = settings.post_process_script || '';
+				backupOnStartInput = settings.backup_on_start ?? false;
+				backupRetentionInput = settings.backup_retention ?? 5;
+			}
+		});
 		loadTemplate();
 		loadIndexers();
 		loadDlClients();
 		loadSlackSettings();
+		loadBackups();
 		if (auth.user?.is_admin) {
 			loadUsers();
 		}
@@ -1595,6 +1677,119 @@
 			{:else}
 				<p class="text-sm text-gray-400">Authentication is enabled. Contact an admin to manage users.</p>
 			{/if}
+		</div>
+
+		<!-- Post-Processing Section -->
+		<div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+			<h2 class="text-xl font-semibold mb-4">Post-Processing</h2>
+			<p class="text-sm text-gray-400 mb-4">
+				Run a script after each download is imported. The script receives metadata via environment variables:
+				<code class="text-amber-400">LONGBOX_FILE_PATH</code>,
+				<code class="text-amber-400">LONGBOX_SERIES</code>,
+				<code class="text-amber-400">LONGBOX_ISSUE_NUMBER</code>,
+				<code class="text-amber-400">LONGBOX_COMICVINE_ID</code>.
+			</p>
+			<div class="flex gap-2">
+				<input
+					type="text"
+					bind:value={postProcessInput}
+					placeholder="/path/to/script.sh"
+					class="flex-1 px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-200
+						placeholder-gray-500 focus:outline-none focus:border-amber-500 text-sm font-mono"
+				/>
+				<button
+					onclick={savePostProcessScript}
+					disabled={postProcessSaving}
+					class="px-4 py-2 bg-amber-500 hover:bg-amber-600 disabled:bg-gray-600
+						text-gray-900 font-semibold rounded-lg transition-colors text-sm"
+				>
+					{postProcessSaving ? 'Saving...' : 'Save'}
+				</button>
+			</div>
+			{#if postProcessMessage}
+				<p class="text-sm mt-2 text-green-400">{postProcessMessage}</p>
+			{/if}
+		</div>
+
+		<!-- Database Backup Section -->
+		<div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+			<h2 class="text-xl font-semibold mb-4">Database Backup</h2>
+			<div class="space-y-4">
+				<div class="flex items-center gap-4">
+					<label class="flex items-center gap-2">
+						<input type="checkbox" bind:checked={backupOnStartInput}
+							class="w-4 h-4 rounded bg-gray-700 border-gray-600 text-amber-500 focus:ring-amber-500" />
+						<span class="text-sm text-gray-300">Backup on startup</span>
+					</label>
+					<div class="flex items-center gap-2">
+						<label class="text-sm text-gray-400">Keep last</label>
+						<input type="number" bind:value={backupRetentionInput} min="1" max="50"
+							class="w-16 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-200 text-sm
+								focus:outline-none focus:border-amber-500" />
+						<span class="text-sm text-gray-400">backups</span>
+					</div>
+					<button
+						onclick={saveBackupSettings}
+						disabled={backupSettingSaving}
+						class="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-200 text-sm rounded-lg transition-colors"
+					>
+						{backupSettingSaving ? 'Saving...' : 'Save Settings'}
+					</button>
+				</div>
+				{#if backupSettingMessage}
+					<p class="text-sm text-green-400">{backupSettingMessage}</p>
+				{/if}
+				<div class="flex items-center gap-2">
+					<button
+						onclick={createBackup}
+						disabled={backupCreating}
+						class="px-4 py-2 bg-amber-500 hover:bg-amber-600 disabled:bg-gray-600
+							text-gray-900 font-semibold rounded-lg transition-colors text-sm"
+					>
+						{backupCreating ? 'Creating...' : 'Create Backup Now'}
+					</button>
+					{#if backupMessage}
+						<span class="text-sm text-green-400">{backupMessage}</span>
+					{/if}
+				</div>
+				{#if backups.length > 0}
+					<div class="space-y-1">
+						{#each backups as backup (backup.name)}
+							<div class="flex items-center justify-between p-2 bg-gray-700/50 rounded text-sm">
+								<span class="text-gray-300 font-mono">{backup.name}</span>
+								<div class="flex items-center gap-3">
+									<span class="text-gray-500">{(backup.size / (1024 * 1024)).toFixed(1)} MB</span>
+									<a
+										href="/api/v1/admin/backups/{encodeURIComponent(backup.name)}/download"
+										class="text-amber-400 hover:text-amber-300"
+									>
+										Download
+									</a>
+									<button
+										onclick={() => deleteBackup(backup.name)}
+										class="text-gray-500 hover:text-red-400 transition-colors"
+									>
+										Delete
+									</button>
+								</div>
+							</div>
+						{/each}
+					</div>
+				{/if}
+			</div>
+		</div>
+
+		<!-- OPDS Section -->
+		<div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+			<h2 class="text-xl font-semibold mb-4">OPDS Server</h2>
+			<p class="text-sm text-gray-400 mb-3">
+				LongBox includes an OPDS catalog server for mobile reader apps like Panels, Chunky, or any OPDS-compatible reader.
+			</p>
+			<div class="bg-gray-700/50 rounded-lg p-4">
+				<p class="text-sm text-gray-300 mb-2">OPDS Catalog URL:</p>
+				<code class="text-amber-400 text-sm font-mono">{typeof window !== 'undefined' ? window.location.origin : ''}/opds/</code>
+				<p class="text-xs text-gray-500 mt-2">Add this URL in your OPDS reader app to browse and download comics from your library.</p>
+			</div>
 		</div>
 
 		<!-- Server Section -->

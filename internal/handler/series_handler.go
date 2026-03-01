@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 
@@ -65,7 +66,69 @@ func (h *SeriesHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Load child (annual) series
+	children, err := h.seriesRepo.GetChildSeries(id)
+	if err == nil && len(children) > 0 {
+		series.AnnualSeries = children
+	}
+
 	writeJSON(w, http.StatusOK, series)
+}
+
+// LinkAnnual links a series as an annual/special of the given parent.
+// PUT /api/v1/series/{id}/link-annual
+func (h *SeriesHandler) LinkAnnual(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid series ID")
+		return
+	}
+
+	var body struct {
+		ChildSeriesID int64 `json:"child_series_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+
+	if body.ChildSeriesID == id {
+		writeError(w, http.StatusBadRequest, "SELF_LINK", "cannot link a series to itself")
+		return
+	}
+
+	if err := h.seriesRepo.SetParentSeries(body.ChildSeriesID, &id); err != nil {
+		writeError(w, http.StatusInternalServerError, "LINK_FAILED", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "linked"})
+}
+
+// UnlinkAnnual removes the parent link from a child series.
+// PUT /api/v1/series/{id}/unlink-annual
+func (h *SeriesHandler) UnlinkAnnual(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid series ID")
+		return
+	}
+
+	var body struct {
+		ChildSeriesID int64 `json:"child_series_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+
+	if err := h.seriesRepo.SetParentSeries(body.ChildSeriesID, nil); err != nil {
+		writeError(w, http.StatusInternalServerError, "UNLINK_FAILED", err.Error())
+		return
+	}
+
+	_ = id // parent ID used for routing context
+	writeJSON(w, http.StatusOK, map[string]string{"status": "unlinked"})
 }
 
 func (h *SeriesHandler) Track(w http.ResponseWriter, r *http.Request) {
@@ -116,6 +179,44 @@ func (h *SeriesHandler) Untrack(w http.ResponseWriter, r *http.Request) {
 
 	series, _ := h.seriesRepo.GetByID(id)
 	writeJSON(w, http.StatusOK, map[string]any{"tracked": false, "series": series})
+}
+
+// BulkSetSkipStatus sets skip status for all matching issues in a series.
+// PUT /api/v1/series/{id}/issues/skip-status
+func (h *SeriesHandler) BulkSetSkipStatus(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid series ID")
+		return
+	}
+
+	var body struct {
+		FromStatus *string `json:"from_status"`
+		ToStatus   *string `json:"to_status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+
+	// Validate to_status
+	if body.ToStatus != nil {
+		switch *body.ToStatus {
+		case "skipped", "ignored":
+			// valid
+		default:
+			writeError(w, http.StatusBadRequest, "INVALID_STATUS", "to_status must be 'skipped', 'ignored', or null")
+			return
+		}
+	}
+
+	affected, err := h.issueRepo.BulkSetSkipStatus(id, body.FromStatus, body.ToStatus)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"affected": affected})
 }
 
 func (h *SeriesHandler) GetIssues(w http.ResponseWriter, r *http.Request) {

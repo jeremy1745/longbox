@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { ApiClient, type ComicFile, type FileListResponse, type FileRenameResponse } from '$lib/api/client';
+	import { ApiClient, type ComicFile, type FileListResponse, type FileRenameResponse, type DuplicatesResponse, type DuplicateGroup } from '$lib/api/client';
 
 	let files = $state<ComicFile[]>([]);
 	let total = $state(0);
@@ -10,6 +10,17 @@
 	let searchInput = $state('');
 	let searchQuery = $state('');
 	let searchTimeout: ReturnType<typeof setTimeout> | null = null;
+
+	// Tab state
+	let activeTab = $state<'files' | 'duplicates'>('files');
+
+	// Duplicates state
+	let dupesByHash = $state<DuplicateGroup[]>([]);
+	let dupesByIssue = $state<DuplicateGroup[]>([]);
+	let dupesLoading = $state(false);
+	let dupesError = $state<string | null>(null);
+	let backfilling = $state(false);
+	let backfillMessage = $state<string | null>(null);
 
 	// Inline rename state
 	let editingFileId = $state<number | null>(null);
@@ -49,12 +60,6 @@
 		if (p >= 1 && p <= totalPages) {
 			currentPage = p;
 		}
-	}
-
-	function formatSize(bytes: number): string {
-		if (bytes < 1024) return bytes + ' B';
-		if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-		return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
 	}
 
 	function startRename(file: ComicFile) {
@@ -112,11 +117,58 @@
 		}
 	}
 
+	async function loadDuplicates() {
+		dupesLoading = true;
+		dupesError = null;
+		try {
+			const data = await ApiClient.get<DuplicatesResponse>('/files/duplicates');
+			dupesByHash = data.by_hash || [];
+			dupesByIssue = data.by_issue || [];
+		} catch (e) {
+			dupesError = e instanceof Error ? e.message : 'Failed to load duplicates';
+		} finally {
+			dupesLoading = false;
+		}
+	}
+
+	async function deleteFile(id: number, deleteDisk: boolean) {
+		if (!confirm(deleteDisk ? 'Delete this file from disk and database?' : 'Remove from database only?')) return;
+		try {
+			await ApiClient.delete(`/files/${id}?delete_disk=${deleteDisk}`);
+			dupesByHash = dupesByHash.map(g => ({ ...g, files: g.files.filter(f => f.id !== id) })).filter(g => g.files.length > 1);
+			dupesByIssue = dupesByIssue.map(g => ({ ...g, files: g.files.filter(f => f.id !== id) })).filter(g => g.files.length > 1);
+		} catch (e) {
+			dupesError = e instanceof Error ? e.message : 'Delete failed';
+		}
+	}
+
+	async function backfillHashes() {
+		backfilling = true;
+		backfillMessage = null;
+		try {
+			const data = await ApiClient.post<{ job_id: number; message: string }>('/files/backfill-hashes');
+			backfillMessage = data.message || `Job #${data.job_id} started`;
+		} catch (e) {
+			backfillMessage = e instanceof Error ? e.message : 'Failed to start';
+		} finally {
+			backfilling = false;
+		}
+	}
+
+	function formatSize(bytes: number): string {
+		if (bytes < 1024) return bytes + ' B';
+		if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+		return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+	}
+
 	$effect(() => {
-		// Reactively reload when page or search changes
-		currentPage;
-		searchQuery;
-		loadFiles();
+		if (activeTab === 'files') {
+			currentPage;
+			searchQuery;
+			loadFiles();
+		} else {
+			loadDuplicates();
+		}
 	});
 </script>
 
@@ -126,6 +178,89 @@
 		<span class="text-sm text-gray-400">{total} file{total !== 1 ? 's' : ''}</span>
 	</div>
 
+	<!-- Tabs -->
+	<div class="flex gap-1 border-b border-gray-700">
+		<button
+			onclick={() => activeTab = 'files'}
+			class="px-4 py-2 text-sm font-medium transition-colors border-b-2
+				{activeTab === 'files' ? 'border-amber-500 text-amber-400' : 'border-transparent text-gray-400 hover:text-gray-300'}"
+		>
+			All Files
+		</button>
+		<button
+			onclick={() => activeTab = 'duplicates'}
+			class="px-4 py-2 text-sm font-medium transition-colors border-b-2
+				{activeTab === 'duplicates' ? 'border-amber-500 text-amber-400' : 'border-transparent text-gray-400 hover:text-gray-300'}"
+		>
+			Duplicates
+		</button>
+	</div>
+
+{#if activeTab === 'duplicates'}
+	<!-- Duplicates View -->
+	<div class="space-y-4">
+		<div class="flex items-center gap-3">
+			<button
+				onclick={backfillHashes}
+				disabled={backfilling}
+				class="px-4 py-2 bg-amber-500 hover:bg-amber-600 disabled:bg-gray-600
+					text-gray-900 font-semibold rounded-lg transition-colors text-sm"
+			>
+				{backfilling ? 'Starting...' : 'Backfill File Hashes'}
+			</button>
+			{#if backfillMessage}
+				<span class="text-sm text-green-400">{backfillMessage}</span>
+			{/if}
+		</div>
+
+		{#if dupesError}
+			<div class="bg-red-900/30 border border-red-700 rounded-lg p-4">
+				<p class="text-red-400">{dupesError}</p>
+			</div>
+		{/if}
+
+		{#if dupesLoading}
+			<div class="text-gray-400 py-8 text-center">Loading...</div>
+		{:else if dupesByHash.length === 0 && dupesByIssue.length === 0}
+			<div class="text-gray-400 py-8 text-center">No duplicates found.</div>
+		{:else}
+			{#if dupesByHash.length > 0}
+				<h3 class="text-lg font-semibold">By File Hash ({dupesByHash.length} group{dupesByHash.length !== 1 ? 's' : ''})</h3>
+				{#each dupesByHash as group (group.key)}
+					<div class="bg-gray-800 rounded-lg border border-gray-700 p-4 space-y-2">
+						<p class="text-xs text-gray-500 font-mono">Hash: {group.key}</p>
+						{#each group.files as file (file.id)}
+							<div class="flex items-center justify-between p-2 bg-gray-700/50 rounded">
+								<span class="text-sm text-gray-300 truncate flex-1" title={file.file_path}>{file.file_name}</span>
+								<div class="flex items-center gap-3 flex-shrink-0 ml-4">
+									<span class="text-xs text-gray-500">{formatSize(file.file_size)}</span>
+									<button onclick={() => deleteFile(file.id, true)} class="text-xs text-red-400 hover:text-red-300">Delete</button>
+								</div>
+							</div>
+						{/each}
+					</div>
+				{/each}
+			{/if}
+			{#if dupesByIssue.length > 0}
+				<h3 class="text-lg font-semibold mt-4">By Issue ({dupesByIssue.length} group{dupesByIssue.length !== 1 ? 's' : ''})</h3>
+				{#each dupesByIssue as group (group.key)}
+					<div class="bg-gray-800 rounded-lg border border-gray-700 p-4 space-y-2">
+						<p class="text-xs text-gray-500">Issue ID: {group.key}</p>
+						{#each group.files as file (file.id)}
+							<div class="flex items-center justify-between p-2 bg-gray-700/50 rounded">
+								<span class="text-sm text-gray-300 truncate flex-1" title={file.file_path}>{file.file_name}</span>
+								<div class="flex items-center gap-3 flex-shrink-0 ml-4">
+									<span class="text-xs text-gray-500">{formatSize(file.file_size)}</span>
+									<button onclick={() => deleteFile(file.id, true)} class="text-xs text-red-400 hover:text-red-300">Delete</button>
+								</div>
+							</div>
+						{/each}
+					</div>
+				{/each}
+			{/if}
+		{/if}
+	</div>
+{:else}
 	<!-- Search bar -->
 	<div>
 		<input
@@ -254,4 +389,5 @@
 			</div>
 		{/if}
 	{/if}
+{/if}
 </div>

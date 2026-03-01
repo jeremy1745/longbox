@@ -16,6 +16,7 @@ type Issue struct {
 	Writers        string    `json:"writers,omitempty"`
 	Artists        string    `json:"artists,omitempty"`
 	ReadStatus     string    `json:"read_status"`
+	SkipStatus     *string   `json:"skip_status,omitempty"`
 	Rating         *int      `json:"rating,omitempty"`
 	LastReadPage   *int      `json:"last_read_page,omitempty"`
 	MetadataLocked bool      `json:"metadata_locked"`

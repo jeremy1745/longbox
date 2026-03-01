@@ -19,8 +19,12 @@ type Series struct {
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 
+	// Parent series linking (annuals/specials)
+	ParentSeriesID *int64   `json:"parent_series_id,omitempty"`
+
 	// Computed fields (not stored directly)
-	IssueCount     int    `json:"issue_count"`
-	FileCount      int    `json:"file_count"`
-	PublisherName  string `json:"publisher_name,omitempty"`
+	IssueCount     int      `json:"issue_count"`
+	FileCount      int      `json:"file_count"`
+	PublisherName  string   `json:"publisher_name,omitempty"`
+	AnnualSeries   []Series `json:"annual_series,omitempty"`
 }

@@ -38,7 +38,7 @@ func (r *SeriesRepo) GetByID(id int64) (*model.Series, error) {
 	row := r.read.QueryRow(`
 		SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id,
 			COALESCE(s.description,''), s.status, s.total_issues, s.cover_file_id, s.tracked,
-			s.metadata_locked, s.last_cv_sync, s.created_at, s.updated_at,
+			s.metadata_locked, s.last_cv_sync, s.parent_series_id, s.created_at, s.updated_at,
 			COALESCE((SELECT COUNT(*) FROM issues WHERE series_id = s.id), 0) as issue_count,
 			COALESCE((SELECT COUNT(*) FROM comic_files cf JOIN issues i ON cf.issue_id = i.id WHERE i.series_id = s.id), 0) as file_count,
 			COALESCE(p.name, '') as publisher_name
@@ -55,7 +55,7 @@ func (r *SeriesRepo) FindByTitleAndYear(title string, year *int) (*model.Series,
 		row = r.read.QueryRow(`
 			SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id,
 				s.description, s.status, s.total_issues, s.cover_file_id, s.tracked,
-				s.metadata_locked, s.last_cv_sync, s.created_at, s.updated_at,
+				s.metadata_locked, s.last_cv_sync, s.parent_series_id, s.created_at, s.updated_at,
 				0 as issue_count, 0 as file_count, '' as publisher_name
 			FROM series s
 			WHERE LOWER(s.title) = LOWER(?) AND s.year = ?`, title, *year)
@@ -63,7 +63,7 @@ func (r *SeriesRepo) FindByTitleAndYear(title string, year *int) (*model.Series,
 		row = r.read.QueryRow(`
 			SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id,
 				s.description, s.status, s.total_issues, s.cover_file_id, s.tracked,
-				s.metadata_locked, s.last_cv_sync, s.created_at, s.updated_at,
+				s.metadata_locked, s.last_cv_sync, s.parent_series_id, s.created_at, s.updated_at,
 				0 as issue_count, 0 as file_count, '' as publisher_name
 			FROM series s
 			WHERE LOWER(s.title) = LOWER(?) AND s.year IS NULL`, title)
@@ -110,7 +110,7 @@ func (r *SeriesRepo) List(page, perPage int, sortBy, order string, trackedOnly .
 	query := fmt.Sprintf(`
 		SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id,
 			COALESCE(s.description,''), s.status, s.total_issues, s.cover_file_id, s.tracked,
-			s.metadata_locked, s.last_cv_sync, s.created_at, s.updated_at,
+			s.metadata_locked, s.last_cv_sync, s.parent_series_id, s.created_at, s.updated_at,
 			COALESCE((SELECT COUNT(*) FROM issues WHERE series_id = s.id), 0) as issue_count,
 			COALESCE((SELECT COUNT(*) FROM comic_files cf JOIN issues i ON cf.issue_id = i.id WHERE i.series_id = s.id), 0) as file_count,
 			COALESCE(p.name, '') as publisher_name
@@ -157,7 +157,7 @@ func (r *SeriesRepo) FindByComicVineID(cvID int64) (*model.Series, error) {
 	row := r.read.QueryRow(`
 		SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id,
 			COALESCE(s.description,''), s.status, s.total_issues, s.cover_file_id, s.tracked,
-			s.metadata_locked, s.last_cv_sync, s.created_at, s.updated_at,
+			s.metadata_locked, s.last_cv_sync, s.parent_series_id, s.created_at, s.updated_at,
 			COALESCE((SELECT COUNT(*) FROM issues WHERE series_id = s.id), 0) as issue_count,
 			COALESCE((SELECT COUNT(*) FROM comic_files cf JOIN issues i ON cf.issue_id = i.id WHERE i.series_id = s.id), 0) as file_count,
 			COALESCE(p.name, '') as publisher_name
@@ -179,7 +179,7 @@ func (r *SeriesRepo) ListTracked() ([]model.Series, error) {
 	rows, err := r.read.Query(`
 		SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id,
 			COALESCE(s.description,''), s.status, s.total_issues, s.cover_file_id, s.tracked,
-			s.metadata_locked, s.last_cv_sync, s.created_at, s.updated_at,
+			s.metadata_locked, s.last_cv_sync, s.parent_series_id, s.created_at, s.updated_at,
 			COALESCE((SELECT COUNT(*) FROM issues WHERE series_id = s.id), 0) as issue_count,
 			COALESCE((SELECT COUNT(*) FROM comic_files cf JOIN issues i ON cf.issue_id = i.id WHERE i.series_id = s.id), 0) as file_count,
 			COALESCE(p.name, '') as publisher_name
@@ -208,7 +208,7 @@ func (r *SeriesRepo) ListWithComicVineID() ([]model.Series, error) {
 	rows, err := r.read.Query(`
 		SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id,
 			COALESCE(s.description,''), s.status, s.total_issues, s.cover_file_id, s.tracked,
-			s.metadata_locked, s.last_cv_sync, s.created_at, s.updated_at,
+			s.metadata_locked, s.last_cv_sync, s.parent_series_id, s.created_at, s.updated_at,
 			COALESCE((SELECT COUNT(*) FROM issues WHERE series_id = s.id), 0) as issue_count,
 			COALESCE((SELECT COUNT(*) FROM comic_files cf JOIN issues i ON cf.issue_id = i.id WHERE i.series_id = s.id), 0) as file_count,
 			COALESCE(p.name, '') as publisher_name
@@ -238,13 +238,49 @@ func (r *SeriesRepo) UpdateCoverFileID(seriesID, fileID int64) error {
 	return err
 }
 
+// SetParentSeries links a series as a child (annual) of a parent series.
+func (r *SeriesRepo) SetParentSeries(id int64, parentID *int64) error {
+	_, err := r.write.Exec(`UPDATE series SET parent_series_id = ?, updated_at = ? WHERE id = ?`,
+		parentID, time.Now().UTC().Format(time.RFC3339), id)
+	return err
+}
+
+// GetChildSeries returns all series that are children (annuals) of the given parent.
+func (r *SeriesRepo) GetChildSeries(parentID int64) ([]model.Series, error) {
+	rows, err := r.read.Query(`
+		SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id,
+			COALESCE(s.description,''), s.status, s.total_issues, s.cover_file_id, s.tracked,
+			s.metadata_locked, s.last_cv_sync, s.parent_series_id, s.created_at, s.updated_at,
+			COALESCE((SELECT COUNT(*) FROM issues WHERE series_id = s.id), 0) as issue_count,
+			COALESCE((SELECT COUNT(*) FROM comic_files cf JOIN issues i ON cf.issue_id = i.id WHERE i.series_id = s.id), 0) as file_count,
+			COALESCE(p.name, '') as publisher_name
+		FROM series s
+		LEFT JOIN publishers p ON s.publisher_id = p.id
+		WHERE s.parent_series_id = ?
+		ORDER BY s.sort_title ASC`, parentID)
+	if err != nil {
+		return nil, fmt.Errorf("listing child series: %w", err)
+	}
+	defer rows.Close()
+
+	var seriesList []model.Series
+	for rows.Next() {
+		s, err := scanSeriesRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		seriesList = append(seriesList, *s)
+	}
+	return seriesList, nil
+}
+
 func scanSeries(row *sql.Row) (*model.Series, error) {
 	s := &model.Series{}
 	var createdAt, updatedAt string
 	err := row.Scan(
 		&s.ID, &s.Title, &s.SortTitle, &s.Year, &s.PublisherID, &s.ComicVineID,
 		&s.Description, &s.Status, &s.TotalIssues, &s.CoverFileID, &s.Tracked,
-		&s.MetadataLocked, &s.LastCVSync, &createdAt, &updatedAt,
+		&s.MetadataLocked, &s.LastCVSync, &s.ParentSeriesID, &createdAt, &updatedAt,
 		&s.IssueCount, &s.FileCount, &s.PublisherName,
 	)
 	if err == sql.ErrNoRows {
@@ -264,7 +300,7 @@ func scanSeriesRow(rows *sql.Rows) (*model.Series, error) {
 	err := rows.Scan(
 		&s.ID, &s.Title, &s.SortTitle, &s.Year, &s.PublisherID, &s.ComicVineID,
 		&s.Description, &s.Status, &s.TotalIssues, &s.CoverFileID, &s.Tracked,
-		&s.MetadataLocked, &s.LastCVSync, &createdAt, &updatedAt,
+		&s.MetadataLocked, &s.LastCVSync, &s.ParentSeriesID, &createdAt, &updatedAt,
 		&s.IssueCount, &s.FileCount, &s.PublisherName,
 	)
 	if err != nil {

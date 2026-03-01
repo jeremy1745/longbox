@@ -13,6 +13,8 @@
 		{ href: '/files', label: 'Files' },
 		{ href: '/wanted', label: 'Wanted' },
 		{ href: '/downloads', label: 'Downloads' },
+		{ href: '/story-arcs', label: 'Story Arcs' },
+		{ href: '/browse', label: 'Browse' },
 		{ href: '/calendar', label: 'Pull List' },
 		{ href: '/jobs', label: 'Jobs' },
 		{ href: '/settings', label: 'Settings' },

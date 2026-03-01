@@ -26,6 +26,7 @@ type SearchService struct {
 	dlHistoryRepo        *repository.DownloadHistoryRepo
 	issueRepo            *repository.IssueRepo
 	seriesRepo           *repository.SeriesRepo
+	blocklistRepo        *repository.BlocklistRepo
 	eventBus             *scheduler.EventBus
 	onDownloadCompleted  func(item *model.DownloadHistoryItem, storagePath string)
 }
@@ -36,6 +37,7 @@ func NewSearchService(
 	dlHistoryRepo *repository.DownloadHistoryRepo,
 	issueRepo *repository.IssueRepo,
 	seriesRepo *repository.SeriesRepo,
+	blocklistRepo *repository.BlocklistRepo,
 	eventBus *scheduler.EventBus,
 ) *SearchService {
 	return &SearchService{
@@ -44,6 +46,7 @@ func NewSearchService(
 		dlHistoryRepo: dlHistoryRepo,
 		issueRepo:     issueRepo,
 		seriesRepo:    seriesRepo,
+		blocklistRepo: blocklistRepo,
 		eventBus:      eventBus,
 	}
 }
@@ -149,7 +152,7 @@ func (s *SearchService) SearchQuery(ctx context.Context, query string) ([]Scored
 }
 
 // GrabResult sends an NZB to the first enabled download client and records the grab.
-func (s *SearchService) GrabResult(ctx context.Context, nzbURL, nzbName string, size int64, indexerID int64, issueID *int64) (*model.DownloadHistoryItem, error) {
+func (s *SearchService) GrabResult(ctx context.Context, nzbURL, nzbName, nzbGuid string, size int64, indexerID int64, issueID *int64) (*model.DownloadHistoryItem, error) {
 	// Validate NZB URL against configured indexer hosts to prevent SSRF
 	if err := s.validateNZBURL(nzbURL); err != nil {
 		return nil, err
@@ -195,6 +198,7 @@ func (s *SearchService) GrabResult(ctx context.Context, nzbURL, nzbName string, 
 		IndexerID:        &indexerID,
 		DownloadClientID: &dc.ID,
 		NZBName:          nzbName,
+		NZBGuid:          nzbGuid,
 		NZBURL:           nzbURL,
 		ExternalID:       nzoID,
 		Status:           model.DownloadStatusGrabbed,
@@ -354,7 +358,7 @@ func (s *SearchService) AutoSearchAndGrab(ctx context.Context, issueID int64) (*
 		"score", best.Score,
 	)
 
-	return s.GrabResult(ctx, best.NZBURL, best.Title, best.Size, best.IndexerID, &issueID)
+	return s.GrabResult(ctx, best.NZBURL, best.Title, best.GUID, best.Size, best.IndexerID, &issueID)
 }
 
 // CheckDownloadStatus polls SABnzbd for status updates on active downloads.
@@ -423,6 +427,15 @@ func (s *SearchService) CheckDownloadStatus(ctx context.Context) error {
 				"nzb", item.NZBName,
 				"status", newStatus,
 			)
+
+			// Auto-blocklist failed downloads
+			if newStatus == model.DownloadStatusFailed && s.blocklistRepo != nil && item.NZBGuid != "" {
+				if err := s.blocklistRepo.Add(item.NZBGuid, item.NZBName, "download failed"); err != nil {
+					slog.Warn("failed to add to blocklist", "guid", item.NZBGuid, "error", err)
+				} else {
+					slog.Info("added failed download to blocklist", "guid", item.NZBGuid, "nzb", item.NZBName)
+				}
+			}
 
 			// Trigger post-processing for completed downloads
 			if newStatus == model.DownloadStatusCompleted && slot.Storage != "" && s.onDownloadCompleted != nil {
@@ -497,14 +510,21 @@ func (s *SearchService) searchAllIndexers(ctx context.Context, query string) ([]
 
 	wg.Wait()
 
-	// Deduplicate by GUID
+	// Deduplicate by GUID and filter blocklist
 	seen := make(map[string]bool)
 	deduped := make([]newznab.SearchResult, 0, len(allResults))
 	for _, r := range allResults {
-		if !seen[r.GUID] {
-			seen[r.GUID] = true
-			deduped = append(deduped, r)
+		if seen[r.GUID] {
+			continue
 		}
+		seen[r.GUID] = true
+		// Check blocklist
+		if s.blocklistRepo != nil && r.GUID != "" {
+			if blocked, err := s.blocklistRepo.IsBlocked(r.GUID); err == nil && blocked {
+				continue
+			}
+		}
+		deduped = append(deduped, r)
 	}
 
 	return deduped, nil

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jeremy/longbox/internal/comicvine"
 	"github.com/jeremy/longbox/internal/repository"
 	"github.com/jeremy/longbox/internal/scanner"
 	"github.com/jeremy/longbox/internal/scheduler"
@@ -27,6 +28,9 @@ func NewRouter(
 	indexerRepo *repository.IndexerRepo,
 	dlClientRepo *repository.DownloadClientRepo,
 	dlHistoryRepo *repository.DownloadHistoryRepo,
+	blocklistRepo *repository.BlocklistRepo,
+	storyArcRepo *repository.StoryArcRepo,
+	cvClient *comicvine.Client,
 	librarySvc *service.LibraryService,
 	coverSvc *service.CoverService,
 	metaSvc *service.MetadataService,
@@ -35,6 +39,7 @@ func NewRouter(
 	searchSvc *service.SearchService,
 	metaWriterSvc *service.MetadataWriterService,
 	mylarSvc *service.MylarMetadataService,
+	backupSvc *service.BackupService,
 	sched *scheduler.Scheduler,
 	eventBus *scheduler.EventBus,
 	watcher *scanner.Watcher,
@@ -54,7 +59,7 @@ func NewRouter(
 
 	// Handlers
 	libraryH := NewLibraryHandler(librarySvc, fileRepo, seriesRepo, sched)
-	fileH := NewFileHandler(fileRepo)
+	fileH := NewFileHandler(fileRepo, librarySvc, sched)
 	coverH := NewCoverHandler(coverSvc, fileRepo)
 	seriesH := NewSeriesHandler(seriesRepo, issueRepo, wantListRepo)
 	issueH := NewIssueHandler(issueRepo)
@@ -67,9 +72,12 @@ func NewRouter(
 	readerH := NewReaderHandler(readerSvc, fileRepo, issueRepo)
 	indexerH := NewIndexerHandler(indexerRepo)
 	dlClientH := NewDownloadClientHandler(dlClientRepo)
-	searchH := NewSearchHandler(searchSvc, dlHistoryRepo, sched)
+	searchH := NewSearchHandler(searchSvc, dlHistoryRepo, blocklistRepo, sched)
 	metaWriterH := NewMetadataWriterHandler(metaWriterSvc)
 	mylarH := NewMylarMetadataHandler(seriesRepo, sched)
+	storyArcH := NewStoryArcHandler(storyArcRepo, metaSvc, cvClient)
+	backupH := NewBackupHandler(backupSvc, settingRepo)
+	opdsH := NewOPDSHandler(fileRepo, seriesRepo, coverSvc)
 	authH := NewAuthHandler(authSvc)
 
 	// Rate limiter: 5 attempts per minute for auth endpoints
@@ -96,6 +104,10 @@ func NewRouter(
 				r.Get("/auth/users", authH.ListUsers)
 				r.Post("/auth/users", authH.CreateUser)
 				r.Delete("/auth/users/{id}", authH.DeleteUser)
+				r.Post("/admin/backup", backupH.Create)
+				r.Get("/admin/backups", backupH.List)
+				r.Delete("/admin/backups/{name}", backupH.Delete)
+				r.Get("/admin/backups/{name}/download", backupH.Download)
 				r.Post("/admin/shutdown", func(w http.ResponseWriter, r *http.Request) {
 					w.Header().Set("Content-Type", "application/json")
 					json.NewEncoder(w).Encode(map[string]string{"message": "server is shutting down"})
@@ -118,16 +130,23 @@ func NewRouter(
 			r.Get("/series", seriesH.List)
 			r.Get("/series/{id}", seriesH.Get)
 			r.Get("/series/{id}/issues", seriesH.GetIssues)
+			r.Put("/series/{id}/issues/skip-status", seriesH.BulkSetSkipStatus)
+			r.Put("/series/{id}/link-annual", seriesH.LinkAnnual)
+			r.Put("/series/{id}/unlink-annual", seriesH.UnlinkAnnual)
 			r.Put("/series/{id}/track", seriesH.Track)
 			r.Put("/series/{id}/untrack", seriesH.Untrack)
 
 			// Issues
 			r.Get("/issues/{id}", issueH.Get)
 			r.Put("/issues/{id}/read-status", issueH.UpdateReadStatus)
+			r.Put("/issues/{id}/skip-status", issueH.UpdateSkipStatus)
 
 			// Files
 			r.Get("/files", fileH.List)
+			r.Get("/files/duplicates", fileH.Duplicates)
+			r.Post("/files/backfill-hashes", fileH.BackfillHashes)
 			r.Get("/files/{id}", fileH.Get)
+			r.Delete("/files/{id}", fileH.DeleteFile)
 			r.Put("/files/{id}/rename", fileH.Rename)
 
 			// Series files
@@ -139,8 +158,16 @@ func NewRouter(
 			// Metadata (ComicVine)
 			r.Get("/metadata/search", metaH.SearchVolumes)
 			r.Get("/metadata/volume/{cvid}", metaH.GetVolume)
+			r.Get("/metadata/volume/{cvid}/issues", metaH.GetVolumeIssues)
+			r.Get("/metadata/story-arcs/search", storyArcH.Search)
 			r.Post("/series/{id}/match", metaH.MatchSeries)
 			r.Post("/series/{id}/refresh", metaH.RefreshSeries)
+
+			// Story Arcs
+			r.Get("/story-arcs", storyArcH.List)
+			r.Get("/story-arcs/{id}", storyArcH.Get)
+			r.Post("/story-arcs/import", storyArcH.Import)
+			r.Delete("/story-arcs/{id}", storyArcH.Delete)
 
 			// Settings
 			r.Get("/settings", settingsH.GetSettings)
@@ -151,6 +178,8 @@ func NewRouter(
 			r.Put("/settings/auto-search", settingsH.UpdateAutoSearch)
 			r.Put("/settings/missing-search", settingsH.UpdateMissingSearch)
 			r.Put("/settings/auto-scan", settingsH.UpdateAutoScan)
+			r.Put("/settings/post-process-script", settingsH.UpdatePostProcessScript)
+			r.Put("/settings/backup", backupH.UpdateBackupSettings)
 			r.Get("/settings/slack", settingsH.GetSlackSettings)
 			r.Put("/settings/slack", settingsH.UpdateSlackSettings)
 			r.Post("/settings/slack/test", settingsH.TestSlack)
@@ -212,9 +241,23 @@ func NewRouter(
 			r.Get("/search/issue/{id}", searchH.SearchIssue)
 			r.Get("/search", searchH.SearchQuery)
 			r.Post("/search/grab", searchH.Grab)
+			r.Get("/search/blocklist", searchH.ListBlocklist)
+			r.Delete("/search/blocklist/{id}", searchH.DeleteBlocklistEntry)
+			r.Delete("/search/blocklist", searchH.ClearBlocklist)
 			r.Post("/search/pull-list", searchH.TriggerPullListSearch)
 			r.Get("/downloads", searchH.DownloadHistory)
 		})
+	})
+
+	// OPDS catalog (no auth — OPDS clients typically don't support it)
+	r.Route("/opds", func(r chi.Router) {
+		r.Get("/", opdsH.Root)
+		r.Get("/series", opdsH.SeriesCatalog)
+		r.Get("/series/{id}", opdsH.SeriesIssues)
+		r.Get("/recent", opdsH.Recent)
+		r.Get("/search", opdsH.Search)
+		r.Get("/file/{id}", opdsH.ServeFile)
+		r.Get("/cover/{id}", opdsH.ServeCover)
 	})
 
 	// Serve embedded frontend (SPA with fallback)

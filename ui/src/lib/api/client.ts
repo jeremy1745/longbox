@@ -110,6 +110,8 @@ export interface Series {
 	tracked: boolean;
 	issue_count: number;
 	file_count: number;
+	parent_series_id?: number;
+	annual_series?: Series[];
 	created_at: string;
 	updated_at: string;
 }
@@ -127,6 +129,7 @@ export interface Issue {
 	writers?: string;
 	artists?: string;
 	read_status: 'unread' | 'reading' | 'read';
+	skip_status?: 'skipped' | 'ignored' | null;
 	last_read_page?: number;
 	has_file: boolean;
 	file_id?: number;
@@ -226,6 +229,9 @@ export interface Settings {
 	missing_search_enabled: boolean;
 	missing_search_interval: number;
 	missing_search_last_run: string;
+	post_process_script: string;
+	backup_on_start: boolean;
+	backup_retention: number;
 }
 
 export interface APIKeyTestResult {
@@ -236,7 +242,7 @@ export interface APIKeyTestResult {
 
 // --- Job types ---
 
-export type JobType = 'scan' | 'metadata_refresh' | 'search' | 'pull_list_search' | 'mylar_metadata' | 'missing_search';
+export type JobType = 'scan' | 'metadata_refresh' | 'search' | 'pull_list_search' | 'mylar_metadata' | 'missing_search' | 'hash_backfill';
 export type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
 
 export interface Job {
@@ -324,6 +330,23 @@ export interface ReleasesResponse {
 	releases: PullListIssue[];
 	total: number;
 	debug?: ReleaseDebugInfo;
+}
+
+// --- ComicVine Volume Issues (browse preview) ---
+
+export interface ComicVineIssue {
+	comicvine_id: number;
+	issue_number: string;
+	title?: string;
+	cover_date?: string;
+	store_date?: string;
+	cover_url?: string;
+	description?: string;
+}
+
+export interface VolumeIssuesResponse {
+	issues: ComicVineIssue[];
+	total: number;
 }
 
 // --- File Organization types ---
@@ -462,6 +485,7 @@ export interface DownloadHistoryItem {
 	download_client_id?: number;
 	nzb_name: string;
 	nzb_url: string;
+	nzb_guid: string;
 	external_id: string;
 	status: DownloadStatus;
 	size: number;
@@ -518,4 +542,91 @@ export interface WriteMetadataResponse {
 	succeeded: number;
 	failed: number;
 	skipped: number;
+}
+
+// --- ComicVine raw search result (used for story arc search) ---
+
+export interface CVSearchResult {
+	id: number;
+	name: string;
+	description?: string;
+	image?: { small_url?: string; thumb_url?: string };
+	resource_type?: string;
+}
+
+// --- Story Arc types ---
+
+export interface StoryArc {
+	id: number;
+	name: string;
+	comicvine_id?: number;
+	description?: string;
+	issue_count: number;
+	owned_count: number;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface StoryArcIssue {
+	story_arc_id: number;
+	issue_id: number;
+	sequence_number?: number;
+	series_title?: string;
+	issue_number?: string;
+	cover_url?: string;
+	has_file: boolean;
+	read_status?: string;
+}
+
+export interface StoryArcListResponse {
+	story_arcs: StoryArc[];
+	total: number;
+}
+
+export interface StoryArcDetailResponse {
+	story_arc: StoryArc;
+	issues: StoryArcIssue[];
+}
+
+// --- Blocklist types ---
+
+export interface BlocklistEntry {
+	id: number;
+	nzb_guid: string;
+	nzb_name: string;
+	reason: string;
+	blocked_at: string;
+}
+
+export interface BlocklistResponse {
+	items: BlocklistEntry[];
+	total: number;
+	page: number;
+	per_page: number;
+}
+
+// --- Backup types ---
+
+export interface BackupInfo {
+	name: string;
+	size: number;
+	created_at: string;
+}
+
+export interface BackupListResponse {
+	backups: BackupInfo[];
+}
+
+// --- Duplicate types ---
+
+export interface DuplicateGroup {
+	key: string;
+	files: ComicFile[];
+}
+
+export interface DuplicatesResponse {
+	by_hash: DuplicateGroup[];
+	by_issue: DuplicateGroup[];
+	total_hash_dupes: number;
+	total_issue_dupes: number;
 }

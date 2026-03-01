@@ -26,6 +26,18 @@
 	let ownedCount = $derived(issues.filter(i => i.has_file).length);
 	let missingCount = $derived(issues.filter(i => !i.has_file).length);
 	let readCount = $derived(issues.filter(i => i.read_status === 'read').length);
+	let skippedCount = $derived(issues.filter(i => i.skip_status === 'skipped' || i.skip_status === 'ignored').length);
+
+	async function toggleSkipStatus(issue: Issue) {
+		const next = issue.skip_status === 'skipped' ? null : 'skipped';
+		try {
+			await ApiClient.put(`/issues/${issue.id}/skip-status`, { skip_status: next });
+			issue.skip_status = next as any;
+			issues = [...issues];
+		} catch (e) {
+			console.error('Failed to update skip status', e);
+		}
+	}
 
 	async function loadSeriesDetail() {
 		loading = true;
@@ -314,6 +326,20 @@
 			</div>
 		</div>
 
+		<!-- Annual Series -->
+		{#if series.annual_series && series.annual_series.length > 0}
+			<div>
+				<h2 class="text-lg font-semibold mb-3">Annual Series</h2>
+				<div class="flex flex-wrap gap-2">
+					{#each series.annual_series as annual (annual.id)}
+						<a href="/library/{annual.id}" class="px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-sm text-amber-400 hover:border-amber-500/50 transition-colors">
+							{annual.title}{#if annual.year} ({annual.year}){/if}
+						</a>
+					{/each}
+				</div>
+			</div>
+		{/if}
+
 		<!-- Issue List -->
 		<div>
 			<h2 class="text-xl font-semibold mb-4">Issues ({issues.length})</h2>
@@ -369,6 +395,24 @@
 										</button>
 									{/if}
 								</div>
+								{#if issue.skip_status}
+									<button
+										onclick={() => toggleSkipStatus(issue)}
+										class="text-xs px-2 py-0.5 rounded-full ml-1
+											bg-gray-700 text-gray-500 hover:bg-gray-600"
+										title="Click to un-skip"
+									>
+										{issue.skip_status === 'ignored' ? 'Ignored' : 'Skipped'}
+									</button>
+								{:else if !issue.has_file}
+									<button
+										onclick={() => toggleSkipStatus(issue)}
+										class="text-xs px-1 py-0.5 rounded text-gray-600 hover:text-gray-400 ml-1"
+										title="Skip this issue"
+									>
+										Skip
+									</button>
+								{/if}
 								{#if issue.title}
 									<p class="text-xs text-gray-400 mt-1 truncate" title={issue.title}>
 										{issue.title}

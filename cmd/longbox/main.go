@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"strconv"
 	"time"
 
 	longbox "github.com/jeremy/longbox"
@@ -77,6 +78,8 @@ func main() {
 	indexerRepo := repository.NewIndexerRepo(db.Read, db.Write)
 	dlClientRepo := repository.NewDownloadClientRepo(db.Read, db.Write)
 	dlHistoryRepo := repository.NewDownloadHistoryRepo(db.Read, db.Write)
+	blocklistRepo := repository.NewBlocklistRepo(db.Read, db.Write)
+	storyArcRepo := repository.NewStoryArcRepo(db.Read, db.Write)
 	userRepo := repository.NewUserRepo(db.Read, db.Write)
 
 	// External clients
@@ -99,7 +102,17 @@ func main() {
 	readerSvc := service.NewReaderService()
 	organizeSvc := service.NewFileOrganizerService(fileRepo, issueRepo, seriesRepo, settingRepo)
 	metaWriterSvc := service.NewMetadataWriterService(fileRepo, issueRepo, seriesRepo)
-	mylarSvc := service.NewMylarMetadataService(seriesRepo, fileRepo, cvClient)
+	mylarSvc := service.NewMylarMetadataService(seriesRepo, fileRepo, issueRepo, cvClient)
+	backupSvc := service.NewBackupService(cfg.DatabasePath(), cfg.DataDir)
+
+	// Run startup backup if enabled
+	backupOnStart, _ := settingRepo.Get("backup_on_start")
+	backupRetentionStr, _ := settingRepo.Get("backup_retention")
+	backupRetention := 5
+	if r, err := strconv.Atoi(backupRetentionStr); err == nil && r > 0 {
+		backupRetention = r
+	}
+	backupSvc.RunStartupBackup(backupOnStart == "true", backupRetention)
 
 	// Auth service
 	authSvc := service.NewAuthService(userRepo, cfg.SessionLifetime())
@@ -109,10 +122,10 @@ func main() {
 	sched := scheduler.NewScheduler(jobRepo, eventBus)
 
 	// Search service (needs eventBus for SSE updates)
-	searchSvc := service.NewSearchService(indexerRepo, dlClientRepo, dlHistoryRepo, issueRepo, seriesRepo, eventBus)
+	searchSvc := service.NewSearchService(indexerRepo, dlClientRepo, dlHistoryRepo, issueRepo, seriesRepo, blocklistRepo, eventBus)
 
 	// Import service for post-processing completed downloads
-	importSvc := service.NewImportService(librarySvc, organizeSvc, wantListRepo, dlHistoryRepo, fileRepo, issueRepo, seriesRepo, cfg.LibraryDir)
+	importSvc := service.NewImportService(librarySvc, organizeSvc, wantListRepo, dlHistoryRepo, fileRepo, issueRepo, seriesRepo, settingRepo, cfg.LibraryDir)
 	searchSvc.SetOnDownloadCompleted(importSvc.ImportCompletedDownload)
 
 	// Notification service (Slack webhooks)
@@ -143,6 +156,12 @@ func main() {
 	})
 	sched.RegisterHandler(model.JobTypeMissingSearch, func(ctx context.Context, progress scheduler.ProgressFunc) error {
 		_, err := pullListSvc.SearchMissing(ctx, func(processed, total int, message string) {
+			progress(processed, total, message)
+		})
+		return err
+	})
+	sched.RegisterHandler(model.JobTypeHashBackfill, func(ctx context.Context, progress scheduler.ProgressFunc) error {
+		_, _, err := librarySvc.BackfillHashes(ctx, func(processed, total int, message string) {
 			progress(processed, total, message)
 		})
 		return err
@@ -207,6 +226,9 @@ func main() {
 		indexerRepo,
 		dlClientRepo,
 		dlHistoryRepo,
+		blocklistRepo,
+		storyArcRepo,
+		cvClient,
 		librarySvc,
 		coverSvc,
 		metaSvc,
@@ -215,6 +237,7 @@ func main() {
 		searchSvc,
 		metaWriterSvc,
 		mylarSvc,
+		backupSvc,
 		sched,
 		eventBus,
 		watcher,

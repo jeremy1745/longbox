@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"fmt"
+	"hash/crc32"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -270,6 +272,14 @@ func (s *LibraryService) processFile(r scanner.Result) (*processResult, error) {
 		return nil, fmt.Errorf("creating file record: %w", err)
 	}
 
+	// Compute file hash
+	if hash, err := computeFileHash(r.Path); err != nil {
+		slog.Debug("failed to compute file hash", "path", r.Path, "error", err)
+	} else {
+		cf.FileHash = hash
+		s.fileRepo.UpdateHash(cf.ID, hash)
+	}
+
 	// Extract cover thumbnail
 	coverPath, err := s.coverSvc.ExtractCover(cf.ID, cf.FilePath)
 	if err != nil {
@@ -359,4 +369,62 @@ func intPtrToIntPtr(p *int) *int {
 	}
 	v := *p
 	return &v
+}
+
+// computeFileHash computes a CRC32 hash of the file contents.
+func computeFileHash(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := crc32.NewIEEE()
+	buf := make([]byte, 32*1024)
+	if _, err := io.CopyBuffer(h, f, buf); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%08x", h.Sum32()), nil
+}
+
+// BackfillHashes computes CRC32 hashes for all files that don't have one.
+func (s *LibraryService) BackfillHashes(ctx context.Context, progress func(processed, total int, message string)) (int, int, error) {
+	files, err := s.fileRepo.ListUnhashed()
+	if err != nil {
+		return 0, 0, fmt.Errorf("listing unhashed files: %w", err)
+	}
+
+	total := len(files)
+	hashed := 0
+	failed := 0
+
+	for i, f := range files {
+		select {
+		case <-ctx.Done():
+			return hashed, failed, ctx.Err()
+		default:
+		}
+
+		if progress != nil {
+			progress(i, total, fmt.Sprintf("Hashing %s (%d/%d)", f.FileName, i+1, total))
+		}
+
+		hash, err := computeFileHash(f.FilePath)
+		if err != nil {
+			slog.Debug("failed to hash file", "path", f.FilePath, "error", err)
+			failed++
+			continue
+		}
+
+		if err := s.fileRepo.UpdateHash(f.ID, hash); err != nil {
+			failed++
+			continue
+		}
+		hashed++
+	}
+
+	if progress != nil {
+		progress(total, total, fmt.Sprintf("Done: %d hashed, %d failed", hashed, failed))
+	}
+	return hashed, failed, nil
 }

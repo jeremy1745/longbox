@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { ApiClient, type DownloadHistoryItem, type DownloadHistoryResponse } from '$lib/api/client';
+	import { ApiClient, type DownloadHistoryItem, type DownloadHistoryResponse, type BlocklistEntry, type BlocklistResponse } from '$lib/api/client';
 
 	let items = $state<DownloadHistoryItem[]>([]);
 	let total = $state(0);
@@ -7,6 +7,13 @@
 	let perPage = $state(50);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
+
+	// Blocklist state
+	let activeTab = $state<'history' | 'blocklist'>('history');
+	let blocklistItems = $state<BlocklistEntry[]>([]);
+	let blocklistTotal = $state(0);
+	let blocklistLoading = $state(false);
+	let blocklistError = $state<string | null>(null);
 
 	async function loadHistory() {
 		loading = true;
@@ -54,8 +61,47 @@
 
 	let totalPages = $derived(Math.ceil(total / perPage));
 
+	async function loadBlocklist() {
+		blocklistLoading = true;
+		blocklistError = null;
+		try {
+			const data = await ApiClient.get<BlocklistResponse>('/search/blocklist?page=1&per_page=100');
+			blocklistItems = data.items || [];
+			blocklistTotal = data.total;
+		} catch (e) {
+			blocklistError = e instanceof Error ? e.message : 'Failed to load blocklist';
+		} finally {
+			blocklistLoading = false;
+		}
+	}
+
+	async function removeBlocklistEntry(id: number) {
+		try {
+			await ApiClient.delete(`/search/blocklist/${id}`);
+			blocklistItems = blocklistItems.filter(b => b.id !== id);
+			blocklistTotal--;
+		} catch (e) {
+			blocklistError = e instanceof Error ? e.message : 'Delete failed';
+		}
+	}
+
+	async function clearBlocklist() {
+		if (!confirm('Clear entire blocklist?')) return;
+		try {
+			await ApiClient.delete('/search/blocklist');
+			blocklistItems = [];
+			blocklistTotal = 0;
+		} catch (e) {
+			blocklistError = e instanceof Error ? e.message : 'Clear failed';
+		}
+	}
+
 	$effect(() => {
-		loadHistory();
+		if (activeTab === 'history') {
+			loadHistory();
+		} else {
+			loadBlocklist();
+		}
 	});
 </script>
 
@@ -71,6 +117,84 @@
 		</p>
 	</div>
 
+	<!-- Tabs -->
+	<div class="flex gap-1 border-b border-gray-700">
+		<button
+			onclick={() => activeTab = 'history'}
+			class="px-4 py-2 text-sm font-medium transition-colors border-b-2
+				{activeTab === 'history' ? 'border-amber-500 text-amber-400' : 'border-transparent text-gray-400 hover:text-gray-300'}"
+		>
+			History
+		</button>
+		<button
+			onclick={() => activeTab = 'blocklist'}
+			class="px-4 py-2 text-sm font-medium transition-colors border-b-2
+				{activeTab === 'blocklist' ? 'border-amber-500 text-amber-400' : 'border-transparent text-gray-400 hover:text-gray-300'}"
+		>
+			Blocklist{#if blocklistTotal > 0} ({blocklistTotal}){/if}
+		</button>
+	</div>
+
+{#if activeTab === 'blocklist'}
+	<!-- Blocklist View -->
+	{#if blocklistError}
+		<div class="bg-red-900/30 border border-red-700 rounded-lg p-4">
+			<p class="text-red-400">{blocklistError}</p>
+		</div>
+	{/if}
+
+	{#if blocklistLoading}
+		<div class="text-gray-400 py-8 text-center">Loading...</div>
+	{:else if blocklistItems.length === 0}
+		<div class="text-center py-12 text-gray-400">
+			<p class="text-lg">Blocklist is empty</p>
+			<p class="text-sm mt-2">Failed downloads are automatically added here to prevent re-grabbing.</p>
+		</div>
+	{:else}
+		<div class="flex justify-end">
+			<button
+				onclick={clearBlocklist}
+				class="px-3 py-1.5 text-sm bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors"
+			>
+				Clear All
+			</button>
+		</div>
+		<div class="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
+			<table class="w-full text-sm">
+				<thead>
+					<tr class="text-left text-gray-400 border-b border-gray-700">
+						<th class="px-4 py-3">NZB Name</th>
+						<th class="px-4 py-3">Reason</th>
+						<th class="px-4 py-3 text-right">Blocked</th>
+						<th class="px-4 py-3 w-16"></th>
+					</tr>
+				</thead>
+				<tbody class="divide-y divide-gray-700/50">
+					{#each blocklistItems as entry (entry.id)}
+						<tr class="hover:bg-gray-750 transition-colors">
+							<td class="px-4 py-3">
+								<span class="text-gray-200 block truncate max-w-md" title={entry.nzb_name}>{entry.nzb_name}</span>
+							</td>
+							<td class="px-4 py-3 text-gray-400">{entry.reason || '-'}</td>
+							<td class="px-4 py-3 text-right text-gray-400 whitespace-nowrap">{formatDate(entry.blocked_at)}</td>
+							<td class="px-4 py-3 text-right">
+								<button
+									onclick={() => removeBlocklistEntry(entry.id)}
+									class="text-gray-500 hover:text-red-400 transition-colors"
+									title="Remove from blocklist"
+								>
+									<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+									</svg>
+								</button>
+							</td>
+						</tr>
+					{/each}
+				</tbody>
+			</table>
+		</div>
+	{/if}
+{:else}
 	{#if error}
 		<div class="bg-red-900/30 border border-red-700 rounded-lg p-4">
 			<p class="text-red-400">{error}</p>
@@ -158,4 +282,5 @@
 			</div>
 		{/if}
 	{/if}
+{/if}
 </div>

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,10 +15,11 @@ import (
 	"github.com/jeremy/longbox/internal/repository"
 )
 
-// MylarMetadataService writes cvinfo and poster.jpg files to series folders.
+// MylarMetadataService writes cvinfo, poster.jpg, and series.json files to series folders.
 type MylarMetadataService struct {
 	seriesRepo *repository.SeriesRepo
 	fileRepo   *repository.FileRepo
+	issueRepo  *repository.IssueRepo
 	cvClient   *comicvine.Client
 	httpClient *http.Client
 }
@@ -26,11 +28,13 @@ type MylarMetadataService struct {
 func NewMylarMetadataService(
 	seriesRepo *repository.SeriesRepo,
 	fileRepo *repository.FileRepo,
+	issueRepo *repository.IssueRepo,
 	cvClient *comicvine.Client,
 ) *MylarMetadataService {
 	return &MylarMetadataService{
 		seriesRepo: seriesRepo,
 		fileRepo:   fileRepo,
+		issueRepo:  issueRepo,
 		cvClient:   cvClient,
 		httpClient: &http.Client{Timeout: 30 * 1000000000}, // 30 seconds
 	}
@@ -121,6 +125,14 @@ func (s *MylarMetadataService) WriteAll(
 			}
 		}
 
+		// Write series.json
+		if err := s.writeSeriesJSON(&series, volume, seriesDir); err != nil {
+			slog.Warn("failed to write series.json",
+				"series", series.Title,
+				"error", err,
+			)
+		}
+
 		written++
 		slog.Info("wrote mylar metadata",
 			"series", series.Title,
@@ -130,6 +142,81 @@ func (s *MylarMetadataService) WriteAll(
 
 	progress(total, total, fmt.Sprintf("Done: %d written, %d skipped, %d failed", written, skipped, failed))
 	return written, skipped, failed, nil
+}
+
+// seriesJSON is the structure written to series.json.
+type seriesJSON struct {
+	Name        string           `json:"name"`
+	Year        *int             `json:"year,omitempty"`
+	Publisher   string           `json:"publisher,omitempty"`
+	ComicVineID int64            `json:"comicvine_id"`
+	IssueCount  int              `json:"issue_count"`
+	Status      string           `json:"status"`
+	Description string           `json:"description,omitempty"`
+	Issues      []seriesIssueJSON `json:"issues,omitempty"`
+}
+
+type seriesIssueJSON struct {
+	Number      string `json:"number"`
+	Title       string `json:"title,omitempty"`
+	ComicVineID *int64 `json:"comicvine_id,omitempty"`
+	CoverDate   string `json:"cover_date,omitempty"`
+	StoreDate   string `json:"store_date,omitempty"`
+}
+
+// writeSeriesJSON writes a series.json file to the series directory.
+func (s *MylarMetadataService) writeSeriesJSON(series *model.Series, volume *comicvine.Volume, seriesDir string) error {
+	sj := seriesJSON{
+		Name:        series.Title,
+		Year:        series.Year,
+		ComicVineID: *series.ComicVineID,
+		IssueCount:  volume.CountOfIssues,
+		Status:      series.Status,
+		Description: comicvine.StripHTML(volume.Description),
+	}
+	if volume.Publisher != nil {
+		sj.Publisher = volume.Publisher.Name
+	}
+
+	issues, err := s.issueRepo.ListBySeries(series.ID)
+	if err == nil {
+		for _, iss := range issues {
+			sj.Issues = append(sj.Issues, seriesIssueJSON{
+				Number:      iss.IssueNumber,
+				Title:       iss.Title,
+				ComicVineID: iss.ComicVineID,
+				CoverDate:   iss.CoverDate,
+				StoreDate:   iss.StoreDate,
+			})
+		}
+	}
+
+	data, err := json.MarshalIndent(sj, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling series.json: %w", err)
+	}
+
+	// Write atomically via temp file + rename
+	destPath := filepath.Join(seriesDir, "series.json")
+	tmpFile, err := os.CreateTemp(seriesDir, "series-*.tmp")
+	if err != nil {
+		return fmt.Errorf("creating temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+
+	if _, err := tmpFile.Write(data); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("writing series.json: %w", err)
+	}
+	tmpFile.Close()
+
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("renaming temp file: %w", err)
+	}
+
+	return nil
 }
 
 // determineSeriesFolder returns the most common parent directory among the given files.

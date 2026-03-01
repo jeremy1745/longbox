@@ -96,6 +96,28 @@ func (h *MetadataHandler) MatchSeries(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "matched"})
 }
 
+// GetVolumeIssues returns all issues for a ComicVine volume (read-only preview).
+// GET /api/v1/metadata/volume/{cvid}/issues
+func (h *MetadataHandler) GetVolumeIssues(w http.ResponseWriter, r *http.Request) {
+	cvidStr := chi.URLParam(r, "cvid")
+	cvid, err := strconv.Atoi(cvidStr)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid ComicVine ID")
+		return
+	}
+
+	issues, err := h.metaSvc.GetVolumeIssuesPreview(cvid)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "ISSUES_FETCH_FAILED", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"issues": issues,
+		"total":  len(issues),
+	})
+}
+
 // RefreshSeries re-fetches metadata for an already-matched series.
 // POST /api/v1/series/{id}/refresh
 func (h *MetadataHandler) RefreshSeries(w http.ResponseWriter, r *http.Request) {

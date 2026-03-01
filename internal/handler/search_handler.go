@@ -15,17 +15,20 @@ import (
 type SearchHandler struct {
 	searchSvc     *service.SearchService
 	dlHistoryRepo *repository.DownloadHistoryRepo
+	blocklistRepo *repository.BlocklistRepo
 	scheduler     *scheduler.Scheduler
 }
 
 func NewSearchHandler(
 	searchSvc *service.SearchService,
 	dlHistoryRepo *repository.DownloadHistoryRepo,
+	blocklistRepo *repository.BlocklistRepo,
 	sched *scheduler.Scheduler,
 ) *SearchHandler {
 	return &SearchHandler{
 		searchSvc:     searchSvc,
 		dlHistoryRepo: dlHistoryRepo,
+		blocklistRepo: blocklistRepo,
 		scheduler:     sched,
 	}
 }
@@ -86,6 +89,7 @@ func (h *SearchHandler) Grab(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		NZBURL    string `json:"nzb_url"`
 		NZBName   string `json:"nzb_name"`
+		NZBGuid   string `json:"nzb_guid"`
 		IndexerID int64  `json:"indexer_id"`
 		IssueID   *int64 `json:"issue_id"`
 		Size      int64  `json:"size"`
@@ -100,7 +104,7 @@ func (h *SearchHandler) Grab(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	item, err := h.searchSvc.GrabResult(r.Context(), req.NZBURL, req.NZBName, req.Size, req.IndexerID, req.IssueID)
+	item, err := h.searchSvc.GrabResult(r.Context(), req.NZBURL, req.NZBName, req.NZBGuid, req.Size, req.IndexerID, req.IssueID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "GRAB_FAILED", err.Error())
 		return
@@ -139,6 +143,61 @@ func (h *SearchHandler) DownloadHistory(w http.ResponseWriter, r *http.Request) 
 		"page":     page,
 		"per_page": perPage,
 	})
+}
+
+// ListBlocklist returns the blocklist.
+// GET /api/v1/search/blocklist
+func (h *SearchHandler) ListBlocklist(w http.ResponseWriter, r *http.Request) {
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+	if page < 1 {
+		page = 1
+	}
+	if perPage < 1 {
+		perPage = 50
+	}
+
+	entries, total, err := h.blocklistRepo.List(page, perPage)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "LIST_FAILED", err.Error())
+		return
+	}
+	if entries == nil {
+		entries = []model.BlocklistEntry{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"entries":  entries,
+		"total":    total,
+		"page":     page,
+		"per_page": perPage,
+	})
+}
+
+// DeleteBlocklistEntry removes a single blocklist entry.
+// DELETE /api/v1/search/blocklist/{id}
+func (h *SearchHandler) DeleteBlocklistEntry(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid blocklist ID")
+		return
+	}
+
+	if err := h.blocklistRepo.Delete(id); err != nil {
+		writeError(w, http.StatusInternalServerError, "DELETE_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// ClearBlocklist removes all blocklist entries.
+// DELETE /api/v1/search/blocklist
+func (h *SearchHandler) ClearBlocklist(w http.ResponseWriter, r *http.Request) {
+	if err := h.blocklistRepo.Clear(); err != nil {
+		writeError(w, http.StatusInternalServerError, "CLEAR_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "cleared"})
 }
 
 // TriggerPullListSearch manually triggers the weekly pull list search.

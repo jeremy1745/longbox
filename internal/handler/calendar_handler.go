@@ -136,7 +136,8 @@ func (h *CalendarHandler) RefreshTracked(w http.ResponseWriter, r *http.Request)
 // Body: { "series_cv_id": 12345 }
 func (h *CalendarHandler) TrackSeries(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		SeriesCVID int `json:"series_cv_id"`
+		SeriesCVID int  `json:"series_cv_id"`
+		WantAll    *bool `json:"want_all,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
@@ -147,7 +148,12 @@ func (h *CalendarHandler) TrackSeries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	series, wantAdded, err := h.metaSvc.TrackFromComicVine(body.SeriesCVID, h.wantListRepo)
+	wantAll := true
+	if body.WantAll != nil {
+		wantAll = *body.WantAll
+	}
+
+	series, wantAdded, err := h.metaSvc.TrackFromComicVine(body.SeriesCVID, h.wantListRepo, wantAll)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "TRACK_FAILED", err.Error())
 		return

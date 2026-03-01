@@ -20,10 +20,10 @@ func NewDownloadHistoryRepo(read, write *sql.DB) *DownloadHistoryRepo {
 func (r *DownloadHistoryRepo) Create(item *model.DownloadHistoryItem) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	res, err := r.write.Exec(`
-		INSERT INTO download_history (issue_id, indexer_id, download_client_id, nzb_name, nzb_url,
+		INSERT INTO download_history (issue_id, indexer_id, download_client_id, nzb_name, nzb_guid, nzb_url,
 			external_id, status, size, message, grabbed_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		item.IssueID, item.IndexerID, item.DownloadClientID, item.NZBName, item.NZBURL,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		item.IssueID, item.IndexerID, item.DownloadClientID, item.NZBName, item.NZBGuid, item.NZBURL,
 		item.ExternalID, item.Status, item.Size, item.Message, now, now, now,
 	)
 	if err != nil {
@@ -40,7 +40,7 @@ func (r *DownloadHistoryRepo) Create(item *model.DownloadHistoryItem) error {
 
 func (r *DownloadHistoryRepo) GetByID(id int64) (*model.DownloadHistoryItem, error) {
 	row := r.read.QueryRow(`
-		SELECT dh.id, dh.issue_id, dh.indexer_id, dh.download_client_id, dh.nzb_name, dh.nzb_url,
+		SELECT dh.id, dh.issue_id, dh.indexer_id, dh.download_client_id, dh.nzb_name, COALESCE(dh.nzb_guid,''), dh.nzb_url,
 			dh.external_id, dh.status, dh.size, dh.message, dh.grabbed_at, dh.completed_at,
 			dh.created_at, dh.updated_at,
 			COALESCE(s.title, ''), COALESCE(i.issue_number, ''), COALESCE(idx.name, '')
@@ -54,7 +54,7 @@ func (r *DownloadHistoryRepo) GetByID(id int64) (*model.DownloadHistoryItem, err
 
 func (r *DownloadHistoryRepo) GetByExternalID(externalID string) (*model.DownloadHistoryItem, error) {
 	row := r.read.QueryRow(`
-		SELECT dh.id, dh.issue_id, dh.indexer_id, dh.download_client_id, dh.nzb_name, dh.nzb_url,
+		SELECT dh.id, dh.issue_id, dh.indexer_id, dh.download_client_id, dh.nzb_name, COALESCE(dh.nzb_guid,''), dh.nzb_url,
 			dh.external_id, dh.status, dh.size, dh.message, dh.grabbed_at, dh.completed_at,
 			dh.created_at, dh.updated_at,
 			COALESCE(s.title, ''), COALESCE(i.issue_number, ''), COALESCE(idx.name, '')
@@ -101,7 +101,7 @@ func (r *DownloadHistoryRepo) List(page, perPage int) ([]model.DownloadHistoryIt
 	}
 
 	rows, err := r.read.Query(`
-		SELECT dh.id, dh.issue_id, dh.indexer_id, dh.download_client_id, dh.nzb_name, dh.nzb_url,
+		SELECT dh.id, dh.issue_id, dh.indexer_id, dh.download_client_id, dh.nzb_name, COALESCE(dh.nzb_guid,''), dh.nzb_url,
 			dh.external_id, dh.status, dh.size, dh.message, dh.grabbed_at, dh.completed_at,
 			dh.created_at, dh.updated_at,
 			COALESCE(s.title, ''), COALESCE(i.issue_number, ''), COALESCE(idx.name, '')
@@ -129,7 +129,7 @@ func (r *DownloadHistoryRepo) List(page, perPage int) ([]model.DownloadHistoryIt
 
 func (r *DownloadHistoryRepo) ListPending() ([]model.DownloadHistoryItem, error) {
 	rows, err := r.read.Query(`
-		SELECT dh.id, dh.issue_id, dh.indexer_id, dh.download_client_id, dh.nzb_name, dh.nzb_url,
+		SELECT dh.id, dh.issue_id, dh.indexer_id, dh.download_client_id, dh.nzb_name, COALESCE(dh.nzb_guid,''), dh.nzb_url,
 			dh.external_id, dh.status, dh.size, dh.message, dh.grabbed_at, dh.completed_at,
 			dh.created_at, dh.updated_at,
 			COALESCE(s.title, ''), COALESCE(i.issue_number, ''), COALESCE(idx.name, '')
@@ -171,7 +171,7 @@ func scanDownloadHistory(row *sql.Row) (*model.DownloadHistoryItem, error) {
 	var createdAt, updatedAt string
 	err := row.Scan(
 		&item.ID, &item.IssueID, &item.IndexerID, &item.DownloadClientID,
-		&item.NZBName, &item.NZBURL, &item.ExternalID, &item.Status,
+		&item.NZBName, &item.NZBGuid, &item.NZBURL, &item.ExternalID, &item.Status,
 		&item.Size, &item.Message, &item.GrabbedAt, &item.CompletedAt,
 		&createdAt, &updatedAt,
 		&item.SeriesTitle, &item.IssueNumber, &item.IndexerName,
@@ -192,7 +192,7 @@ func scanDownloadHistoryRow(rows *sql.Rows) (*model.DownloadHistoryItem, error) 
 	var createdAt, updatedAt string
 	err := rows.Scan(
 		&item.ID, &item.IssueID, &item.IndexerID, &item.DownloadClientID,
-		&item.NZBName, &item.NZBURL, &item.ExternalID, &item.Status,
+		&item.NZBName, &item.NZBGuid, &item.NZBURL, &item.ExternalID, &item.Status,
 		&item.Size, &item.Message, &item.GrabbedAt, &item.CompletedAt,
 		&createdAt, &updatedAt,
 		&item.SeriesTitle, &item.IssueNumber, &item.IndexerName,

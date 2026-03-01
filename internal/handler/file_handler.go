@@ -10,15 +10,20 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jeremy/longbox/internal/model"
 	"github.com/jeremy/longbox/internal/repository"
+	"github.com/jeremy/longbox/internal/scheduler"
+	"github.com/jeremy/longbox/internal/service"
 )
 
 type FileHandler struct {
-	fileRepo *repository.FileRepo
+	fileRepo   *repository.FileRepo
+	librarySvc *service.LibraryService
+	sched      *scheduler.Scheduler
 }
 
-func NewFileHandler(fileRepo *repository.FileRepo) *FileHandler {
-	return &FileHandler{fileRepo: fileRepo}
+func NewFileHandler(fileRepo *repository.FileRepo, librarySvc *service.LibraryService, sched *scheduler.Scheduler) *FileHandler {
+	return &FileHandler{fileRepo: fileRepo, librarySvc: librarySvc, sched: sched}
 }
 
 func (h *FileHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -203,4 +208,79 @@ func (h *FileHandler) Rename(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, updated)
+}
+
+// Duplicates returns groups of duplicate files by hash and by issue.
+// GET /api/v1/files/duplicates
+func (h *FileHandler) Duplicates(w http.ResponseWriter, r *http.Request) {
+	hashDups, err := h.fileRepo.FindDuplicatesByHash()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "FETCH_FAILED", err.Error())
+		return
+	}
+
+	issueDups, err := h.fileRepo.FindDuplicatesByIssue()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "FETCH_FAILED", err.Error())
+		return
+	}
+
+	if hashDups == nil {
+		hashDups = []repository.DuplicateGroup{}
+	}
+	if issueDups == nil {
+		issueDups = []repository.DuplicateGroup{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"by_hash":  hashDups,
+		"by_issue": issueDups,
+	})
+}
+
+// DeleteFile deletes a comic file from the DB and optionally from disk.
+// DELETE /api/v1/files/{id}
+func (h *FileHandler) DeleteFile(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid file ID")
+		return
+	}
+
+	file, err := h.fileRepo.GetByID(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "FETCH_FAILED", err.Error())
+		return
+	}
+	if file == nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "file not found")
+		return
+	}
+
+	// Delete DB record
+	if err := h.fileRepo.Delete(id); err != nil {
+		writeError(w, http.StatusInternalServerError, "DELETE_FAILED", err.Error())
+		return
+	}
+
+	// Delete from disk if requested (default: yes)
+	deleteDisk := r.URL.Query().Get("keep_file") != "true"
+	if deleteDisk {
+		if err := os.Remove(file.FilePath); err != nil && !os.IsNotExist(err) {
+			slog.Warn("failed to delete file from disk", "path", file.FilePath, "error", err)
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// BackfillHashes triggers a background job to compute hashes for all unhashed files.
+// POST /api/v1/files/backfill-hashes
+func (h *FileHandler) BackfillHashes(w http.ResponseWriter, r *http.Request) {
+	job, err := h.sched.Submit(model.JobTypeHashBackfill)
+	if err != nil {
+		writeError(w, http.StatusConflict, "JOB_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, job)
 }
