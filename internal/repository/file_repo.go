@@ -108,6 +108,13 @@ func (r *FileRepo) UpdatePath(id int64, filePath, fileName string) error {
 	return err
 }
 
+// UpdateIssueID links a comic file to an issue.
+func (r *FileRepo) UpdateIssueID(id int64, issueID int64) error {
+	_, err := r.write.Exec(`UPDATE comic_files SET issue_id = ?, match_confidence = 1.0, updated_at = ? WHERE id = ?`,
+		issueID, time.Now().UTC().Format(time.RFC3339), id)
+	return err
+}
+
 // ListAll returns all comic files (no pagination). Used for bulk operations like organize.
 func (r *FileRepo) ListAll() ([]model.ComicFile, error) {
 	rows, err := r.read.Query(`SELECT id, issue_id, file_path, file_name, file_size, file_hash,

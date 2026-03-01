@@ -120,33 +120,43 @@ func (c *Client) GetHistory(limit int) ([]HistorySlot, error) {
 	return resp.History.Slots, nil
 }
 
+// SlotStatus holds the status of a download slot, including its storage path
+// once completed.
+type SlotStatus struct {
+	Status  string // "Downloading", "Queued", "Completed", "Failed", etc.
+	Storage string // filesystem path for completed downloads
+	Found   bool
+}
+
 // GetSlotStatus returns the status of a specific download by nzo_id.
-// Returns the status string ("Downloading", "Queued", "Completed", "Failed", etc.)
-// and whether it was found at all.
-func (c *Client) GetSlotStatus(nzoID string) (string, bool, error) {
+func (c *Client) GetSlotStatus(nzoID string) (*SlotStatus, error) {
 	// Check queue first
 	queue, err := c.GetQueue()
 	if err != nil {
-		return "", false, err
+		return nil, err
 	}
 	for _, slot := range queue {
 		if slot.NZOID == nzoID {
-			return slot.Status, true, nil
+			return &SlotStatus{Status: slot.Status, Found: true}, nil
 		}
 	}
 
 	// Check history
 	history, err := c.GetHistory(100)
 	if err != nil {
-		return "", false, err
+		return nil, err
 	}
 	for _, slot := range history {
 		if slot.NZOID == nzoID {
-			return slot.Status, true, nil
+			return &SlotStatus{
+				Status:  slot.Status,
+				Storage: slot.Storage,
+				Found:   true,
+			}, nil
 		}
 	}
 
-	return "", false, nil
+	return &SlotStatus{}, nil
 }
 
 // TestConnection verifies connectivity by calling the version endpoint.

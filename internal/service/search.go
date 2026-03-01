@@ -21,12 +21,13 @@ import (
 
 // SearchService orchestrates searching indexers and grabbing NZBs.
 type SearchService struct {
-	indexerRepo   *repository.IndexerRepo
-	dlClientRepo  *repository.DownloadClientRepo
-	dlHistoryRepo *repository.DownloadHistoryRepo
-	issueRepo     *repository.IssueRepo
-	seriesRepo    *repository.SeriesRepo
-	eventBus      *scheduler.EventBus
+	indexerRepo          *repository.IndexerRepo
+	dlClientRepo         *repository.DownloadClientRepo
+	dlHistoryRepo        *repository.DownloadHistoryRepo
+	issueRepo            *repository.IssueRepo
+	seriesRepo           *repository.SeriesRepo
+	eventBus             *scheduler.EventBus
+	onDownloadCompleted  func(item *model.DownloadHistoryItem, storagePath string)
 }
 
 func NewSearchService(
@@ -45,6 +46,11 @@ func NewSearchService(
 		seriesRepo:    seriesRepo,
 		eventBus:      eventBus,
 	}
+}
+
+// SetOnDownloadCompleted registers a callback invoked when a download completes.
+func (s *SearchService) SetOnDownloadCompleted(fn func(item *model.DownloadHistoryItem, storagePath string)) {
+	s.onDownloadCompleted = fn
 }
 
 // ScoredResult wraps a Newznab search result with a relevance score.
@@ -379,17 +385,17 @@ func (s *SearchService) CheckDownloadStatus(ctx context.Context) error {
 		default:
 		}
 
-		status, found, err := sabClient.GetSlotStatus(item.ExternalID)
+		slot, err := sabClient.GetSlotStatus(item.ExternalID)
 		if err != nil {
 			slog.Warn("error checking download status", "nzo_id", item.ExternalID, "error", err)
 			continue
 		}
-		if !found {
+		if !slot.Found {
 			continue
 		}
 
 		var newStatus model.DownloadStatus
-		switch strings.ToLower(status) {
+		switch strings.ToLower(slot.Status) {
 		case "completed":
 			newStatus = model.DownloadStatusCompleted
 		case "failed":
@@ -401,7 +407,7 @@ func (s *SearchService) CheckDownloadStatus(ctx context.Context) error {
 		}
 
 		if newStatus != item.Status {
-			if err := s.dlHistoryRepo.UpdateStatus(item.ID, newStatus, status); err != nil {
+			if err := s.dlHistoryRepo.UpdateStatus(item.ID, newStatus, slot.Status); err != nil {
 				slog.Warn("failed to update download status", "id", item.ID, "error", err)
 				continue
 			}
@@ -417,6 +423,11 @@ func (s *SearchService) CheckDownloadStatus(ctx context.Context) error {
 				"nzb", item.NZBName,
 				"status", newStatus,
 			)
+
+			// Trigger post-processing for completed downloads
+			if newStatus == model.DownloadStatusCompleted && slot.Storage != "" && s.onDownloadCompleted != nil {
+				go s.onDownloadCompleted(&item, slot.Storage)
+			}
 		}
 	}
 

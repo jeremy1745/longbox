@@ -111,6 +111,10 @@ func main() {
 	// Search service (needs eventBus for SSE updates)
 	searchSvc := service.NewSearchService(indexerRepo, dlClientRepo, dlHistoryRepo, issueRepo, seriesRepo, eventBus)
 
+	// Import service for post-processing completed downloads
+	importSvc := service.NewImportService(librarySvc, organizeSvc, wantListRepo, dlHistoryRepo, fileRepo, issueRepo, seriesRepo, cfg.LibraryDir)
+	searchSvc.SetOnDownloadCompleted(importSvc.ImportCompletedDownload)
+
 	// Notification service (Slack webhooks)
 	notifSvc := service.NewNotificationService(settingRepo, eventBus, dlHistoryRepo)
 	notifSvc.Start()
