@@ -15,6 +15,7 @@ import (
 	"github.com/disintegration/imaging"
 	"github.com/jeremy/longbox/internal/archive"
 	"github.com/jeremy/longbox/internal/repository"
+	"golang.org/x/sync/singleflight"
 )
 
 const thumbnailWidth = 300
@@ -22,6 +23,13 @@ const thumbnailWidth = 300
 type CoverService struct {
 	coversDir string
 	fileRepo  *repository.FileRepo
+
+	// extractGroup coalesces concurrent ExtractCover calls for the same
+	// fileID. Without it, a Library page that loads 50 covers triggers 50
+	// independent archive opens (each one read + decompress + decode +
+	// resize + JPEG-encode) when none of them have a cached thumbnail
+	// yet — thundering herd against the network share.
+	extractGroup singleflight.Group
 }
 
 func NewCoverService(coversDir string, fileRepo *repository.FileRepo) *CoverService {
@@ -29,14 +37,57 @@ func NewCoverService(coversDir string, fileRepo *repository.FileRepo) *CoverServ
 }
 
 // ExtractCover extracts the cover image from a comic file and saves a thumbnail.
-// Returns the path to the saved thumbnail.
+// Returns the path to the saved thumbnail. Concurrent calls for the same
+// fileID coalesce via singleflight so a grid page loading N covers doesn't
+// fan out to N redundant archive opens — only the first call does the work
+// and the rest receive the same result.
 func (s *CoverService) ExtractCover(fileID int64, archivePath string) (string, error) {
+	key := strconv.FormatInt(fileID, 10)
+	v, err, _ := s.extractGroup.Do(key, func() (any, error) {
+		// Double-check the on-disk cache inside the singleflight critical
+		// section: an earlier caller may have just written it.
+		thumbPath := s.CoverPath(fileID)
+		if _, statErr := os.Stat(thumbPath); statErr == nil {
+			return thumbPath, nil
+		}
+		return s.extractCoverUncached(fileID, archivePath)
+	})
+	if err != nil {
+		return "", err
+	}
+	return v.(string), nil
+}
+
+func (s *CoverService) extractCoverUncached(fileID int64, archivePath string) (string, error) {
 	a, err := archive.Open(archivePath)
 	if err != nil {
 		return "", fmt.Errorf("opening archive: %w", err)
 	}
 	defer a.Close()
+	return s.extractFromOpen(fileID, archivePath, a)
+}
 
+// ExtractCoverFromArchive uses an already-open Archive (e.g. one the
+// caller is also using to read ComicInfo.xml) to skip a second
+// archive open + decompress pass. Used by the single-pass scan path —
+// avoids re-reading a CBZ from a network share when we already have
+// the file bytes in memory.
+func (s *CoverService) ExtractCoverFromArchive(fileID int64, sourcePath string, a archive.Archive) (string, error) {
+	key := strconv.FormatInt(fileID, 10)
+	v, err, _ := s.extractGroup.Do(key, func() (any, error) {
+		thumbPath := s.CoverPath(fileID)
+		if _, statErr := os.Stat(thumbPath); statErr == nil {
+			return thumbPath, nil
+		}
+		return s.extractFromOpen(fileID, sourcePath, a)
+	})
+	if err != nil {
+		return "", err
+	}
+	return v.(string), nil
+}
+
+func (s *CoverService) extractFromOpen(fileID int64, sourcePath string, a archive.Archive) (string, error) {
 	entries, err := a.ListEntries()
 	if err != nil {
 		return "", fmt.Errorf("listing entries: %w", err)
@@ -44,7 +95,7 @@ func (s *CoverService) ExtractCover(fileID int64, archivePath string) (string, e
 
 	cover := archive.FindCoverEntry(entries)
 	if cover == nil {
-		return "", fmt.Errorf("no cover image found in %s", archivePath)
+		return "", fmt.Errorf("no cover image found in %s", sourcePath)
 	}
 
 	rc, err := a.ExtractFile(cover.Name)

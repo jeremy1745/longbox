@@ -27,3 +27,4 @@ vendor/
 .env
 *.yaml
 !*.example.yaml
+longbox.log

@@ -1,6 +1,7 @@
 package comicvine
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -25,44 +26,80 @@ func NewRateLimiter() *RateLimiter {
 	}
 }
 
-// Wait blocks until it's safe to make the next request.
-// Returns an error if the hourly limit has been reached.
-func (rl *RateLimiter) Wait() {
+// Wait blocks until it's safe to make the next request, or until ctx is done.
+// Returns ctx.Err() if cancelled mid-wait. Honors both the per-request minimum
+// interval and the hourly cap — when the hourly cap is exhausted it can sleep
+// up to ~1 hour, but cancellation aborts immediately.
+func (rl *RateLimiter) Wait(ctx context.Context) error {
+	for {
+		rl.mu.Lock()
+		now := time.Now()
+
+		// Reset hourly counter if the hour has rolled over.
+		if now.Sub(rl.hourStart) >= time.Hour {
+			rl.hourlyCount = 0
+			rl.hourStart = now
+		}
+
+		// Hourly cap exhausted — release lock and wait for the window reset.
+		if rl.hourlyCount >= rl.hourlyMax {
+			waitUntil := rl.hourStart.Add(time.Hour)
+			sleepTime := waitUntil.Sub(now)
+			rl.mu.Unlock()
+			if sleepTime <= 0 {
+				continue
+			}
+			if err := sleepCtx(ctx, sleepTime); err != nil {
+				return err
+			}
+			continue
+		}
+
+		// Enforce minimum interval between consecutive requests.
+		elapsed := now.Sub(rl.lastRequest)
+		if elapsed < rl.minInterval {
+			sleepTime := rl.minInterval - elapsed
+			rl.mu.Unlock()
+			if err := sleepCtx(ctx, sleepTime); err != nil {
+				return err
+			}
+			continue
+		}
+
+		// Reserve our slot.
+		rl.lastRequest = time.Now()
+		rl.hourlyCount++
+		rl.mu.Unlock()
+		return nil
+	}
+}
+
+// sleepCtx is a context-aware time.Sleep — returns ctx.Err() on cancel.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// NextResetIn reports the remaining time until the hourly quota window
+// resets. Useful for surfacing wait ETAs in the UI when callers detect
+// HourlyRemaining() == 0.
+func (rl *RateLimiter) NextResetIn() time.Duration {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-
-	now := time.Now()
-
-	// Reset hourly counter if the hour has rolled over
-	if now.Sub(rl.hourStart) >= time.Hour {
-		rl.hourlyCount = 0
-		rl.hourStart = now
+	d := time.Until(rl.hourStart.Add(time.Hour))
+	if d < 0 {
+		return 0
 	}
-
-	// If we've hit the hourly limit, wait until the window resets
-	if rl.hourlyCount >= rl.hourlyMax {
-		waitUntil := rl.hourStart.Add(time.Hour)
-		sleepTime := waitUntil.Sub(now)
-		if sleepTime > 0 {
-			rl.mu.Unlock()
-			time.Sleep(sleepTime)
-			rl.mu.Lock()
-			rl.hourlyCount = 0
-			rl.hourStart = time.Now()
-		}
-	}
-
-	// Enforce minimum interval between requests
-	elapsed := now.Sub(rl.lastRequest)
-	if elapsed < rl.minInterval {
-		sleepTime := rl.minInterval - elapsed
-		rl.mu.Unlock()
-		time.Sleep(sleepTime)
-		rl.mu.Lock()
-	}
-
-	rl.lastRequest = time.Now()
-	rl.hourlyCount++
+	return d
 }
 
 // HourlyRemaining returns how many requests are left in the current hourly window.

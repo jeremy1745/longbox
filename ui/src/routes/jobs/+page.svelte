@@ -88,6 +88,8 @@
 		switch (type) {
 			case 'scan': return 'Library Scan';
 			case 'metadata_refresh': return 'Metadata Refresh';
+			case 'longbox_metadata': return 'LongBox Sidecars';
+			case 'mylar_metadata': return 'LongBox Sidecars';
 			default: return type;
 		}
 	}

@@ -131,7 +131,8 @@ func (h *ReaderHandler) UpdateProgress(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		Page int `json:"page"`
+		Page  int `json:"page"`
+		Total int `json:"total"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
@@ -160,9 +161,18 @@ func (h *ReaderHandler) UpdateProgress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auto-transition from "unread" to "reading"
-	if issue.ReadStatus == "unread" {
-		issue.ReadStatus = "reading"
+	// Status transitions are server-authoritative so a stuck "Reading" doesn't
+	// require the client to remember to PUT /read-status separately:
+	//   - At-or-past the last page → read
+	//   - Otherwise, first navigation flips unread → reading
+	desired := issue.ReadStatus
+	if body.Total > 0 && body.Page >= body.Total-1 {
+		desired = "read"
+	} else if issue.ReadStatus == "unread" {
+		desired = "reading"
+	}
+	if desired != issue.ReadStatus {
+		issue.ReadStatus = desired
 		if err := h.issueRepo.Update(issue); err != nil {
 			writeError(w, http.StatusInternalServerError, "STATUS_UPDATE_FAILED", err.Error())
 			return

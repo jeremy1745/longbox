@@ -103,6 +103,83 @@
 			loadBlocklist();
 		}
 	});
+
+	// Pipeline status panel
+	type PipelineStatus = {
+		cron: Record<string, string>;
+		backlog_status?: Record<string, number>;
+		recent_failures?: Array<{ id: number; series_title: string; issue_number: string; last_error: string; updated_at: string }>;
+		indexers?: Array<{ id: number; name: string; enabled: boolean; type: string }>;
+		download_clients?: Array<{ id: number; name: string; enabled: boolean; type: string; url: string }>;
+		want_list_total?: number;
+		server_time: string;
+	};
+	let pipeline = $state<PipelineStatus | null>(null);
+	let pipelineLoading = $state(false);
+	let pipelineError = $state<string | null>(null);
+	let pipelineOpen = $state(true);
+
+	async function loadPipeline() {
+		pipelineLoading = true;
+		pipelineError = null;
+		try {
+			pipeline = await ApiClient.get<PipelineStatus>('/admin/pipeline-status');
+		} catch (e) {
+			pipelineError = e instanceof Error ? e.message : 'Pipeline status failed';
+		} finally {
+			pipelineLoading = false;
+		}
+	}
+
+	function timeAgo(iso: string): string {
+		if (!iso) return 'never';
+		const then = new Date(iso).getTime();
+		if (isNaN(then)) return iso;
+		const sec = Math.floor((Date.now() - then) / 1000);
+		if (sec < 60) return `${sec}s ago`;
+		if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+		if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+		return `${Math.floor(sec / 86400)}d ago`;
+	}
+
+	$effect(() => {
+		loadPipeline();
+	});
+
+	// Test Search diagnostic
+	type TestSearchIndexer = {
+		indexer_id: number;
+		indexer_name: string;
+		indexer_type: string;
+		indexer_url: string;
+		categories_sent: string;
+		enabled: boolean;
+		result_count: number;
+		error?: string;
+		top_results?: Array<{ title: string; size: number; grabs: number; category: string; guid: string }>;
+	};
+	type TestSearchResponse = { query: string; indexers: TestSearchIndexer[] };
+	let testQuery = $state('');
+	let testCategories = $state('');
+	let testRunning = $state(false);
+	let testResult = $state<TestSearchResponse | null>(null);
+	let testError = $state<string | null>(null);
+
+	async function runTestSearch() {
+		if (!testQuery.trim()) return;
+		testRunning = true;
+		testError = null;
+		testResult = null;
+		try {
+			const params = new URLSearchParams({ q: testQuery.trim() });
+			if (testCategories.trim()) params.set('cat', testCategories.trim());
+			testResult = await ApiClient.get<TestSearchResponse>(`/admin/test-search?${params}`);
+		} catch (e) {
+			testError = e instanceof Error ? e.message : 'Test search failed';
+		} finally {
+			testRunning = false;
+		}
+	}
 </script>
 
 <div class="space-y-6">
@@ -115,6 +192,222 @@
 				Download history from Usenet grabs
 			{/if}
 		</p>
+	</div>
+
+	<!-- Pipeline Status -->
+	<div class="bg-gray-800 rounded-lg border border-gray-700">
+		<button
+			onclick={() => pipelineOpen = !pipelineOpen}
+			class="w-full flex items-center justify-between px-5 py-3 text-left hover:bg-gray-750 transition-colors"
+		>
+			<div class="flex items-center gap-3">
+				<h2 class="text-base font-semibold text-gray-200">Pipeline Status</h2>
+				{#if pipeline}
+					{@const cron = pipeline.cron || {}}
+					{@const stale = !cron.missing_search_last_run || (Date.now() - new Date(cron.missing_search_last_run).getTime() > 24 * 3600 * 1000)}
+					{@const off = cron.missing_search_enabled !== 'true'}
+					{#if off}
+						<span class="text-xs px-2 py-0.5 bg-red-900/40 text-red-300 rounded">Missing search OFF</span>
+					{:else if stale}
+						<span class="text-xs px-2 py-0.5 bg-amber-900/40 text-amber-300 rounded">Missing search stale</span>
+					{:else}
+						<span class="text-xs px-2 py-0.5 bg-green-900/40 text-green-300 rounded">Missing search OK</span>
+					{/if}
+				{/if}
+			</div>
+			<div class="flex items-center gap-2 text-xs text-gray-400">
+				{#if pipelineLoading}
+					Loading…
+				{/if}
+				<span>{pipelineOpen ? '▾' : '▸'}</span>
+			</div>
+		</button>
+
+		{#if pipelineOpen}
+			<div class="px-5 pb-5 pt-1 border-t border-gray-700/50 space-y-4 text-sm">
+				{#if pipelineError}
+					<p class="text-red-400">{pipelineError}</p>
+				{:else if pipeline}
+					{@const cron = pipeline.cron || {}}
+					<div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+						<div class="bg-gray-900/50 rounded p-3">
+							<div class="flex items-center justify-between">
+								<span class="text-gray-400">Missing search cron</span>
+								<span class="font-mono {cron.missing_search_enabled === 'true' ? 'text-green-400' : 'text-red-400'}">
+									{cron.missing_search_enabled === 'true' ? 'enabled' : 'disabled'}
+								</span>
+							</div>
+							<div class="text-xs text-gray-500 mt-1">
+								Interval: {cron.missing_search_interval || '10'} min ·
+								Last run: {timeAgo(cron.missing_search_last_run)}
+							</div>
+						</div>
+						<div class="bg-gray-900/50 rounded p-3">
+							<div class="flex items-center justify-between">
+								<span class="text-gray-400">Pull list cron</span>
+								<span class="font-mono {cron.pull_list_enabled === 'true' ? 'text-green-400' : 'text-red-400'}">
+									{cron.pull_list_enabled === 'true' ? 'enabled' : 'disabled'}
+								</span>
+							</div>
+							<div class="text-xs text-gray-500 mt-1">
+								Day: {cron.pull_list_day ?? '3'} (0=Sun) ·
+								Hour: {cron.pull_list_hour ?? '6'} ·
+								Last run: {cron.pull_list_last_run || 'never'}
+							</div>
+						</div>
+						<div class="bg-gray-900/50 rounded p-3">
+							<div class="flex items-center justify-between">
+								<span class="text-gray-400">Auto scan cron</span>
+								<span class="font-mono {cron.auto_scan_enabled === 'true' ? 'text-green-400' : 'text-red-400'}">
+									{cron.auto_scan_enabled === 'true' ? 'enabled' : 'disabled'}
+								</span>
+							</div>
+							<div class="text-xs text-gray-500 mt-1">
+								Interval: {cron.auto_scan_interval || '?'} min ·
+								Last run: {timeAgo(cron.auto_scan_last_run)}
+							</div>
+						</div>
+					</div>
+
+					<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+						<div class="bg-gray-900/50 rounded p-3">
+							<div class="text-gray-400 mb-2">Backlog item statuses</div>
+							{#if pipeline.backlog_status && Object.keys(pipeline.backlog_status).length > 0}
+								<div class="flex flex-wrap gap-2">
+									{#each Object.entries(pipeline.backlog_status) as [status, count]}
+										<span class="text-xs px-2 py-0.5 rounded bg-gray-800 text-gray-200">
+											{status}: <span class="font-mono">{count}</span>
+										</span>
+									{/each}
+								</div>
+							{:else}
+								<div class="text-xs text-gray-500">No items</div>
+							{/if}
+							<div class="text-xs text-gray-500 mt-2">Want list total: {pipeline.want_list_total ?? '?'}</div>
+						</div>
+
+						<div class="bg-gray-900/50 rounded p-3">
+							<div class="text-gray-400 mb-2">Indexers + download clients</div>
+							{#if pipeline.indexers && pipeline.indexers.length > 0}
+								<ul class="text-xs text-gray-300 space-y-0.5">
+									{#each pipeline.indexers as ix}
+										<li>
+											<span class="{ix.enabled ? 'text-green-400' : 'text-red-400'}">●</span>
+											{ix.name} <span class="text-gray-500">({ix.type})</span>
+										</li>
+									{/each}
+								</ul>
+							{:else}
+								<div class="text-xs text-red-400">No indexers configured</div>
+							{/if}
+							<div class="border-t border-gray-700/50 mt-2 pt-2">
+								{#if pipeline.download_clients && pipeline.download_clients.length > 0}
+									<ul class="text-xs text-gray-300 space-y-0.5">
+										{#each pipeline.download_clients as dc}
+											<li>
+												<span class="{dc.enabled ? 'text-green-400' : 'text-red-400'}">●</span>
+												{dc.name} <span class="text-gray-500">({dc.type} · {dc.url})</span>
+											</li>
+										{/each}
+									</ul>
+								{:else}
+									<div class="text-xs text-red-400">No download clients configured</div>
+								{/if}
+							</div>
+						</div>
+					</div>
+
+					{#if pipeline.recent_failures && pipeline.recent_failures.length > 0}
+						<div class="bg-gray-900/50 rounded p-3">
+							<div class="text-gray-400 mb-2">Most recent backlog failures</div>
+							<ul class="text-xs text-gray-300 space-y-1">
+								{#each pipeline.recent_failures as f}
+									<li class="flex gap-2">
+										<span class="text-gray-500 whitespace-nowrap">{timeAgo(f.updated_at)}</span>
+										<span class="text-amber-300">{f.series_title} #{f.issue_number}</span>
+										<span class="text-gray-400">— {f.last_error || '(no error message)'}</span>
+									</li>
+								{/each}
+							</ul>
+						</div>
+					{/if}
+
+					<div class="flex justify-end">
+						<button
+							onclick={loadPipeline}
+							disabled={pipelineLoading}
+							class="text-xs px-3 py-1 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 rounded text-gray-200"
+						>
+							{pipelineLoading ? 'Refreshing…' : 'Refresh'}
+						</button>
+					</div>
+
+					<!-- Test Search -->
+					<div class="bg-gray-900/50 rounded p-3">
+						<div class="text-gray-400 mb-2">Test Search — paste the query LongBox would use and see what each indexer returns</div>
+						<div class="flex gap-2">
+							<input
+								type="text"
+								bind:value={testQuery}
+								placeholder="e.g. Alice Never After 001"
+								class="flex-1 px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-amber-500"
+								onkeydown={(e) => { if (e.key === 'Enter') runTestSearch(); }}
+							/>
+							<input
+								type="text"
+								bind:value={testCategories}
+								placeholder="cat (optional, e.g. 7030)"
+								class="w-44 px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-amber-500"
+							/>
+							<button
+								onclick={runTestSearch}
+								disabled={testRunning || !testQuery.trim()}
+								class="px-3 py-1.5 text-xs bg-amber-500 hover:bg-amber-600 disabled:bg-gray-700 disabled:opacity-50 text-gray-900 font-semibold rounded"
+							>
+								{testRunning ? 'Searching…' : 'Run'}
+							</button>
+						</div>
+						{#if testError}
+							<p class="mt-2 text-xs text-red-400">{testError}</p>
+						{/if}
+						{#if testResult}
+							<div class="mt-3 space-y-3">
+								{#each testResult.indexers as ix}
+									<div class="border border-gray-700/60 rounded p-2">
+										<div class="flex items-center justify-between text-xs">
+											<div class="flex items-center gap-2">
+												<span class="{ix.enabled ? 'text-green-400' : 'text-red-400'}">●</span>
+												<span class="font-semibold text-gray-200">{ix.indexer_name}</span>
+												<span class="text-gray-500">({ix.indexer_type})</span>
+											</div>
+											<div class="font-mono text-gray-400">
+												{ix.result_count} hit{ix.result_count === 1 ? '' : 's'}
+												{#if ix.categories_sent}· cats={ix.categories_sent}{/if}
+											</div>
+										</div>
+										{#if ix.error}
+											<p class="text-xs text-red-400 mt-1">{ix.error}</p>
+										{:else if ix.top_results && ix.top_results.length > 0}
+											<ul class="mt-1.5 text-xs text-gray-300 space-y-0.5 font-mono">
+												{#each ix.top_results as r}
+													<li class="truncate">
+														<span class="text-gray-500">[{r.category || '-'}]</span>
+														{r.title}
+														<span class="text-gray-600">· {(r.size / (1024 * 1024)).toFixed(0)}MB · {r.grabs} grabs</span>
+													</li>
+												{/each}
+											</ul>
+										{:else}
+											<p class="text-xs text-gray-500 mt-1">no hits</p>
+										{/if}
+									</div>
+								{/each}
+							</div>
+						{/if}
+					</div>
+				{/if}
+			</div>
+		{/if}
 	</div>
 
 	<!-- Tabs -->

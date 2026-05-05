@@ -33,6 +33,14 @@
 	let testResult = $state<APIKeyTestResult | null>(null);
 	let saveMessage = $state<string | null>(null);
 
+	// Metron credentials state
+	let metronUsernameInput = $state('');
+	let metronTokenInput = $state('');
+	let metronSaving = $state(false);
+	let metronSaveMessage = $state<string | null>(null);
+	let metronTesting = $state(false);
+	let metronTestResult = $state<{ valid: boolean; message: string; burst_remaining?: number; sustained_remaining?: number } | null>(null);
+
 	// File organization state
 	let templateInput = $state('');
 	let templateLoading = $state(true);
@@ -74,6 +82,10 @@
 	let missingSearchSaving = $state(false);
 	let missingSearchMessage = $state<string | null>(null);
 
+	// Scan reconciliation state
+	let scanReconcileSaving = $state(false);
+	let scanReconcileMessage = $state<string | null>(null);
+
 	// Slack notification state
 	let slackSettings = $state<SlackSettings | null>(null);
 	let slackSaving = $state(false);
@@ -83,7 +95,7 @@
 	let slackTesting = $state(false);
 	let slackTestResult = $state<SlackTestResult | null>(null);
 
-	// Mylar3 metadata state
+	// LongBox sidecar metadata state
 	let mylarWriting = $state(false);
 	let mylarMessage = $state<string | null>(null);
 
@@ -104,6 +116,132 @@
 	// Shutdown state
 	let shutdownConfirming = $state(false);
 	let shutdownTriggered = $state(false);
+
+	// Read-status backfill state
+	let readBackfillRunning = $state(false);
+	let readBackfillMessage = $state<string | null>(null);
+
+	// Want list prune state
+	let pruneWantListRunning = $state(false);
+	let pruneWantListMessage = $state<string | null>(null);
+
+	// Dedupe issues state
+	let dedupeIssuesRunning = $state(false);
+	let dedupeIssuesMessage = $state<string | null>(null);
+
+	// Dedupe series state
+	let dedupeSeriesRunning = $state(false);
+	let dedupeSeriesMessage = $state<string | null>(null);
+
+	// Folder image state
+	let folderImageRunning = $state(false);
+	let folderImageMessage = $state<string | null>(null);
+
+	// Backlog reconcile state
+	let reconcileRunning = $state(false);
+	let reconcileMessage = $state<string | null>(null);
+
+	// Trash orphan files state
+	type TrashOrphansResult = {
+		scanned: number;
+		files_trashed: number;
+		bytes_reclaimed: number;
+		dry_run: boolean;
+		trashed?: string[];
+		errors?: string[];
+	};
+	let orphanRunning = $state(false);
+	let orphanPreview = $state<TrashOrphansResult | null>(null);
+	let orphanMessage = $state<string | null>(null);
+
+	async function previewOrphans() {
+		orphanRunning = true;
+		orphanMessage = null;
+		try {
+			orphanPreview = await ApiClient.post<TrashOrphansResult>('/admin/trash-orphan-files?dry=1');
+			if (orphanPreview.scanned === 0) {
+				orphanMessage = 'No orphan files (all comic_files have an issue link).';
+			}
+		} catch (e) {
+			orphanMessage = e instanceof Error ? e.message : 'Preview failed';
+		} finally {
+			orphanRunning = false;
+		}
+	}
+
+	async function applyTrashOrphans() {
+		if (!orphanPreview || orphanPreview.scanned === 0) return;
+		const mb = (orphanPreview.bytes_reclaimed / (1024 * 1024)).toFixed(1);
+		if (!confirm(`Move ${orphanPreview.scanned} orphan file${orphanPreview.scanned === 1 ? '' : 's'} to the OS recycle bin? Reclaims ~${mb} MB. Reversible from the recycle bin.`)) return;
+		orphanRunning = true;
+		orphanMessage = null;
+		try {
+			const r = await ApiClient.post<TrashOrphansResult>('/admin/trash-orphan-files');
+			orphanPreview = null;
+			const errCount = (r.errors ?? []).length;
+			orphanMessage = `Trashed ${r.files_trashed} of ${r.scanned} orphan files, reclaimed ${(r.bytes_reclaimed / (1024 * 1024)).toFixed(1)} MB${errCount > 0 ? ` · ${errCount} errors` : ''}.`;
+		} catch (e) {
+			orphanMessage = e instanceof Error ? e.message : 'Trash failed';
+		} finally {
+			orphanRunning = false;
+		}
+	}
+
+	// Adopt stranded folders state
+	type AdoptSubmitResult = { job_id: number; status: string; message: string };
+	let adoptRunning = $state(false);
+	let adoptMessage = $state<string | null>(null);
+
+	async function adoptStrandedFolders() {
+		if (!confirm('Walk every top-level folder under the library, parse SAB-style download folder names for series + issue + year, and reassign the comic files inside to the correct series. Files are NOT moved here — run Reorganize afterwards to consolidate. OK?')) return;
+		adoptRunning = true;
+		adoptMessage = null;
+		try {
+			const res = await ApiClient.post<AdoptSubmitResult>('/admin/adopt-folders');
+			adoptMessage = `${res.message} (Job #${res.job_id})`;
+		} catch (e) {
+			adoptMessage = e instanceof Error ? e.message : 'Adopt failed';
+		} finally {
+			adoptRunning = false;
+		}
+	}
+
+	// Library reorganize state
+	type ReorgPreview = {
+		dry_run: boolean;
+		moves: number;
+		conflicts: number;
+		skipped: number;
+		previews?: Array<{ file_id: number; current_path: string; new_path: string; status: string; reason?: string }>;
+	};
+	type ReorgSubmitResult = {
+		job_id: number;
+		status: string;
+		message: string;
+	};
+	let reorgRunning = $state(false);
+	let reorgPreview = $state<ReorgPreview | null>(null);
+	let reorgMessage = $state<string | null>(null);
+
+	// On-disk file dedupe state
+	type FileDedupeDecision = {
+		issue_id: number;
+		kept_id: number;
+		kept_path: string;
+		kept_reason: string;
+		trashed?: string[];
+	};
+	type FileDedupeResult = {
+		groups_found: number;
+		files_trashed: number;
+		bytes_reclaimed: number;
+		errors?: string[];
+		dry_run: boolean;
+		decisions?: FileDedupeDecision[];
+	};
+	let fileDedupeRunning = $state(false);
+	let fileDedupePreview = $state<FileDedupeResult | null>(null);
+	let fileDedupeMessage = $state<string | null>(null);
 
 	const auth = getAuthState();
 
@@ -290,18 +428,257 @@
 		}
 	}
 
-	async function writeMylarMetadata() {
+	async function dedupeSeries() {
+		dedupeSeriesRunning = true;
+		dedupeSeriesMessage = null;
+		try {
+			const result = await ApiClient.post<{
+				groups_found: number;
+				series_merged: number;
+				issues_moved: number;
+				issues_consolidated: number;
+				files_relinked: number;
+				errors?: string[];
+			}>('/admin/dedupe-series');
+			if (result.groups_found === 0) {
+				dedupeSeriesMessage = 'No duplicate series rows found.';
+			} else {
+				dedupeSeriesMessage =
+					`Merged ${result.series_merged} duplicate series across ${result.groups_found} group${result.groups_found === 1 ? '' : 's'} ` +
+					`(${result.issues_moved} issues moved, ${result.issues_consolidated} consolidated, ${result.files_relinked} files relinked)`;
+				if (result.errors && result.errors.length > 0) {
+					dedupeSeriesMessage += ` · Error: ${result.errors[0]}`;
+					if (result.errors.length > 1) {
+						dedupeSeriesMessage += ` (+${result.errors.length - 1} more)`;
+					}
+				}
+			}
+		} catch (e) {
+			dedupeSeriesMessage = e instanceof Error ? e.message : 'Dedupe failed';
+		} finally {
+			dedupeSeriesRunning = false;
+		}
+	}
+
+	async function dedupeIssues() {
+		dedupeIssuesRunning = true;
+		dedupeIssuesMessage = null;
+		try {
+			const result = await ApiClient.post<{
+				groups_found: number;
+				issues_deleted: number;
+				files_relinked: number;
+				wants_consolidated: number;
+				arc_links_copied: number;
+				errors?: string[];
+			}>('/admin/dedupe-issues');
+			if (result.groups_found === 0) {
+				dedupeIssuesMessage = 'No duplicate issue rows found.';
+			} else {
+				dedupeIssuesMessage =
+					`Merged ${result.groups_found} group${result.groups_found === 1 ? '' : 's'} ` +
+					`(deleted ${result.issues_deleted}, relinked ${result.files_relinked} file${result.files_relinked === 1 ? '' : 's'})`;
+				if (result.errors && result.errors.length > 0) {
+					dedupeIssuesMessage += ` · ${result.errors.length} error${result.errors.length === 1 ? '' : 's'} — see server log.`;
+				}
+			}
+		} catch (e) {
+			dedupeIssuesMessage = e instanceof Error ? e.message : 'Dedupe failed';
+		} finally {
+			dedupeIssuesRunning = false;
+		}
+	}
+
+	async function pruneWantList() {
+		pruneWantListRunning = true;
+		pruneWantListMessage = null;
+		try {
+			const result = await ApiClient.post<{ removed: number }>('/admin/prune-want-list');
+			pruneWantListMessage = result.removed > 0
+				? `Removed ${result.removed} fulfilled want list ${result.removed === 1 ? 'entry' : 'entries'}.`
+				: 'No fulfilled entries to prune.';
+		} catch (e) {
+			pruneWantListMessage = e instanceof Error ? e.message : 'Prune failed';
+		} finally {
+			pruneWantListRunning = false;
+		}
+	}
+
+	async function backfillReadStatus() {
+		readBackfillRunning = true;
+		readBackfillMessage = null;
+		try {
+			const result = await ApiClient.post<{ promoted: number }>('/admin/backfill-read-status');
+			readBackfillMessage = result.promoted > 0
+				? `Promoted ${result.promoted} issue${result.promoted === 1 ? '' : 's'} from "Reading" to "Read".`
+				: 'No issues to promote — every "Reading" issue has either no recorded progress or is not at the last page.';
+		} catch (e) {
+			readBackfillMessage = e instanceof Error ? e.message : 'Backfill failed';
+		} finally {
+			readBackfillRunning = false;
+		}
+	}
+
+	async function writeLongboxMetadata() {
 		mylarWriting = true;
 		mylarMessage = null;
 		try {
 			const result = await ApiClient.post<{ job_id: number; total_series: number; message: string }>(
-				'/library/write-mylar-metadata'
+				'/library/write-longbox-metadata'
 			);
 			mylarMessage = `${result.message} (${result.total_series} series, Job #${result.job_id})`;
 		} catch (e) {
 			mylarMessage = e instanceof Error ? e.message : 'Failed to start';
 		} finally {
 			mylarWriting = false;
+		}
+	}
+
+	async function writeFolderImages() {
+		folderImageRunning = true;
+		folderImageMessage = null;
+		try {
+			const result = await ApiClient.post<{ job_id: number; message: string }>(
+				'/library/write-folder-images'
+			);
+			folderImageMessage = `${result.message} (Job #${result.job_id})`;
+		} catch (e) {
+			folderImageMessage = e instanceof Error ? e.message : 'Failed to start';
+		} finally {
+			folderImageRunning = false;
+		}
+	}
+
+	async function previewReorganize() {
+		reorgRunning = true;
+		reorgMessage = null;
+		reorgResult = null;
+		try {
+			reorgPreview = await ApiClient.post<ReorgPreview>('/admin/reorganize?dry=1');
+			if (reorgPreview.moves === 0 && reorgPreview.conflicts === 0) {
+				reorgMessage = 'Library is already organized — nothing to move.';
+			}
+		} catch (e) {
+			reorgMessage = e instanceof Error ? e.message : 'Preview failed';
+		} finally {
+			reorgRunning = false;
+		}
+	}
+
+	async function applyReorganize() {
+		if (!reorgPreview || reorgPreview.moves === 0) return;
+		const msg = reorgPreview.conflicts > 0
+			? `Submit reorganize of ${reorgPreview.moves} file${reorgPreview.moves === 1 ? '' : 's'}? ${reorgPreview.conflicts} conflict${reorgPreview.conflicts === 1 ? '' : 's'} will be skipped — review preview first. Runs in the background; track on the Jobs page.`
+			: `Submit reorganize of ${reorgPreview.moves} file${reorgPreview.moves === 1 ? '' : 's'} into the canonical "Series (Year)/Series (Year) NNN.ext" layout? Runs in the background — you can navigate away. Track progress in the active-job banner or on the Jobs page.`;
+		if (!confirm(msg)) return;
+		reorgRunning = true;
+		reorgMessage = null;
+		try {
+			const submit = await ApiClient.post<ReorgSubmitResult>('/admin/reorganize');
+			reorgPreview = null;
+			reorgMessage = `${submit.message} (Job #${submit.job_id})`;
+		} catch (e) {
+			reorgMessage = e instanceof Error ? e.message : 'Reorganize failed';
+		} finally {
+			reorgRunning = false;
+		}
+	}
+
+	function formatBytes(n: number): string {
+		if (n <= 0) return '0 B';
+		const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+		const i = Math.floor(Math.log(n) / Math.log(1024));
+		return `${(n / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
+	}
+
+	async function previewFileDedupe() {
+		fileDedupeRunning = true;
+		fileDedupeMessage = null;
+		try {
+			fileDedupePreview = await ApiClient.post<FileDedupeResult>('/admin/dedupe-files?dry=1');
+			if (fileDedupePreview.groups_found === 0) {
+				fileDedupeMessage = 'No duplicate files found on disk.';
+			}
+		} catch (e) {
+			fileDedupeMessage = e instanceof Error ? e.message : 'Preview failed';
+		} finally {
+			fileDedupeRunning = false;
+		}
+	}
+
+	async function applyFileDedupe() {
+		if (!fileDedupePreview || fileDedupePreview.groups_found === 0) return;
+		const total = fileDedupePreview.decisions?.reduce((n, d) => n + (d.trashed?.length ?? 0), 0) ?? 0;
+		if (!confirm(`Move ${total} duplicate file${total === 1 ? '' : 's'} to the OS recycle bin? This is reversible from the system trash.`)) {
+			return;
+		}
+		fileDedupeRunning = true;
+		fileDedupeMessage = null;
+		try {
+			const result = await ApiClient.post<FileDedupeResult>('/admin/dedupe-files');
+			fileDedupePreview = result;
+			fileDedupeMessage =
+				`Trashed ${result.files_trashed} file${result.files_trashed === 1 ? '' : 's'}, ` +
+				`reclaimed ${formatBytes(result.bytes_reclaimed)}.` +
+				(result.errors && result.errors.length > 0 ? ` ${result.errors.length} error${result.errors.length === 1 ? '' : 's'} — see server log.` : '');
+		} catch (e) {
+			fileDedupeMessage = e instanceof Error ? e.message : 'Dedupe failed';
+		} finally {
+			fileDedupeRunning = false;
+		}
+	}
+
+	async function reconcileBacklog() {
+		reconcileRunning = true;
+		reconcileMessage = null;
+		try {
+			const result = await ApiClient.post<{ reconciled: number }>('/admin/reconcile-backlog');
+			reconcileMessage = result.reconciled > 0
+				? `Marked ${result.reconciled} backlog item${result.reconciled === 1 ? '' : 's'} completed (already owned or grabbed).`
+				: 'Nothing to reconcile — no failed/pending items match an owned issue.';
+		} catch (e) {
+			reconcileMessage = e instanceof Error ? e.message : 'Reconcile failed';
+		} finally {
+			reconcileRunning = false;
+		}
+	}
+
+	async function saveMetronCredentials() {
+		const username = metronUsernameInput.trim();
+		const token = metronTokenInput.trim();
+		if (!username || !token) return;
+		metronSaving = true;
+		metronSaveMessage = null;
+		metronTestResult = null;
+		try {
+			await ApiClient.put('/settings/metron', { username, api_token: token });
+			metronTokenInput = '';
+			metronSaveMessage = 'Metron credentials saved.';
+			await loadSettings();
+		} catch (e) {
+			metronSaveMessage = e instanceof Error ? e.message : 'Save failed';
+		} finally {
+			metronSaving = false;
+		}
+	}
+
+	async function testMetron() {
+		metronTesting = true;
+		metronTestResult = null;
+		try {
+			metronTestResult = await ApiClient.post<{
+				valid: boolean;
+				message: string;
+				burst_remaining?: number;
+				sustained_remaining?: number;
+			}>('/settings/metron/test');
+			if (metronTestResult.valid) {
+				await loadSettings();
+			}
+		} catch (e) {
+			metronTestResult = { valid: false, message: e instanceof Error ? e.message : 'Test failed' };
+		} finally {
+			metronTesting = false;
 		}
 	}
 
@@ -483,6 +860,22 @@
 			autoScanMessage = e instanceof Error ? e.message : 'Save failed';
 		} finally {
 			autoScanSaving = false;
+		}
+	}
+
+	// --- Scan reconciliation ---
+
+	async function saveScanReconcile(field: string, value: any) {
+		scanReconcileSaving = true;
+		scanReconcileMessage = null;
+		try {
+			await ApiClient.put('/settings/scan-reconcile', { [field]: value });
+			await loadSettings();
+			scanReconcileMessage = 'Setting updated!';
+		} catch (e) {
+			scanReconcileMessage = e instanceof Error ? e.message : 'Save failed';
+		} finally {
+			scanReconcileSaving = false;
 		}
 	}
 
@@ -868,23 +1261,23 @@
 			{/if}
 		</div>
 
-		<!-- Mylar3 Metadata Section -->
+		<!-- LongBox Metadata Sidecars Section -->
 		<div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
-			<h2 class="text-xl font-semibold mb-4">Mylar3 Metadata</h2>
+			<h2 class="text-xl font-semibold mb-4">LongBox Metadata Sidecars</h2>
 			<p class="text-sm text-gray-400 mb-6">
-				Write Mylar3-compatible metadata files to each series folder. Creates a
-				<code class="text-amber-400 bg-gray-900 px-1 rounded">cvinfo</code> file (ComicVine URL) and downloads a
-				<code class="text-amber-400 bg-gray-900 px-1 rounded">poster.jpg</code> (series cover image)
-				for every series matched to ComicVine.
+				Write LongBox-native sidecars to each series folder. Creates a
+				<code class="text-amber-400 bg-gray-900 px-1 rounded">longbox-series.json</code> file for tools and a
+				<code class="text-amber-400 bg-gray-900 px-1 rounded">longbox-series.txt</code> summary for humans.
+				Files are only rewritten when their content changes.
 			</p>
 
 			<button
-				onclick={writeMylarMetadata}
+				onclick={writeLongboxMetadata}
 				disabled={mylarWriting}
 				class="px-4 py-2 bg-amber-500 hover:bg-amber-600 disabled:bg-gray-600
 					disabled:cursor-not-allowed text-gray-900 font-semibold rounded-lg transition-colors"
 			>
-				{mylarWriting ? 'Starting...' : 'Write Mylar3 Metadata'}
+				{mylarWriting ? 'Starting...' : 'Write LongBox Sidecars'}
 			</button>
 
 			{#if mylarMessage}
@@ -992,6 +1385,120 @@
 							{#if testResult.valid && testResult.hourly_remaining !== undefined}
 								<p class="text-xs text-gray-400 mt-1">
 									{testResult.hourly_remaining} hourly requests remaining
+								</p>
+							{/if}
+						</div>
+					{/if}
+				</div>
+			{/if}
+		</div>
+
+		<!-- Metron Section -->
+		<div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+			<h2 class="text-xl font-semibold mb-4">Metron API</h2>
+			<p class="text-sm text-gray-400 mb-6">
+				Secondary metadata source. Far more generous quota (20/min burst, 5000/day)
+				than ComicVine. Use as a fallback or as a primary for series Metron has covered.
+				<a href="https://metron.cloud/" target="_blank" rel="noopener" class="text-amber-400 hover:text-amber-300">Sign up</a>,
+				then create an API token under your user settings.
+			</p>
+
+			<div class="mb-6 space-y-2">
+				<div class="flex items-center gap-3">
+					<span class="text-sm text-gray-400">Status:</span>
+					{#if settings?.metron_token_set}
+						<span class="inline-flex items-center gap-1.5 text-sm text-green-400">
+							<span class="w-2 h-2 bg-green-400 rounded-full"></span>
+							Connected
+						</span>
+					{:else}
+						<span class="inline-flex items-center gap-1.5 text-sm text-yellow-400">
+							<span class="w-2 h-2 bg-yellow-400 rounded-full"></span>
+							Not configured
+						</span>
+					{/if}
+				</div>
+
+				{#if settings?.metron_token_set}
+					<div class="flex items-center gap-3">
+						<span class="text-sm text-gray-400">Username:</span>
+						<code class="text-sm text-gray-300 bg-gray-700 px-2 py-0.5 rounded">
+							{settings.metron_username || '(unset)'}
+						</code>
+					</div>
+					<div class="flex items-center gap-3">
+						<span class="text-sm text-gray-400">Token:</span>
+						<code class="text-sm text-gray-300 bg-gray-700 px-2 py-0.5 rounded">
+							{settings.metron_token_masked || '••••••'}
+						</code>
+					</div>
+					{#if settings.metron_burst_remaining > 0 || settings.metron_sustained_remaining > 0}
+						<div class="flex items-center gap-3">
+							<span class="text-sm text-gray-400">Quota:</span>
+							<span class="text-sm text-gray-300">
+								{settings.metron_burst_remaining} burst /
+								{settings.metron_sustained_remaining} daily remaining
+							</span>
+						</div>
+					{/if}
+				{/if}
+			</div>
+
+			<div class="space-y-3">
+				<label for="metron-username" class="block text-sm font-medium text-gray-300">Username</label>
+				<input
+					id="metron-username"
+					type="text"
+					bind:value={metronUsernameInput}
+					placeholder="Your metron.cloud username"
+					class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+				/>
+
+				<label for="metron-token" class="block text-sm font-medium text-gray-300">API Token</label>
+				<div class="flex gap-3">
+					<input
+						id="metron-token"
+						type="password"
+						bind:value={metronTokenInput}
+						placeholder={settings?.metron_token_set ? 'Enter a new token to replace' : 'Paste your Metron API token'}
+						class="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+						onkeydown={(e) => e.key === 'Enter' && saveMetronCredentials()}
+					/>
+					<button
+						onclick={saveMetronCredentials}
+						disabled={metronSaving || !metronUsernameInput.trim() || !metronTokenInput.trim()}
+						class="px-4 py-2 bg-amber-500 hover:bg-amber-600 disabled:bg-gray-600 disabled:cursor-not-allowed text-gray-900 font-semibold rounded-lg transition-colors"
+					>
+						{metronSaving ? 'Saving...' : 'Save'}
+					</button>
+				</div>
+			</div>
+
+			{#if metronSaveMessage}
+				<p class="mt-3 text-sm {metronSaveMessage.includes('saved') ? 'text-green-400' : 'text-red-400'}">
+					{metronSaveMessage}
+				</p>
+			{/if}
+
+			{#if settings?.metron_token_set}
+				<div class="mt-4 pt-4 border-t border-gray-700">
+					<button
+						onclick={testMetron}
+						disabled={metronTesting}
+						class="px-4 py-2 bg-gray-700 hover:bg-gray-600 disabled:bg-gray-600 disabled:cursor-not-allowed text-gray-200 font-medium rounded-lg transition-colors text-sm"
+					>
+						{metronTesting ? 'Testing...' : 'Test Connection'}
+					</button>
+
+					{#if metronTestResult}
+						<div class="mt-3 p-3 rounded-lg {metronTestResult.valid ? 'bg-green-900/30 border border-green-700' : 'bg-red-900/30 border border-red-700'}">
+							<p class="text-sm {metronTestResult.valid ? 'text-green-400' : 'text-red-400'}">
+								{metronTestResult.message}
+							</p>
+							{#if metronTestResult.valid && (metronTestResult.burst_remaining !== undefined || metronTestResult.sustained_remaining !== undefined)}
+								<p class="text-xs text-gray-400 mt-1">
+									{metronTestResult.burst_remaining ?? '?'} burst /
+									{metronTestResult.sustained_remaining ?? '?'} daily remaining
 								</p>
 							{/if}
 						</div>
@@ -1281,6 +1788,59 @@
 						</div>
 					{/if}
 				{/if}
+			</div>
+		</div>
+
+		<!-- Scan Reconciliation Section -->
+		<div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+			<h2 class="text-xl font-semibold mb-4">Scan Reconciliation</h2>
+			<p class="text-sm text-gray-400 mb-6">
+				Controls how a library scan reconciles with what's on disk and with ComicVine.
+				Files missing on disk are always pruned from the database. ComicVine is only
+				re-fetched per series when its last sync is older than the TTL below.
+			</p>
+
+			{#if scanReconcileMessage}
+				<p class="mb-4 text-sm {scanReconcileMessage.includes('updated') || scanReconcileMessage.includes('Updated') ? 'text-green-400' : 'text-red-400'}">
+					{scanReconcileMessage}
+				</p>
+			{/if}
+
+			<div class="space-y-4">
+				<div class="flex items-center justify-between">
+					<div>
+						<p class="text-sm font-medium text-gray-200">Auto-queue backlog when new gaps appear</p>
+						<p class="text-xs text-gray-500 mt-0.5">After CV refresh during a scan, automatically create a backlog run for any series that has new missing issues.</p>
+					</div>
+					<button
+						onclick={() => saveScanReconcile('auto_queue_backlog', !settings?.scan_auto_queue_backlog)}
+						disabled={scanReconcileSaving}
+						class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors
+							{settings?.scan_auto_queue_backlog ? 'bg-amber-500' : 'bg-gray-600'}"
+					>
+						<span class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform
+							{settings?.scan_auto_queue_backlog ? 'translate-x-6' : 'translate-x-1'}"></span>
+					</button>
+				</div>
+
+				<div class="flex items-center gap-4">
+					<label for="scan-cv-ttl" class="text-sm text-gray-300 w-40">CV refresh TTL</label>
+					<select
+						id="scan-cv-ttl"
+						value={settings?.scan_cv_refresh_ttl_hours ?? 24}
+						onchange={(e) => saveScanReconcile('cv_refresh_ttl_hours', parseInt((e.target as HTMLSelectElement).value))}
+						class="px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-amber-500"
+					>
+						<option value={1}>1 hour</option>
+						<option value={6}>6 hours</option>
+						<option value={12}>12 hours</option>
+						<option value={24}>24 hours</option>
+						<option value={48}>48 hours</option>
+						<option value={168}>1 week</option>
+						<option value={720}>30 days</option>
+					</select>
+					<span class="text-xs text-gray-500">Skip CV re-fetch when a series was synced within this window.</span>
+				</div>
 			</div>
 		</div>
 
@@ -1789,6 +2349,329 @@
 				<p class="text-sm text-gray-300 mb-2">OPDS Catalog URL:</p>
 				<code class="text-amber-400 text-sm font-mono">{typeof window !== 'undefined' ? window.location.origin : ''}/opds/</code>
 				<p class="text-xs text-gray-500 mt-2">Add this URL in your OPDS reader app to browse and download comics from your library.</p>
+			</div>
+		</div>
+
+		<!-- Maintenance Section -->
+		<div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+			<h2 class="text-xl font-semibold mb-4">Maintenance</h2>
+			<p class="text-sm text-gray-400 mb-4">
+				One-shot operations for healing pre-existing data after feature changes.
+			</p>
+			<div class="space-y-3">
+				<div class="flex items-center justify-between gap-4">
+					<div class="min-w-0">
+						<p class="text-sm font-medium text-gray-200">Backfill Read Status</p>
+						<p class="text-xs text-gray-500 mt-0.5">
+							Promotes any issue currently flagged "Reading" whose recorded progress
+							is at or past the last page to "Read". Safe to run repeatedly.
+						</p>
+					</div>
+					<button
+						onclick={backfillReadStatus}
+						disabled={readBackfillRunning}
+						class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed text-gray-100 rounded-lg transition-colors whitespace-nowrap"
+					>
+						{readBackfillRunning ? 'Running…' : 'Run Backfill'}
+					</button>
+				</div>
+				{#if readBackfillMessage}
+					<p class="text-sm text-amber-300/90">{readBackfillMessage}</p>
+				{/if}
+
+				<div class="flex items-center justify-between gap-4 pt-3 border-t border-gray-700/50">
+					<div class="min-w-0">
+						<p class="text-sm font-medium text-gray-200">Prune Fulfilled Want List</p>
+						<p class="text-xs text-gray-500 mt-0.5">
+							Removes any Wanted entry whose corresponding issue has a file in the library.
+							Library scans now do this automatically — this button is for one-shot cleanup of
+							pre-existing rows.
+						</p>
+					</div>
+					<button
+						onclick={pruneWantList}
+						disabled={pruneWantListRunning}
+						class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed text-gray-100 rounded-lg transition-colors whitespace-nowrap"
+					>
+						{pruneWantListRunning ? 'Running…' : 'Prune Want List'}
+					</button>
+				</div>
+				{#if pruneWantListMessage}
+					<p class="text-sm text-amber-300/90">{pruneWantListMessage}</p>
+				{/if}
+
+				<div class="flex items-center justify-between gap-4 pt-3 border-t border-gray-700/50">
+					<div class="min-w-0">
+						<p class="text-sm font-medium text-gray-200">Merge Duplicate Issues</p>
+						<p class="text-xs text-gray-500 mt-0.5">
+							Finds (series, issue number) pairs with more than one row and merges
+							duplicates into a single canonical issue (the one with a ComicVine
+							match wins). Reassigns files, downloads, backlog items, and copies
+							wants / story-arc memberships before deleting the duplicates.
+						</p>
+					</div>
+					<button
+						onclick={dedupeIssues}
+						disabled={dedupeIssuesRunning}
+						class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed text-gray-100 rounded-lg transition-colors whitespace-nowrap"
+					>
+						{dedupeIssuesRunning ? 'Running…' : 'Merge Duplicates'}
+					</button>
+				</div>
+				{#if dedupeIssuesMessage}
+					<p class="text-sm text-amber-300/90">{dedupeIssuesMessage}</p>
+				{/if}
+
+				<div class="flex items-center justify-between gap-4 pt-3 border-t border-gray-700/50">
+					<div class="min-w-0">
+						<p class="text-sm font-medium text-gray-200">Merge Duplicate Series</p>
+						<p class="text-xs text-gray-500 mt-0.5">
+							Finds series rows that share the same title + year and merges
+							them into a single canonical row. Canonical preference: has
+							a ComicVine match, then a Metron match, then most files. Issues
+							and comic files are consolidated. Fixes the "Wanted page shows
+							issues I already own" symptom that happens when a CV match
+							creates a fresh series row alongside the filename-parsed one.
+						</p>
+					</div>
+					<button
+						onclick={dedupeSeries}
+						disabled={dedupeSeriesRunning}
+						class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed text-gray-100 rounded-lg transition-colors whitespace-nowrap"
+					>
+						{dedupeSeriesRunning ? 'Running…' : 'Merge Series'}
+					</button>
+				</div>
+				{#if dedupeSeriesMessage}
+					<p class="text-sm text-amber-300/90">{dedupeSeriesMessage}</p>
+				{/if}
+
+				<div class="flex items-center justify-between gap-4 pt-3 border-t border-gray-700/50">
+					<div class="min-w-0">
+						<p class="text-sm font-medium text-gray-200">Refresh Series Posters</p>
+						<p class="text-xs text-gray-500 mt-0.5">
+							For every series, ensures the Library page has a thumbnail.
+							Extracts the first comic file's cover when none has been captured,
+							and backfills <code class="text-amber-400 bg-gray-900 px-1 rounded">cover_image_url</code>
+							from ComicVine / Metron for matched series that are missing it.
+							Also drops <code class="text-amber-400 bg-gray-900 px-1 rounded">folder.jpg</code>
+							+ <code class="text-amber-400 bg-gray-900 px-1 rounded">cover.jpg</code>
+							into each series folder for Plex / Komga / Explorer.
+							API-bound — burns CV / Metron quota on first run; subsequent runs are nearly free.
+						</p>
+					</div>
+					<button
+						onclick={writeFolderImages}
+						disabled={folderImageRunning}
+						class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed text-gray-100 rounded-lg transition-colors whitespace-nowrap"
+					>
+						{folderImageRunning ? 'Starting…' : 'Refresh Series Posters'}
+					</button>
+				</div>
+				{#if folderImageMessage}
+					<p class="text-sm text-amber-300/90">{folderImageMessage}</p>
+				{/if}
+
+				<div class="flex items-center justify-between gap-4 pt-3 border-t border-gray-700/50">
+					<div class="min-w-0">
+						<p class="text-sm font-medium text-gray-200">Reconcile Backlog</p>
+						<p class="text-xs text-gray-500 mt-0.5">
+							Marks every non-terminal backlog item completed when the underlying
+							issue is already owned (file on disk) or already grabbed
+							(completed download history row). Fixes the "failed (no nzb found)"
+							pile that builds up because <code class="text-amber-400 bg-gray-900 px-1 rounded">AutoSearchAndGrab</code>
+							returns nil for already-owned issues.
+						</p>
+					</div>
+					<button
+						onclick={reconcileBacklog}
+						disabled={reconcileRunning}
+						class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed text-gray-100 rounded-lg transition-colors whitespace-nowrap"
+					>
+						{reconcileRunning ? 'Running…' : 'Reconcile Backlog'}
+					</button>
+				</div>
+				{#if reconcileMessage}
+					<p class="text-sm text-amber-300/90">{reconcileMessage}</p>
+				{/if}
+
+				<div class="flex items-center justify-between gap-4 pt-3 border-t border-gray-700/50">
+					<div class="min-w-0">
+						<p class="text-sm font-medium text-gray-200">Adopt Stranded Folders</p>
+						<p class="text-xs text-gray-500 mt-0.5">
+							Walks each top-level folder under the library and detects
+							SAB-style download folders (e.g.
+							<code class="text-amber-400 bg-gray-900 px-1 rounded">{`Batman Gotham Knights Gilded City 01 (of 06) (2022) (Digital)`}</code>).
+							Parses the folder name for series + issue + year and reassigns
+							the comic files inside to the correct series in the DB
+							(creating series / issues if needed). Run <em>Reorganize Library</em>
+							afterwards to physically move the files into the canonical layout.
+						</p>
+					</div>
+					<button
+						onclick={adoptStrandedFolders}
+						disabled={adoptRunning}
+						class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed text-gray-100 rounded-lg transition-colors whitespace-nowrap"
+					>
+						{adoptRunning ? 'Submitting…' : 'Adopt Folders'}
+					</button>
+				</div>
+				{#if adoptMessage}
+					<p class="text-sm text-amber-300/90">{adoptMessage}</p>
+				{/if}
+
+				<div class="flex items-center justify-between gap-4 pt-3 border-t border-gray-700/50">
+					<div class="min-w-0">
+						<p class="text-sm font-medium text-gray-200">Reorganize Library</p>
+						<p class="text-xs text-gray-500 mt-0.5">
+							Walk every comic file and move it into the canonical
+							<code class="text-amber-400 bg-gray-900 px-1 rounded">{`{series} ({year})/{series} ({year}) NNN.{format}`}</code>
+							layout. Annuals land in
+							<code class="text-amber-400 bg-gray-900 px-1 rounded">{`<parent>/Annuals/`}</code>.
+							Resets any custom naming template back to this default. Preview first
+							to see what would move and where conflicts (two files mapping to the
+							same canonical path) exist.
+						</p>
+					</div>
+					<div class="flex flex-col gap-1.5">
+						<button
+							onclick={previewReorganize}
+							disabled={reorgRunning}
+							class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed text-gray-100 rounded-lg transition-colors whitespace-nowrap"
+						>
+							{reorgRunning ? 'Working…' : 'Preview Reorganize'}
+						</button>
+						{#if reorgPreview && reorgPreview.moves > 0}
+							<button
+								onclick={applyReorganize}
+								disabled={reorgRunning}
+								class="px-3 py-1.5 text-sm bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-gray-900 font-semibold rounded-lg transition-colors whitespace-nowrap"
+							>
+								Reorganize {reorgPreview.moves}
+							</button>
+						{/if}
+					</div>
+				</div>
+				{#if reorgMessage}
+					<p class="text-sm text-amber-300/90">{reorgMessage}</p>
+				{/if}
+				{#if reorgPreview && reorgPreview.previews && (reorgPreview.moves > 0 || reorgPreview.conflicts > 0)}
+					<div class="bg-gray-900/40 rounded p-3 mt-2 max-h-72 overflow-y-auto">
+						<p class="text-xs text-gray-400 mb-2">
+							{reorgPreview.moves} to move · {reorgPreview.conflicts} conflict{reorgPreview.conflicts === 1 ? '' : 's'} · {reorgPreview.skipped} unchanged
+						</p>
+						<ul class="text-xs text-gray-300 space-y-1 font-mono">
+							{#each reorgPreview.previews.filter(p => p.status === 'move' || p.status === 'conflict') as p}
+								<li class="border-l-2 {p.status === 'conflict' ? 'border-red-500/50' : 'border-amber-500/50'} pl-2">
+									<div class="text-gray-500">{p.current_path}</div>
+									<div class="{p.status === 'conflict' ? 'text-red-300' : 'text-green-300'}">→ {p.new_path}{p.reason ? ` (${p.reason})` : ''}</div>
+								</li>
+							{/each}
+						</ul>
+					</div>
+				{/if}
+
+				<div class="flex items-center justify-between gap-4 pt-3 border-t border-gray-700/50">
+					<div class="min-w-0">
+						<p class="text-sm font-medium text-gray-200">Trash Orphan Files</p>
+						<p class="text-xs text-gray-500 mt-0.5">
+							Trashes every <code class="text-amber-400 bg-gray-900 px-1 rounded">comic_files</code>
+							row whose <code class="text-amber-400 bg-gray-900 px-1 rounded">issue_id</code> is NULL.
+							These are files LongBox can't link to any issue — usually duplicates of canonical
+							copies left over after dedupe-issues passes. Reorganize and dedupe-files both
+							ignore them, so they keep non-canonical folders alive on disk forever. Files go
+							to the OS recycle bin (reversible) and the DB rows are removed. Preview first.
+						</p>
+					</div>
+					<div class="flex flex-col gap-1.5">
+						<button
+							onclick={previewOrphans}
+							disabled={orphanRunning}
+							class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed text-gray-100 rounded-lg transition-colors whitespace-nowrap"
+						>
+							{orphanRunning ? 'Working…' : 'Preview Orphans'}
+						</button>
+						{#if orphanPreview && orphanPreview.scanned > 0}
+							<button
+								onclick={applyTrashOrphans}
+								disabled={orphanRunning}
+								class="px-3 py-1.5 text-sm bg-red-600/80 hover:bg-red-600 disabled:opacity-50 text-white rounded-lg transition-colors whitespace-nowrap"
+							>
+								Trash {orphanPreview.scanned}
+							</button>
+						{/if}
+					</div>
+				</div>
+				{#if orphanMessage}
+					<p class="text-sm text-amber-300/90">{orphanMessage}</p>
+				{/if}
+				{#if orphanPreview && orphanPreview.trashed && orphanPreview.scanned > 0}
+					<div class="bg-gray-900/40 rounded p-3 mt-2 max-h-72 overflow-y-auto">
+						<p class="text-xs text-gray-400 mb-2">
+							{orphanPreview.scanned} orphan file{orphanPreview.scanned === 1 ? '' : 's'} ·
+							would reclaim {(orphanPreview.bytes_reclaimed / (1024 * 1024)).toFixed(1)} MB
+							{#if orphanPreview.dry_run} (preview){:else} · {orphanPreview.files_trashed} trashed{/if}
+						</p>
+						<ul class="text-xs text-gray-300 space-y-0.5 font-mono">
+							{#each orphanPreview.trashed as p}
+								<li class="text-red-300">trash: {p}</li>
+							{/each}
+						</ul>
+					</div>
+				{/if}
+
+				<div class="flex items-center justify-between gap-4 pt-3 border-t border-gray-700/50">
+					<div class="min-w-0">
+						<p class="text-sm font-medium text-gray-200">Trash Duplicate Files on Disk</p>
+						<p class="text-xs text-gray-500 mt-0.5">
+							Finds groups of <code class="text-amber-400 bg-gray-900 px-1 rounded">comic_files</code>
+							rows attached to the same issue (e.g. <code class="text-amber-400 bg-gray-900 px-1 rounded">Wonder Man 001.cbz</code>
+							and <code class="text-amber-400 bg-gray-900 px-1 rounded">WonderMan-001.cbz</code> on the share)
+							and moves all but a canonical to the OS recycle bin. Canonical preference:
+							ComicInfo.xml present, then CBZ format, then largest file. Always preview first.
+						</p>
+					</div>
+					<div class="flex flex-col gap-1.5">
+						<button
+							onclick={previewFileDedupe}
+							disabled={fileDedupeRunning}
+							class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed text-gray-100 rounded-lg transition-colors whitespace-nowrap"
+						>
+							{fileDedupeRunning ? 'Working…' : 'Preview Duplicates'}
+						</button>
+						{#if fileDedupePreview && fileDedupePreview.dry_run && fileDedupePreview.groups_found > 0}
+							<button
+								onclick={applyFileDedupe}
+								disabled={fileDedupeRunning}
+								class="px-3 py-1.5 text-sm bg-red-600/80 hover:bg-red-600 disabled:opacity-50 text-white rounded-lg transition-colors whitespace-nowrap"
+							>
+								Trash Duplicates
+							</button>
+						{/if}
+					</div>
+				</div>
+				{#if fileDedupeMessage}
+					<p class="text-sm text-amber-300/90">{fileDedupeMessage}</p>
+				{/if}
+				{#if fileDedupePreview && fileDedupePreview.groups_found > 0}
+					<div class="bg-gray-900/40 rounded p-3 mt-2 max-h-72 overflow-y-auto">
+						<p class="text-xs text-gray-400 mb-2">
+							{fileDedupePreview.groups_found} duplicate group{fileDedupePreview.groups_found === 1 ? '' : 's'} ·
+							would reclaim {formatBytes(fileDedupePreview.bytes_reclaimed)}
+							{#if fileDedupePreview.dry_run} (preview — nothing trashed yet){:else} · {fileDedupePreview.files_trashed} trashed{/if}
+						</p>
+						<ul class="text-xs text-gray-300 space-y-2 font-mono">
+							{#each fileDedupePreview.decisions ?? [] as d}
+								<li class="border-l-2 border-green-500/50 pl-2">
+									<div class="text-green-300">keep [{d.kept_reason}]: {d.kept_path}</div>
+									{#each d.trashed ?? [] as p}
+										<div class="text-red-300">trash: {p}</div>
+									{/each}
+								</li>
+							{/each}
+						</ul>
+					</div>
+				{/if}
 			</div>
 		</div>
 

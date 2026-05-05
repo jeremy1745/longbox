@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	longbox "github.com/jeremy/longbox"
 	"github.com/jeremy/longbox/internal/comicvine"
+	"github.com/jeremy/longbox/internal/metron"
 	"github.com/jeremy/longbox/internal/config"
 	"github.com/jeremy/longbox/internal/database"
 	"github.com/jeremy/longbox/internal/handler"
@@ -32,6 +34,12 @@ func main() {
 	if err != nil {
 		slog.Error("failed to load config", "error", err)
 		os.Exit(1)
+	}
+
+	backlogSettings := service.BacklogSettings{
+		DefaultIncludeVariants: cfg.Backlog.EnableVariants,
+		MaxRetries:             cfg.Backlog.MaxRetries,
+		RetryBackoffMinutes:    cfg.Backlog.RetryBackoffMinutes,
 	}
 
 	// Configure logging
@@ -73,6 +81,7 @@ func main() {
 		slog.Info("cleaned up orphaned jobs from previous run", "count", cleaned)
 	}
 	wantListRepo := repository.NewWantListRepo(db.Read, db.Write)
+	backlogRepo := repository.NewBacklogRepo(db.Read, db.Write)
 	settingRepo := repository.NewSettingRepo(db.Read, db.Write)
 	publisherRepo := repository.NewPublisherRepo(db.Read, db.Write)
 	indexerRepo := repository.NewIndexerRepo(db.Read, db.Write)
@@ -84,14 +93,18 @@ func main() {
 
 	// External clients
 	cvClient := comicvine.NewClient(cfg.ComicVineAPIKey)
+	metronClient := metron.NewClient("", "")
 	wsClient := walksoftly.NewClient()
 
 	// Services
 	coverSvc := service.NewCoverService(cfg.CoversDir(), fileRepo)
-	librarySvc := service.NewLibraryService(cfg.LibraryDir, fileRepo, seriesRepo, issueRepo, coverSvc)
-	metaSvc := service.NewMetadataService(cvClient, wsClient, seriesRepo, issueRepo, publisherRepo, wantListRepo, settingRepo, cfg.ComicVineAPIKey, cfg.LibraryDir)
+	librarySvc := service.NewLibraryService(cfg.LibraryDir, fileRepo, seriesRepo, issueRepo, wantListRepo, coverSvc)
+	metaSvc := service.NewMetadataService(cvClient, metronClient, wsClient, seriesRepo, issueRepo, publisherRepo, wantListRepo, settingRepo, cfg.ComicVineAPIKey, cfg.LibraryDir)
 	if err := metaSvc.EnsureAPIKey(); err != nil {
 		slog.Warn("failed to load ComicVine API key from settings", "error", err)
+	}
+	if err := metaSvc.EnsureMetronCredentials(); err != nil {
+		slog.Warn("failed to load Metron credentials from settings", "error", err)
 	}
 
 	// Load library dir from DB settings (overrides config file)
@@ -100,9 +113,10 @@ func main() {
 		slog.Info("loaded library directory from settings", "dir", dbLibDir)
 	}
 	readerSvc := service.NewReaderService()
-	organizeSvc := service.NewFileOrganizerService(fileRepo, issueRepo, seriesRepo, settingRepo)
+	organizeSvc := service.NewFileOrganizerService(fileRepo, issueRepo, seriesRepo, settingRepo, cfg.Backlog.AnnualSubfolder)
 	metaWriterSvc := service.NewMetadataWriterService(fileRepo, issueRepo, seriesRepo)
-	mylarSvc := service.NewMylarMetadataService(seriesRepo, fileRepo, issueRepo, cvClient)
+	longboxMetadataSvc := service.NewLongboxMetadataService(seriesRepo, fileRepo, issueRepo, cvClient, librarySvc)
+	folderImageSvc := service.NewFolderImageService(seriesRepo, fileRepo, librarySvc, coverSvc, metaSvc)
 	backupSvc := service.NewBackupService(cfg.DatabasePath(), cfg.DataDir)
 
 	// Run startup backup if enabled
@@ -123,6 +137,20 @@ func main() {
 
 	// Search service (needs eventBus for SSE updates)
 	searchSvc := service.NewSearchService(indexerRepo, dlClientRepo, dlHistoryRepo, issueRepo, seriesRepo, blocklistRepo, eventBus)
+	backlogSvc := service.NewBacklogService(backlogRepo, issueRepo, seriesRepo, eventBus, backlogSettings)
+	searchSvc.SetOnDownloadStatusChanged(backlogSvc.HandleDownloadStatus)
+
+	backlogQueue := service.NewBacklogQueue(backlogRepo, searchSvc, backlogSvc, backlogSettings, cfg.Backlog.MaxConcurrentDownloads)
+	backlogQueue.Start()
+	// Lets backlog_service nudge the worker pool the moment new items land
+	// (run created, retry-all clicked) instead of waiting on the 5s idle tick.
+	backlogSvc.SetOnQueueDirty(backlogQueue.Wake)
+
+	// Wire reconciliation deps onto LibraryService now that metaSvc + backlogSvc exist.
+	librarySvc.SetReconcileDeps(settingRepo, metaSvc, backlogSvc)
+	// Phase E poster refresh runs at the end of every scan so on-disk
+	// catalog stays Mylar-shaped (one folder per series with cover.jpg).
+	librarySvc.SetFolderImageService(folderImageSvc)
 
 	// Import service for post-processing completed downloads
 	importSvc := service.NewImportService(librarySvc, organizeSvc, wantListRepo, dlHistoryRepo, fileRepo, issueRepo, seriesRepo, settingRepo, cfg.LibraryDir)
@@ -138,6 +166,12 @@ func main() {
 	// Register job handlers
 	sched.RegisterHandler(model.JobTypeScan, func(ctx context.Context, progress scheduler.ProgressFunc) error {
 		_, err := librarySvc.ScanWithProgress(ctx, func(processed, total int, message string) {
+			progress(processed, total, message)
+		})
+		return err
+	})
+	sched.RegisterHandler(model.JobTypeScanForceCV, func(ctx context.Context, progress scheduler.ProgressFunc) error {
+		_, err := librarySvc.ScanWithOptions(ctx, service.ScanOptions{ForceCV: true}, func(processed, total int, message string) {
 			progress(processed, total, message)
 		})
 		return err
@@ -166,8 +200,61 @@ func main() {
 		})
 		return err
 	})
+	sched.RegisterHandler(model.JobTypeLongboxMetadata, func(ctx context.Context, progress scheduler.ProgressFunc) error {
+		_, _, _, err := longboxMetadataSvc.WriteAll(ctx, func(processed, total int, message string) {
+			progress(processed, total, message)
+		})
+		return err
+	})
+	// JobTypeMylarMetadata is the legacy job-type string kept so old job rows
+	// can still be replayed/displayed. New submissions go through
+	// JobTypeLongboxMetadata. Without this guard a user could click the
+	// legacy alias endpoint and queue a redundant identical pass.
 	sched.RegisterHandler(model.JobTypeMylarMetadata, func(ctx context.Context, progress scheduler.ProgressFunc) error {
-		_, _, _, err := mylarSvc.WriteAll(ctx, func(processed, total int, message string) {
+		slog.Info("legacy mylar_metadata job redirected to longbox_metadata")
+		_, _, _, err := longboxMetadataSvc.WriteAll(ctx, func(processed, total int, message string) {
+			progress(processed, total, message)
+		})
+		return err
+	})
+	sched.RegisterHandler(model.JobTypeFolderImages, func(ctx context.Context, progress scheduler.ProgressFunc) error {
+		_, _, _, _, err := folderImageSvc.WriteAll(ctx, true, func(processed, total int, message string) {
+			progress(processed, total, message)
+		})
+		return err
+	})
+	sched.RegisterHandler(model.JobTypeReorganize, func(ctx context.Context, progress scheduler.ProgressFunc) error {
+		// Block the reorganize from starting if a scan is running on the
+		// same library — scan opens each file for cover/hash extraction,
+		// holding a Windows file handle that makes the reorg's os.Rename
+		// fail with "Permission denied". The user sees zero progress and
+		// no error message because the per-file rename failures are
+		// counted internally but never surfaced to the job result.
+		if sched.IsRunning(model.JobTypeScan) || sched.IsRunning(model.JobTypeScanForceCV) {
+			return fmt.Errorf("a library scan is currently running; reorganize would race with it for file handles. Wait for the scan to finish or cancel it first")
+		}
+		result, err := organizeSvc.ExecuteWithProgress(ctx, librarySvc.GetLibraryDir(), func(processed, total int, message string) {
+			progress(processed, total, message)
+		})
+		// Surface per-file move outcomes in the final progress message —
+		// without this, "Completed in N seconds" hides the fact that 117
+		// of 117 attempted moves failed because the files were locked.
+		if result != nil {
+			progress(result.TotalFiles, result.TotalFiles, fmt.Sprintf(
+				"Reorganize: %d moved, %d skipped, %d errors",
+				result.Moved, result.Skipped, result.Errors))
+			if result.Errors > 0 && err == nil {
+				if len(result.ErrorDetails) > 0 {
+					return fmt.Errorf("reorganize: %d errors (first: %s)",
+						result.Errors, result.ErrorDetails[0])
+				}
+				return fmt.Errorf("reorganize: %d errors (no detail captured)", result.Errors)
+			}
+		}
+		return err
+	})
+	sched.RegisterHandler(model.JobTypeAdoptFolders, func(ctx context.Context, progress scheduler.ProgressFunc) error {
+		_, err := librarySvc.AdoptStrandedFolders(ctx, func(processed, total int, message string) {
 			progress(processed, total, message)
 		})
 		return err
@@ -223,6 +310,8 @@ func main() {
 		issueRepo,
 		jobRepo,
 		wantListRepo,
+		backlogRepo,
+		backlogSvc,
 		indexerRepo,
 		dlClientRepo,
 		dlHistoryRepo,
@@ -236,7 +325,8 @@ func main() {
 		readerSvc,
 		searchSvc,
 		metaWriterSvc,
-		mylarSvc,
+		longboxMetadataSvc,
+		folderImageSvc,
 		backupSvc,
 		sched,
 		eventBus,
@@ -259,6 +349,7 @@ func main() {
 	close(sessionCleanupDone)
 	notifSvc.Stop()
 	cronSched.Stop()
+	backlogQueue.Stop()
 	sched.Shutdown()
 	if watcher != nil {
 		watcher.Stop()

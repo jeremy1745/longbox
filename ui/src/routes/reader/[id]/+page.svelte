@@ -38,6 +38,17 @@
 			if (readerData.last_read_page != null && readerData.last_read_page > 0) {
 				currentPage = readerData.last_read_page;
 			}
+
+			// If the user resumes already on the last page, mark it read now —
+			// otherwise the auto-mark on goToPage never fires.
+			if (
+				issue &&
+				issue.read_status !== 'read' &&
+				readerData.page_count > 0 &&
+				currentPage >= readerData.page_count - 1
+			) {
+				await markAsRead();
+			}
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load reader';
 		} finally {
@@ -51,23 +62,44 @@
 		currentPage = index;
 		imgLoading = true;
 		saveProgress(index);
-
-		// Auto-mark as "read" when reaching the last page
-		if (index === totalPages - 1 && issue && issue.read_status !== 'read') {
-			ApiClient.put(`/issues/${issueId}/read-status`, { read_status: 'read' });
-			issue.read_status = 'read';
-		}
 	}
 
 	function nextPage() { goToPage(currentPage + 1); }
 	function prevPage() { goToPage(currentPage - 1); }
 
 	// --- Progress saving (debounced) ---
+	// Sends both page and total so the backend can promote read_status to
+	// "read" authoritatively when we hit the last page — no separate call.
 	function saveProgress(pageIndex: number) {
 		if (progressTimeout) clearTimeout(progressTimeout);
-		progressTimeout = setTimeout(() => {
-			ApiClient.put(`/reader/${issueId}/progress`, { page: pageIndex });
+		progressTimeout = setTimeout(async () => {
+			try {
+				const resp = await ApiClient.put<{ last_read_page: number; read_status: 'unread' | 'reading' | 'read' }>(
+					`/reader/${issueId}/progress`,
+					{ page: pageIndex, total: totalPages }
+				);
+				if (issue && resp.read_status && issue.read_status !== resp.read_status) {
+					issue.read_status = resp.read_status;
+				}
+			} catch {
+				// silent — progress save is best-effort
+			}
 		}, 1000);
+	}
+
+	// --- Manual mark-as-read ---
+	let marking = $state(false);
+	async function markAsRead() {
+		if (!issue || marking) return;
+		marking = true;
+		try {
+			await ApiClient.put(`/issues/${issueId}/read-status`, { read_status: 'read' });
+			issue.read_status = 'read';
+		} catch {
+			// silent — UI badge will reflect via next progress update
+		} finally {
+			marking = false;
+		}
 	}
 
 	// --- Keyboard navigation ---
@@ -188,6 +220,17 @@
 					<span class="truncate max-w-xs">{issue?.series_title} #{issue?.issue_number}</span>
 				</button>
 				<div class="flex items-center gap-3">
+					<!-- Read status: indicator + Mark-as-Read action -->
+					{#if issue?.read_status === 'read'}
+						<span class="text-xs px-2 py-1 rounded bg-green-900/40 text-green-300 border border-green-700/50">Read</span>
+					{:else}
+						<button onclick={markAsRead}
+							disabled={marking}
+							class="text-xs px-2 py-1 rounded bg-amber-500 hover:bg-amber-600 disabled:bg-gray-700 disabled:cursor-not-allowed text-gray-900 font-semibold"
+							title="Flag this issue as Read">
+							{marking ? '…' : 'Mark as Read'}
+						</button>
+					{/if}
 					<!-- Fit mode toggle -->
 					<button onclick={cycleFitMode}
 						class="text-xs px-2 py-1 rounded bg-gray-800/80 text-gray-300

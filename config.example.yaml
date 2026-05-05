@@ -7,3 +7,10 @@ log_level: info
 # ComicVine API key (optional - can also be set via the web UI settings page)
 # Get your free API key at: https://comicvine.gamespot.com/api/
 # comicvine_api_key: your-api-key-here
+
+backlog:
+  max_concurrent_downloads: 25
+  max_retries: 3
+  retry_backoff_minutes: [5, 15, 60]
+  annual_subfolder: "Annuals"
+  enable_variants: true

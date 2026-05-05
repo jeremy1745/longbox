@@ -1,13 +1,18 @@
 <script lang="ts">
 	import { page } from '$app/stores';
-	import { ApiClient, type Series, type Issue, type IssueListResponse, type WriteMetadataResponse, type ComicFile, type SeriesFilesResponse, type FileRenameResponse } from '$lib/api/client';
+	import { goto } from '$app/navigation';
+	import { ApiClient, type Series, type Issue, type IssueListResponse, type WriteMetadataResponse, type ComicFile, type SeriesFilesResponse, type FileRenameResponse, type BacklogRun } from '$lib/api/client';
 	import ComicVineSearch from '$lib/components/ComicVineSearch.svelte';
+	import MetronSearch from '$lib/components/MetronSearch.svelte';
+	import { proxiedCoverURL } from '$lib/cover';
 
 	let series = $state<Series | null>(null);
 	let issues = $state<Issue[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	let showSearch = $state(false);
+	let showMetronSearch = $state(false);
+	let refreshingMetron = $state(false);
 	let refreshing = $state(false);
 	let toggling = $state(false);
 	let writingMetadata = $state(false);
@@ -20,6 +25,51 @@
 	let renamingFileId = $state<number | null>(null);
 	let renameError = $state<string | null>(null);
 
+	let editingIssue = $state<Issue | null>(null);
+	let editIssueTitle = $state('');
+	let editIssueNumber = $state('');
+	let editIssueWriters = $state('');
+	let editIssueArtists = $state('');
+	let editIssueRename = $state(true);
+	let issueEditError = $state<string | null>(null);
+	let issueEditNotice = $state<string | null>(null);
+	let savingIssueEdit = $state(false);
+	let issuePendingDelete = $state<Issue | null>(null);
+	let deletingIssue = $state(false);
+	let issueDeleteError = $state<string | null>(null);
+	let bulkDeleteOpen = $state(false);
+	let bulkDeleting = $state(false);
+	let bulkDeleteError = $state<string | null>(null);
+	let bulkDeleteNotice = $state<string | null>(null);
+	let deleteSeriesOpen = $state(false);
+	let deletingSeries = $state(false);
+	let deleteSeriesError = $state<string | null>(null);
+	let clearingWantList = $state(false);
+	let queueingBacklog = $state(false);
+	let backlogMessage = $state<string | null>(null);
+	let actionsMenuOpen = $state(false);
+	function closeActionsMenu() { actionsMenuOpen = false; }
+	function toggleActionsMenu() { actionsMenuOpen = !actionsMenuOpen; }
+	$effect(() => {
+		if (!actionsMenuOpen) return;
+		const handler = (e: MouseEvent) => {
+			const t = e.target as HTMLElement;
+			if (!t.closest('[data-actions-menu]')) {
+				actionsMenuOpen = false;
+			}
+		};
+		const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') actionsMenuOpen = false; };
+		window.addEventListener('click', handler);
+		window.addEventListener('keydown', esc);
+		return () => {
+			window.removeEventListener('click', handler);
+			window.removeEventListener('keydown', esc);
+		};
+	});
+	let writingSidecar = $state(false);
+	let sidecarMessage = $state<string | null>(null);
+	let writingFolderImage = $state(false);
+	let folderImageMessage = $state<string | null>(null);
 	let seriesId = $derived($page.params.id);
 
 	// Computed stats
@@ -85,6 +135,18 @@
 			error = e instanceof Error ? e.message : 'Refresh failed';
 		} finally {
 			refreshing = false;
+		}
+	}
+
+	async function refreshFromMetron() {
+		refreshingMetron = true;
+		try {
+			await ApiClient.post(`/series/${seriesId}/refresh-metron`);
+			await loadSeriesDetail();
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Metron refresh failed';
+		} finally {
+			refreshingMetron = false;
 		}
 	}
 
@@ -178,6 +240,244 @@
 		}
 	}
 
+	function openIssueEdit(issue: Issue) {
+		editingIssue = issue;
+		editIssueTitle = issue.title || '';
+		editIssueNumber = issue.issue_number || '';
+		editIssueWriters = issue.writers || '';
+		editIssueArtists = issue.artists || '';
+		editIssueRename = !!issue.has_file;
+		issueEditError = null;
+		issueEditNotice = null;
+	}
+
+	function cancelIssueEdit() {
+		editingIssue = null;
+		editIssueTitle = '';
+		editIssueNumber = '';
+		editIssueWriters = '';
+		editIssueArtists = '';
+		editIssueRename = true;
+		issueEditError = null;
+		issueEditNotice = null;
+	}
+
+	async function saveIssueEdit() {
+		if (!editingIssue) return;
+		const num = editIssueNumber.trim();
+		if (!num) {
+			issueEditError = 'Issue number is required';
+			return;
+		}
+		savingIssueEdit = true;
+		issueEditError = null;
+		issueEditNotice = null;
+		try {
+			const resp = await ApiClient.put<{ issue: Issue; renamed_to?: string; rename_warning?: string }>(
+				`/issues/${editingIssue.id}`,
+				{
+					issue_number: num,
+					title: editIssueTitle,
+					writers: editIssueWriters,
+					artists: editIssueArtists,
+					rename: editIssueRename
+				}
+			);
+			const updated = resp.issue;
+			const idx = issues.findIndex((i) => i.id === updated.id);
+			if (idx !== -1) {
+				issues[idx] = updated;
+				issues = [...issues];
+			}
+			if (resp.renamed_to) {
+				const oldFile = fileMap.get(updated.id);
+				if (oldFile) {
+					fileMap.set(updated.id, { ...oldFile, file_path: resp.renamed_to, file_name: resp.renamed_to.split(/[\\/]/).pop() || oldFile.file_name });
+					fileMap = new Map(fileMap);
+				}
+			}
+			if (resp.rename_warning) {
+				issueEditNotice = `Saved, but file was not renamed: ${resp.rename_warning}`;
+				return;
+			}
+			cancelIssueEdit();
+		} catch (e) {
+			issueEditError = e instanceof Error ? e.message : 'Failed to save';
+		} finally {
+			savingIssueEdit = false;
+		}
+	}
+
+	function confirmDeleteIssue(issue: Issue) {
+		issuePendingDelete = issue;
+		issueDeleteError = null;
+	}
+
+	function cancelDeleteIssue() {
+		issuePendingDelete = null;
+		issueDeleteError = null;
+	}
+
+	async function deleteIssueNow() {
+		const target = issuePendingDelete;
+		if (!target) return;
+		deletingIssue = true;
+		issueDeleteError = null;
+		try {
+			await ApiClient.delete(`/issues/${target.id}`);
+			issues = issues.filter((i) => i.id !== target.id);
+			fileMap.delete(target.id);
+			issuePendingDelete = null;
+		} catch (e) {
+			issueDeleteError = e instanceof Error ? e.message : 'Failed to delete issue';
+		} finally {
+			deletingIssue = false;
+		}
+	}
+
+	function openDeleteSeries() {
+		deleteSeriesError = null;
+		deleteSeriesOpen = true;
+	}
+
+	function cancelDeleteSeries() {
+		if (deletingSeries) return;
+		deleteSeriesOpen = false;
+	}
+
+	async function confirmDeleteSeries() {
+		if (!series) return;
+		deletingSeries = true;
+		deleteSeriesError = null;
+		try {
+			await ApiClient.delete(`/series/${seriesId}`);
+			goto('/library');
+		} catch (e) {
+			deleteSeriesError = e instanceof Error ? e.message : 'Delete series failed';
+		} finally {
+			deletingSeries = false;
+		}
+	}
+
+	function openBulkDelete() {
+		bulkDeleteError = null;
+		bulkDeleteNotice = null;
+		bulkDeleteOpen = true;
+	}
+
+	function cancelBulkDelete() {
+		bulkDeleteOpen = false;
+	}
+
+	async function confirmBulkDelete() {
+		if (!series) return;
+		bulkDeleting = true;
+		bulkDeleteError = null;
+		bulkDeleteNotice = null;
+		try {
+			const result = await ApiClient.delete<{ issues_deleted: number; files_trashed: number; errors?: string[] }>(
+				`/series/${seriesId}/issues`
+			);
+			bulkDeleteNotice = `Deleted ${result.issues_deleted} issue${result.issues_deleted === 1 ? '' : 's'} (${result.files_trashed} file${result.files_trashed === 1 ? '' : 's'} trashed).`;
+			if (result.errors && result.errors.length > 0) {
+				bulkDeleteNotice += ` Error: ${result.errors[0]}`;
+				if (result.errors.length > 1) {
+					bulkDeleteNotice += ` (+${result.errors.length - 1} more — see server log)`;
+				}
+			}
+			bulkDeleteOpen = false;
+			await loadSeriesDetail();
+		} catch (e) {
+			bulkDeleteError = e instanceof Error ? e.message : 'Bulk delete failed';
+		} finally {
+			bulkDeleting = false;
+		}
+	}
+
+	async function clearWantList() {
+		if (!series) return;
+		if (!confirm('Remove all want list entries for this series?')) return;
+		clearingWantList = true;
+		try {
+			await ApiClient.delete(`/series/${seriesId}/want-list`);
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Failed to clear want list';
+		} finally {
+			clearingWantList = false;
+		}
+	}
+
+	async function queueBacklog() {
+		if (!series) return;
+		queueingBacklog = true;
+		backlogMessage = null;
+		try {
+			const run = await ApiClient.post<BacklogRun>('/backlog/runs', {
+				series_id: Number(seriesId)
+			});
+			if (run.total_issues === 0) {
+				backlogMessage = 'No missing issues to queue.';
+			} else {
+				backlogMessage = `Queued ${run.total_issues} issue${run.total_issues !== 1 ? 's' : ''}. Opening backlog…`;
+				setTimeout(() => goto('/backlog'), 600);
+			}
+		} catch (e) {
+			backlogMessage = e instanceof Error ? e.message : 'Failed to queue backlog';
+		} finally {
+			queueingBacklog = false;
+		}
+	}
+
+	async function writeSidecar() {
+		if (!series) return;
+		writingSidecar = true;
+		sidecarMessage = null;
+		try {
+			const result = await ApiClient.post<{ series_id: number; folder: string; outcome: string }>(
+				`/series/${seriesId}/write-longbox-metadata`
+			);
+			const labels: Record<string, string> = {
+				written: 'Sidecars written',
+				unchanged: 'Sidecars already up to date',
+				no_files: 'No files in this series',
+				no_cv_match: 'Series is not matched to ComicVine',
+				no_folder: 'Could not determine a safe series folder (files may be split across the library root)',
+				failed: 'Write failed — check server log',
+			};
+			const label = labels[result.outcome] || result.outcome;
+			sidecarMessage = result.folder ? `${label} → ${result.folder}` : label;
+		} catch (e) {
+			sidecarMessage = e instanceof Error ? e.message : 'Sidecar write failed';
+		} finally {
+			writingSidecar = false;
+		}
+	}
+
+	async function writeFolderImage() {
+		if (!series) return;
+		writingFolderImage = true;
+		folderImageMessage = null;
+		try {
+			const result = await ApiClient.post<{ series_id: number; folder: string; outcome: string }>(
+				`/series/${seriesId}/write-folder-image`
+			);
+			const labels: Record<string, string> = {
+				written: 'Poster refreshed',
+				unchanged: 'Poster already up to date',
+				no_files: 'No files on disk (UI-only refresh applied if a provider match exists)',
+				no_cover_source: 'No cover image available (match the series first)',
+				no_folder: 'Could not determine a safe series folder',
+				failed: 'Refresh failed — check server log',
+			};
+			const label = labels[result.outcome] || result.outcome;
+			folderImageMessage = result.folder ? `${label} → ${result.folder}` : label;
+		} catch (e) {
+			folderImageMessage = e instanceof Error ? e.message : 'Folder image write failed';
+		} finally {
+			writingFolderImage = false;
+		}
+	}
+
 	function handleMatched() {
 		showSearch = false;
 		loadSeriesDetail();
@@ -213,11 +513,19 @@
 						class="w-full rounded-lg shadow-lg"
 					/>
 				</div>
+			{:else if series.cover_image_url}
+				<div class="flex-shrink-0 w-48">
+					<img
+						src={proxiedCoverURL(series.cover_image_url)}
+						alt={series.title}
+						class="w-full rounded-lg shadow-lg"
+					/>
+				</div>
 			{/if}
 			<div class="flex-1 min-w-0">
 				<div class="flex items-start justify-between gap-4">
 					<h1 class="text-3xl font-bold">{series.title}</h1>
-					<div class="flex gap-2 flex-shrink-0">
+					<div class="flex flex-wrap items-center gap-2 flex-shrink-0">
 						<button
 							onclick={toggleTracked}
 							disabled={toggling}
@@ -233,43 +541,167 @@
 							</svg>
 							{toggling ? '...' : series.tracked ? 'Tracking' : 'Track'}
 						</button>
-						{#if series.comicvine_id}
+
+						{#if missingCount > 0}
 							<button
-								onclick={refreshMetadata}
-								disabled={refreshing}
-								class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600
-									disabled:bg-gray-600 disabled:cursor-not-allowed
-									text-gray-200 rounded-lg transition-colors"
-								title="Refresh metadata from ComicVine"
+								onclick={queueBacklog}
+								disabled={queueingBacklog}
+								class="px-3 py-1.5 text-sm bg-amber-500 hover:bg-amber-600 disabled:bg-gray-600 disabled:cursor-not-allowed text-gray-900 font-semibold rounded-lg transition-colors"
+								title="Queue every missing issue for automatic search and download"
 							>
-								{refreshing ? 'Refreshing...' : 'Refresh'}
+								{queueingBacklog ? 'Queueing...' : `Queue Missing (${missingCount})`}
 							</button>
 						{/if}
-						<button
-							onclick={() => showSearch = true}
-							class="px-3 py-1.5 text-sm bg-amber-500 hover:bg-amber-600
-								text-gray-900 font-semibold rounded-lg transition-colors"
-						>
-							{series.comicvine_id ? 'Re-match' : 'Match to ComicVine'}
-						</button>
-						{#if ownedCount > 0}
+
+						<!-- Actions dropdown -->
+						<div class="relative" data-actions-menu>
 							<button
-								onclick={writeMetadata}
-								disabled={writingMetadata}
-								class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600
-									disabled:bg-gray-600 disabled:cursor-not-allowed
-									text-gray-200 rounded-lg transition-colors flex items-center gap-1.5"
-								title="Write ComicInfo.xml metadata into CBZ files"
+								type="button"
+								onclick={toggleActionsMenu}
+								class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 text-gray-200 rounded-lg transition-colors flex items-center gap-1.5"
+								aria-haspopup="menu"
+								aria-expanded={actionsMenuOpen}
 							>
-								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-										d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+								Actions
+								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
 								</svg>
-								{writingMetadata ? 'Writing...' : 'Write Metadata'}
 							</button>
-						{/if}
+
+							{#if actionsMenuOpen}
+								<div
+									role="menu"
+									class="absolute right-0 top-full mt-2 w-60 bg-gray-900 border border-gray-700 rounded-lg shadow-2xl z-30 py-1"
+									data-actions-menu
+								>
+									<!-- Match group -->
+									<div class="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wide text-gray-500">Match</div>
+									<button
+										role="menuitem"
+										onclick={() => { closeActionsMenu(); showSearch = true; }}
+										class="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-gray-800 flex items-center justify-between"
+									>
+										<span>{series.comicvine_id ? 'Re-match CV' : 'Match to ComicVine'}</span>
+										<span class="text-xs text-amber-400">CV</span>
+									</button>
+									<button
+										role="menuitem"
+										onclick={() => { closeActionsMenu(); showMetronSearch = true; }}
+										class="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-gray-800 flex items-center justify-between"
+									>
+										<span>{series.metron_id ? 'Re-match Metron' : 'Match to Metron'}</span>
+										<span class="text-xs text-blue-400">Metron</span>
+									</button>
+
+									<!-- Refresh group -->
+									{#if series.comicvine_id || series.metron_id}
+										<div class="border-t border-gray-700/60 mt-1"></div>
+										<div class="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wide text-gray-500">Refresh</div>
+									{/if}
+									{#if series.comicvine_id}
+										<button
+											role="menuitem"
+											onclick={() => { closeActionsMenu(); refreshMetadata(); }}
+											disabled={refreshing}
+											class="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-gray-800 disabled:opacity-50 flex items-center justify-between"
+										>
+											<span>{refreshing ? 'Refreshing CV…' : 'Refresh from CV'}</span>
+											<span class="text-xs text-amber-400">CV</span>
+										</button>
+									{/if}
+									{#if series.metron_id}
+										<button
+											role="menuitem"
+											onclick={() => { closeActionsMenu(); refreshFromMetron(); }}
+											disabled={refreshingMetron}
+											class="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-gray-800 disabled:opacity-50 flex items-center justify-between"
+										>
+											<span>{refreshingMetron ? 'Refreshing Metron…' : 'Refresh from Metron'}</span>
+											<span class="text-xs text-blue-400">Metron</span>
+										</button>
+									{/if}
+
+									<!-- Write group -->
+									{#if ownedCount > 0 || series.comicvine_id}
+										<div class="border-t border-gray-700/60 mt-1"></div>
+										<div class="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wide text-gray-500">Write</div>
+									{/if}
+									{#if ownedCount > 0}
+										<button
+											role="menuitem"
+											onclick={() => { closeActionsMenu(); writeMetadata(); }}
+											disabled={writingMetadata}
+											class="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-gray-800 disabled:opacity-50"
+											title="Write ComicInfo.xml metadata into archive files"
+										>
+											{writingMetadata ? 'Writing ComicInfo…' : 'Write ComicInfo.xml'}
+										</button>
+									{/if}
+									{#if series.comicvine_id}
+										<button
+											role="menuitem"
+											onclick={() => { closeActionsMenu(); writeSidecar(); }}
+											disabled={writingSidecar}
+											class="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-gray-800 disabled:opacity-50"
+											title="Write longbox-series.json + longbox-series.txt to the series folder"
+										>
+											{writingSidecar ? 'Writing sidecar…' : 'Write LongBox Sidecar'}
+										</button>
+									{/if}
+									<button
+										role="menuitem"
+										onclick={() => { closeActionsMenu(); writeFolderImage(); }}
+										disabled={writingFolderImage}
+										class="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-gray-800 disabled:opacity-50"
+										title="Backfill cover_file_id / cover_image_url and write folder.jpg + cover.jpg"
+									>
+										{writingFolderImage ? 'Refreshing poster…' : 'Refresh Series Poster'}
+									</button>
+
+									<!-- Destructive -->
+									<div class="border-t border-gray-700/60 mt-1"></div>
+									<button
+										role="menuitem"
+										onclick={() => { closeActionsMenu(); clearWantList(); }}
+										disabled={clearingWantList}
+										class="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-gray-800 disabled:opacity-50"
+									>
+										{clearingWantList ? 'Clearing want list…' : 'Clear Want List'}
+									</button>
+									{#if issues.length > 0}
+										<button
+											role="menuitem"
+											onclick={() => { closeActionsMenu(); openBulkDelete(); }}
+											disabled={bulkDeleting}
+											class="w-full text-left px-3 py-2 text-sm text-red-300 hover:bg-red-900/30 disabled:opacity-50"
+											title="Trash every file in this series and remove all issue records (series record is preserved)"
+										>
+											{bulkDeleting ? 'Deleting…' : 'Delete All Issues'}
+										</button>
+									{/if}
+									<button
+										role="menuitem"
+										onclick={() => { closeActionsMenu(); openDeleteSeries(); }}
+										disabled={deletingSeries}
+										class="w-full text-left px-3 py-2 text-sm text-red-300 hover:bg-red-900/30 disabled:opacity-50"
+										title="Trash every file, delete every issue, and delete the series record itself"
+									>
+										{deletingSeries ? 'Deleting series…' : 'Delete Series'}
+									</button>
+								</div>
+							{/if}
+						</div>
 					</div>
 				</div>
+				{#if backlogMessage}
+					<div class="mt-3 text-sm text-amber-300/90">{backlogMessage}</div>
+				{/if}
+				{#if folderImageMessage}
+					<div class="mt-2 text-sm text-amber-300/90 break-all">{folderImageMessage}</div>
+				{/if}
+				{#if sidecarMessage}
+					<div class="mt-2 text-sm text-amber-300/90 break-all">{sidecarMessage}</div>
+				{/if}
 				<div class="flex flex-wrap items-center gap-3 mt-2 text-sm text-gray-400">
 					{#if series.year}
 						<span>{series.year}</span>
@@ -291,6 +723,17 @@
 							class="text-amber-400 hover:text-amber-300"
 						>
 							ComicVine
+						</a>
+					{/if}
+					{#if series.metron_id}
+						<span>&middot;</span>
+						<a
+							href="https://metron.cloud/series/{series.metron_id}/"
+							target="_blank"
+							rel="noopener"
+							class="text-blue-400 hover:text-blue-300"
+						>
+							Metron
 						</a>
 					{/if}
 				</div>
@@ -357,6 +800,11 @@
 											alt="#{issue.issue_number}"
 											class="w-full h-full object-cover"
 											loading="lazy"
+											onerror={(e) => {
+												const img = e.currentTarget as HTMLImageElement;
+												const fallback = proxiedCoverURL(issue.cover_url);
+												if (fallback && img.src.indexOf('/covers/proxy') === -1) img.src = fallback;
+											}}
 										/>
 										<div class="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100
 											transition-opacity flex items-center justify-center">
@@ -365,6 +813,13 @@
 											</span>
 										</div>
 									</a>
+								{:else if issue.cover_url}
+									<img
+										src={proxiedCoverURL(issue.cover_url)}
+										alt="#{issue.issue_number}"
+										class="w-full h-full object-cover"
+										loading="lazy"
+									/>
 								{:else}
 									<div class="w-full h-full flex flex-col items-center justify-center text-gray-500 text-sm gap-1">
 										<svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -381,18 +836,25 @@
 										#{issue.issue_number}
 									</p>
 									{#if issue.has_file}
-										<button
-											onclick={() => toggleReadStatus(issue)}
-											class="text-xs px-2 py-0.5 rounded-full transition-colors
-												{issue.read_status === 'read'
-													? 'bg-green-900/50 text-green-400 hover:bg-green-900/70'
-													: issue.read_status === 'reading'
-													? 'bg-amber-900/50 text-amber-400 hover:bg-amber-900/70'
-													: 'bg-gray-700 text-gray-400 hover:bg-gray-600'}"
-											title="Click to toggle read status"
-										>
-											{issue.read_status === 'read' ? 'Read' : issue.read_status === 'reading' ? 'Reading' : 'Unread'}
-										</button>
+										<div class="flex items-center gap-1">
+											<span
+												class="text-xs px-2 py-0.5 rounded-full
+													{issue.read_status === 'read'
+														? 'bg-green-900/50 text-green-400'
+														: issue.read_status === 'reading'
+														? 'bg-amber-900/50 text-amber-400'
+														: 'bg-gray-700 text-gray-400'}"
+											>
+												{issue.read_status === 'read' ? 'Read' : issue.read_status === 'reading' ? 'Reading' : 'Unread'}
+											</span>
+											<button
+												onclick={() => toggleReadStatus(issue)}
+												class="text-xs px-2 py-0.5 rounded text-gray-300 hover:text-white hover:bg-gray-700 transition-colors"
+												title={issue.read_status === 'read' ? 'Mark as Unread' : 'Mark as Read'}
+											>
+												{issue.read_status === 'read' ? 'Mark Unread' : 'Mark Read'}
+											</button>
+										</div>
 									{/if}
 								</div>
 								{#if issue.skip_status}
@@ -476,6 +938,20 @@
 												</button>
 											</div>
 										{/if}
+								<div class="flex items-center justify-end gap-2 mt-2 text-xs">
+									<button
+										onclick={() => openIssueEdit(issue)}
+										class="px-2 py-0.5 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors"
+									>
+										Edit
+									</button>
+									<button
+										onclick={() => confirmDeleteIssue(issue)}
+										class="px-2 py-0.5 rounded bg-red-900/40 hover:bg-red-900/60 text-red-300 transition-colors"
+									>
+										Delete
+									</button>
+								</div>
 									</div>
 								{/if}
 							</div>
@@ -488,6 +964,198 @@
 		</div>
 	</div>
 
+	{#if editingIssue}
+		<div class="fixed inset-0 bg-black/70 flex items-center justify-center z-50 px-4"
+			onclick={(e) => { if (e.target === e.currentTarget) cancelIssueEdit(); }}
+			onkeydown={(e) => { if (e.key === 'Escape') cancelIssueEdit(); }}
+			tabindex="-1" role="dialog" aria-modal="true">
+			<div class="bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4">
+				<h3 class="text-lg font-semibold">Edit Issue #{editingIssue.issue_number}</h3>
+				<div class="space-y-2">
+					<label class="text-sm text-gray-400" for="edit-issue-number">Issue Number</label>
+					<input
+						id="edit-issue-number"
+						type="text"
+						bind:value={editIssueNumber}
+						class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded text-gray-100 focus:outline-none focus:border-amber-500"
+						disabled={savingIssueEdit}
+					/>
+				</div>
+				<div class="space-y-2">
+					<label class="text-sm text-gray-400" for="edit-issue-title">Title</label>
+					<input
+						id="edit-issue-title"
+						type="text"
+						bind:value={editIssueTitle}
+						class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded text-gray-100 focus:outline-none focus:border-amber-500"
+						disabled={savingIssueEdit}
+					/>
+				</div>
+				<div class="space-y-2">
+					<label class="text-sm text-gray-400" for="edit-issue-writers">Writers</label>
+					<input
+						id="edit-issue-writers"
+						type="text"
+						bind:value={editIssueWriters}
+						placeholder="Comma-separated"
+						class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded text-gray-100 focus:outline-none focus:border-amber-500"
+						disabled={savingIssueEdit}
+					/>
+				</div>
+				<div class="space-y-2">
+					<label class="text-sm text-gray-400" for="edit-issue-artists">Artists</label>
+					<input
+						id="edit-issue-artists"
+						type="text"
+						bind:value={editIssueArtists}
+						placeholder="Comma-separated"
+						class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded text-gray-100 focus:outline-none focus:border-amber-500"
+						disabled={savingIssueEdit}
+					/>
+				</div>
+				{#if editingIssue.has_file}
+					<label class="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+						<input
+							type="checkbox"
+							bind:checked={editIssueRename}
+							class="w-4 h-4 accent-amber-500"
+							disabled={savingIssueEdit}
+						/>
+						Rename file on disk to match the new metadata
+					</label>
+				{/if}
+				{#if issueEditError}
+					<p class="text-sm text-red-400">{issueEditError}</p>
+				{/if}
+				{#if issueEditNotice}
+					<p class="text-sm text-amber-300">{issueEditNotice}</p>
+				{/if}
+				<div class="flex justify-end gap-2">
+					<button
+						onclick={cancelIssueEdit}
+						class="px-3 py-1.5 text-sm bg-gray-800 hover:bg-gray-700 rounded-lg"
+						disabled={savingIssueEdit}
+					>Cancel</button>
+					<button
+						onclick={saveIssueEdit}
+						class="px-3 py-1.5 text-sm bg-amber-500 hover:bg-amber-600 text-gray-900 rounded-lg disabled:opacity-50"
+						disabled={savingIssueEdit}
+					>{savingIssueEdit ? 'Saving...' : 'Save'}</button>
+				</div>
+			</div>
+		</div>
+	{/if}
+
+	{#if issuePendingDelete}
+		<div class="fixed inset-0 bg-black/70 flex items-center justify-center z-50 px-4"
+			onclick={(e) => { if (e.target === e.currentTarget) cancelDeleteIssue(); }}
+			onkeydown={(e) => { if (e.key === 'Escape') cancelDeleteIssue(); }}
+			tabindex="-1" role="dialog" aria-modal="true">
+			<div class="bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4">
+				<h3 class="text-lg font-semibold text-red-300">Delete Issue #{issuePendingDelete.issue_number}?</h3>
+				<p class="text-sm text-gray-400">This will move the file to the recycle bin and remove the issue from the library.</p>
+				{#if issueDeleteError}
+					<p class="text-sm text-red-400">{issueDeleteError}</p>
+				{/if}
+				<div class="flex justify-end gap-2">
+					<button
+						onclick={cancelDeleteIssue}
+						class="px-3 py-1.5 text-sm bg-gray-800 hover:bg-gray-700 rounded-lg"
+						disabled={deletingIssue}
+					>Cancel</button>
+					<button
+						onclick={deleteIssueNow}
+						class="px-3 py-1.5 text-sm bg-red-600 hover:bg-red-500 text-white rounded-lg disabled:opacity-50"
+						disabled={deletingIssue}
+					>{deletingIssue ? 'Deleting...' : 'Delete'}</button>
+				</div>
+			</div>
+		</div>
+	{/if}
+
+	{#if deleteSeriesOpen}
+		<!-- svelte-ignore a11y_click_events_have_key_events -->
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="fixed inset-0 bg-black/70 flex items-center justify-center z-50 px-4"
+			onclick={(e) => { if (e.target === e.currentTarget) cancelDeleteSeries(); }}
+			onkeydown={(e) => { if (e.key === 'Escape') cancelDeleteSeries(); }}
+			tabindex="-1" role="dialog" aria-modal="true">
+			<div class="bg-gray-900 border border-red-700 rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4">
+				<h3 class="text-lg font-semibold text-red-300">Delete "{series.title}"?</h3>
+				<p class="text-sm text-gray-300">
+					Every file in this series will be moved to the OS recycle bin. All
+					issue and file records, plus the series record itself, will be removed
+					from the database.
+					{#if issues.length > 0}
+						<span class="block mt-2 text-amber-300/90">
+							{issues.length} issue{issues.length === 1 ? '' : 's'} affected.
+						</span>
+					{/if}
+				</p>
+				<p class="text-xs text-gray-500">
+					Files are reversible — restore from the Recycle Bin and re-scan to
+					re-import. Database deletion is permanent.
+				</p>
+				{#if deleteSeriesError}
+					<p class="text-sm text-red-400">{deleteSeriesError}</p>
+				{/if}
+				<div class="flex justify-end gap-2">
+					<button
+						onclick={cancelDeleteSeries}
+						class="px-3 py-1.5 text-sm bg-gray-800 hover:bg-gray-700 rounded-lg"
+						disabled={deletingSeries}
+					>Cancel</button>
+					<button
+						onclick={confirmDeleteSeries}
+						class="px-3 py-1.5 text-sm bg-red-600 hover:bg-red-500 text-white rounded-lg disabled:opacity-50"
+						disabled={deletingSeries}
+					>{deletingSeries ? 'Deleting…' : 'Delete Series'}</button>
+				</div>
+			</div>
+		</div>
+	{/if}
+
+	{#if bulkDeleteOpen}
+		<div class="fixed inset-0 bg-black/70 flex items-center justify-center z-50 px-4"
+			onclick={(e) => { if (e.target === e.currentTarget) cancelBulkDelete(); }}
+			onkeydown={(e) => { if (e.key === 'Escape') cancelBulkDelete(); }}
+			tabindex="-1" role="dialog" aria-modal="true">
+			<div class="bg-gray-900 border border-red-700 rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4">
+				<h3 class="text-lg font-semibold text-red-300">Delete all {issues.length} issues in {series.title}?</h3>
+				<p class="text-sm text-gray-300">
+					Every file will be moved to the OS recycle bin. Issue and file records
+					will be removed from the database. The series record stays.
+				</p>
+				<p class="text-sm text-gray-500">
+					This is reversible at the file level — you can restore from the recycle bin
+					— but the database deletion is permanent (re-scan to re-import).
+				</p>
+				{#if bulkDeleteError}
+					<p class="text-sm text-red-400">{bulkDeleteError}</p>
+				{/if}
+				<div class="flex justify-end gap-2">
+					<button
+						onclick={cancelBulkDelete}
+						class="px-3 py-1.5 text-sm bg-gray-800 hover:bg-gray-700 rounded-lg"
+						disabled={bulkDeleting}
+					>Cancel</button>
+					<button
+						onclick={confirmBulkDelete}
+						class="px-3 py-1.5 text-sm bg-red-600 hover:bg-red-500 text-white rounded-lg disabled:opacity-50"
+						disabled={bulkDeleting}
+					>{bulkDeleting ? 'Deleting…' : `Delete ${issues.length} issues`}</button>
+				</div>
+			</div>
+		</div>
+	{/if}
+
+	{#if bulkDeleteNotice}
+		<div class="fixed bottom-4 right-4 bg-gray-800 border border-amber-500/40 rounded-lg shadow-xl px-4 py-3 max-w-sm z-40">
+			<p class="text-sm text-amber-200">{bulkDeleteNotice}</p>
+			<button onclick={() => (bulkDeleteNotice = null)} class="text-xs text-gray-400 hover:text-gray-200 mt-1">dismiss</button>
+		</div>
+	{/if}
+
 	<!-- ComicVine Search Modal -->
 	{#if showSearch}
 		<ComicVineSearch
@@ -495,6 +1163,16 @@
 			seriesId={Number(seriesId)}
 			onMatched={handleMatched}
 			onClose={() => showSearch = false}
+		/>
+	{/if}
+
+	<!-- Metron Search Modal -->
+	{#if showMetronSearch}
+		<MetronSearch
+			seriesTitle={series.title}
+			seriesId={Number(seriesId)}
+			onMatched={() => { showMetronSearch = false; loadSeriesDetail(); }}
+			onClose={() => showMetronSearch = false}
 		/>
 	{/if}
 {/if}

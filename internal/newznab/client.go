@@ -1,6 +1,7 @@
 package newznab
 
 import (
+	"context"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -43,11 +44,21 @@ func NewClient(baseURL, apiKey string, isProwlarr bool) *Client {
 }
 
 // Search queries the indexer for NZBs matching the query within the given categories.
+//
+// Background-context shim — for callers that don't have a request context.
+// New code should call SearchCtx so cancellation propagates to the HTTP
+// request and a slow indexer doesn't pin a request handler.
 func (c *Client) Search(query string, categories []string) ([]SearchResult, error) {
+	return c.SearchCtx(context.Background(), query, categories)
+}
+
+// SearchCtx is the ctx-aware variant. Cancellation aborts the in-flight
+// indexer request instead of waiting for the HTTP timeout.
+func (c *Client) SearchCtx(ctx context.Context, query string, categories []string) ([]SearchResult, error) {
 	c.limiter.Wait()
 
 	if c.isProwlarr {
-		return c.searchProwlarr(query, categories)
+		return c.searchProwlarr(ctx, query, categories)
 	}
 
 	params := url.Values{}
@@ -58,7 +69,7 @@ func (c *Client) Search(query string, categories []string) ([]SearchResult, erro
 		params.Set("cat", strings.Join(categories, ","))
 	}
 
-	body, err := c.doRequest(params)
+	body, err := c.doRequestCtx(ctx, params)
 	if err != nil {
 		return nil, fmt.Errorf("search request: %w", err)
 	}
@@ -118,23 +129,24 @@ func (c *Client) Search(query string, categories []string) ([]SearchResult, erro
 }
 
 // searchProwlarr uses Prowlarr's native JSON API to search across all its indexers.
-func (c *Client) searchProwlarr(query string, categories []string) ([]SearchResult, error) {
+//
+// Categories are intentionally NOT forwarded to Prowlarr. Prowlarr translates
+// Newznab category IDs per-indexer, and many downstream Usenet indexers don't
+// classify comics under 7030 (Books > Comics) — they use 8000 (Other) or
+// nothing at all. Forcing a category through Prowlarr's `/api/v1/search`
+// causes those indexers to return zero hits even when the same release shows
+// up in Prowlarr's manual UI. Letting Prowlarr search uncategorized reproduces
+// the manual-UI behavior.
+func (c *Client) searchProwlarr(ctx context.Context, query string, categories []string) ([]SearchResult, error) {
+	_ = categories // see comment above
 	params := url.Values{}
 	params.Set("query", query)
 	params.Set("type", "search")
 	params.Set("limit", "100")
-	for _, cat := range categories {
-		for _, c := range strings.Split(cat, ",") {
-			c = strings.TrimSpace(c)
-			if c != "" {
-				params.Add("categories", c)
-			}
-		}
-	}
 
 	reqURL := fmt.Sprintf("%s/api/v1/search?%s", c.baseURL, params.Encode())
 
-	req, err := http.NewRequest("GET", reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating prowlarr request: %w", err)
 	}
@@ -247,13 +259,17 @@ func (c *Client) testProwlarr() error {
 }
 
 func (c *Client) doRequest(params url.Values) ([]byte, error) {
+	return c.doRequestCtx(context.Background(), params)
+}
+
+func (c *Client) doRequestCtx(ctx context.Context, params url.Values) ([]byte, error) {
 	if !c.isProwlarr {
 		params.Set("apikey", c.apiKey)
 	}
 
 	reqURL := fmt.Sprintf("%s/api?%s", c.baseURL, params.Encode())
 
-	req, err := http.NewRequest("GET", reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}

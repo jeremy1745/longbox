@@ -79,6 +79,62 @@ func (h *SettingsHandler) UpdateAPIKey(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// UpdateMetronCredentials saves Metron username + API token.
+// PUT /api/v1/settings/metron
+// Body: {"username": "...", "api_token": "..."}
+func (h *SettingsHandler) UpdateMetronCredentials(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Username string `json:"username"`
+		APIToken string `json:"api_token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	if req.Username == "" || req.APIToken == "" {
+		writeError(w, http.StatusBadRequest, "MISSING_FIELDS", "username and api_token are both required")
+		return
+	}
+	if err := h.metaSvc.SetMetronCredentials(req.Username, req.APIToken); err != nil {
+		writeError(w, http.StatusInternalServerError, "SAVE_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":               "updated",
+		"metron_username":      h.metaSvc.MetronUsername(),
+		"metron_token_masked":  h.metaSvc.MetronTokenMasked(),
+		"metron_token_set":     h.metaSvc.MetronTokenSet(),
+	})
+}
+
+// TestMetron makes a tiny live request to verify Metron credentials.
+// POST /api/v1/settings/metron/test
+func (h *SettingsHandler) TestMetron(w http.ResponseWriter, r *http.Request) {
+	if !h.metaSvc.HasMetronCredentials() {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"valid":   false,
+			"message": "No Metron credentials configured",
+		})
+		return
+	}
+	if err := h.metaSvc.TestMetron(r.Context()); err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"valid":   false,
+			"message": err.Error(),
+		})
+		return
+	}
+	q := h.metaSvc.MetronQuota()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"valid":               true,
+		"message":             "Metron credentials are valid",
+		"burst_limit":         q.BurstLimit,
+		"burst_remaining":     q.BurstRemaining,
+		"sustained_limit":     q.SustainedLimit,
+		"sustained_remaining": q.SustainedRemaining,
+	})
+}
+
 // TestAPIKey tests the ComicVine API key by making a simple search.
 // POST /api/v1/settings/comicvine-api-key/test
 func (h *SettingsHandler) TestAPIKey(w http.ResponseWriter, r *http.Request) {
@@ -330,6 +386,57 @@ func (h *SettingsHandler) UpdateAutoScan(w http.ResponseWriter, r *http.Request)
 		"auto_scan_enabled":   enabled == "true",
 		"auto_scan_interval":  interval,
 		"auto_scan_last_run":  lastRun,
+	})
+}
+
+// UpdateScanReconcile saves the scan-time reconciliation settings:
+// auto-queue backlog runs when a CV refresh uncovers new gaps, and the
+// per-series CV-refresh TTL in hours.
+// PUT /api/v1/settings/scan-reconcile
+// Body: {"auto_queue_backlog": true, "cv_refresh_ttl_hours": 24}
+func (h *SettingsHandler) UpdateScanReconcile(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		AutoQueueBacklog  *bool `json:"auto_queue_backlog"`
+		CVRefreshTTLHours *int  `json:"cv_refresh_ttl_hours"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+
+	if req.AutoQueueBacklog != nil {
+		val := "false"
+		if *req.AutoQueueBacklog {
+			val = "true"
+		}
+		if err := h.settingRepo.Set("scan_auto_queue_backlog", val); err != nil {
+			writeError(w, http.StatusInternalServerError, "SAVE_FAILED", err.Error())
+			return
+		}
+	}
+
+	if req.CVRefreshTTLHours != nil {
+		if *req.CVRefreshTTLHours < 1 || *req.CVRefreshTTLHours > 24*30 {
+			writeError(w, http.StatusBadRequest, "INVALID_TTL", "cv_refresh_ttl_hours must be 1-720")
+			return
+		}
+		if err := h.settingRepo.Set("scan_cv_refresh_ttl_hours", strconv.Itoa(*req.CVRefreshTTLHours)); err != nil {
+			writeError(w, http.StatusInternalServerError, "SAVE_FAILED", err.Error())
+			return
+		}
+	}
+
+	autoQueue, _ := h.settingRepo.Get("scan_auto_queue_backlog")
+	ttlStr, _ := h.settingRepo.Get("scan_cv_refresh_ttl_hours")
+	ttl := 24
+	if v, err := strconv.Atoi(ttlStr); err == nil && v > 0 {
+		ttl = v
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":                    "updated",
+		"scan_auto_queue_backlog":   autoQueue == "true",
+		"scan_cv_refresh_ttl_hours": ttl,
 	})
 }
 

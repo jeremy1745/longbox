@@ -24,12 +24,24 @@ func WriteComicInfoToCBZ(archivePath string, info *ComicInfo) error {
 		return err
 	}
 
-	// Open the original archive for reading
+	// Open the original archive for reading. On Windows / SMB, the OS
+	// rejects a rename when ANY handle is still open on the destination.
+	// We must explicitly close `src` before the os.Rename below — a
+	// `defer src.Close()` runs at function return AFTER the rename, which
+	// is exactly what was making "Write ComicInfo.xml" fail with
+	// "Access is denied" / "0 succeeded, N failed" against the comics
+	// share. Track close-state with a flag so the error path still cleans
+	// up if we bail before the explicit Close.
 	src, err := zip.OpenReader(archivePath)
 	if err != nil {
 		return fmt.Errorf("opening source archive: %w", err)
 	}
-	defer src.Close()
+	srcClosed := false
+	defer func() {
+		if !srcClosed {
+			src.Close()
+		}
+	}()
 
 	// Create temp file in the same directory (for atomic rename)
 	dir := filepath.Dir(archivePath)
@@ -90,8 +102,27 @@ func WriteComicInfoToCBZ(archivePath string, info *ComicInfo) error {
 		return fmt.Errorf("closing temp file: %w", err)
 	}
 
-	// Atomic rename: replace original with rewritten file
+	// MUST release the source-archive handle before the rename — Windows
+	// + SMB will reject a rename onto a path with an open handle.
+	if err := src.Close(); err != nil {
+		return fmt.Errorf("closing source archive: %w", err)
+	}
+	srcClosed = true
+
+	// Atomic rename: replace original with rewritten file. os.Rename on
+	// Windows uses MoveFileEx with MOVEFILE_REPLACE_EXISTING, which
+	// supports overwriting an existing destination. SMB sometimes
+	// requires the destination to not exist — so on rename failure,
+	// fall back to remove+rename.
 	if err := os.Rename(tmpPath, archivePath); err != nil {
+		if rmErr := os.Remove(archivePath); rmErr == nil {
+			if err2 := os.Rename(tmpPath, archivePath); err2 == nil {
+				tmp = nil
+				return nil
+			} else {
+				return fmt.Errorf("replacing original file (after remove): %w", err2)
+			}
+		}
 		return fmt.Errorf("replacing original file: %w", err)
 	}
 

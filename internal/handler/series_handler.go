@@ -7,16 +7,78 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jeremy/longbox/internal/repository"
+	"github.com/jeremy/longbox/internal/service"
 )
 
 type SeriesHandler struct {
 	seriesRepo   *repository.SeriesRepo
 	issueRepo    *repository.IssueRepo
 	wantListRepo *repository.WantListRepo
+	librarySvc   *service.LibraryService
 }
 
-func NewSeriesHandler(seriesRepo *repository.SeriesRepo, issueRepo *repository.IssueRepo, wantListRepo *repository.WantListRepo) *SeriesHandler {
-	return &SeriesHandler{seriesRepo: seriesRepo, issueRepo: issueRepo, wantListRepo: wantListRepo}
+func NewSeriesHandler(seriesRepo *repository.SeriesRepo, issueRepo *repository.IssueRepo, wantListRepo *repository.WantListRepo, librarySvc *service.LibraryService) *SeriesHandler {
+	return &SeriesHandler{seriesRepo: seriesRepo, issueRepo: issueRepo, wantListRepo: wantListRepo, librarySvc: librarySvc}
+}
+
+// Delete removes a series end-to-end: trashes every file, deletes every
+// issue + comic_files row, detaches any child (annual) series, and deletes
+// the series record itself.
+// DELETE /api/v1/series/{id}
+func (h *SeriesHandler) Delete(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid series ID")
+		return
+	}
+	result, err := h.librarySvc.DeleteSeries(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "DELETE_SERIES_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// MergeInto consolidates this series into another, then deletes this series.
+// Used to resolve the CV-already-matched conflict.
+// POST /api/v1/series/{id}/merge-into/{dst_id}
+func (h *SeriesHandler) MergeInto(w http.ResponseWriter, r *http.Request) {
+	srcID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid src series ID")
+		return
+	}
+	dstID, err := strconv.ParseInt(chi.URLParam(r, "dst_id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_DST_ID", "invalid dst series ID")
+		return
+	}
+
+	result, err := h.librarySvc.MergeSeriesInto(srcID, dstID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "MERGE_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// DeleteAllIssues bulk-deletes every issue in a series: trashes the file and
+// removes both the file and issue rows. The series record itself is preserved.
+// DELETE /api/v1/series/{id}/issues
+func (h *SeriesHandler) DeleteAllIssues(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid series ID")
+		return
+	}
+
+	result, err := h.librarySvc.DeleteAllIssuesInSeries(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "BULK_DELETE_FAILED", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (h *SeriesHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -179,6 +241,24 @@ func (h *SeriesHandler) Untrack(w http.ResponseWriter, r *http.Request) {
 
 	series, _ := h.seriesRepo.GetByID(id)
 	writeJSON(w, http.StatusOK, map[string]any{"tracked": false, "series": series})
+}
+
+func (h *SeriesHandler) ClearWantList(w http.ResponseWriter, r *http.Request) {
+	if h.wantListRepo == nil {
+		writeError(w, http.StatusBadRequest, "NOT_SUPPORTED", "want list not configured")
+		return
+	}
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid series ID")
+		return
+	}
+	removed, err := h.wantListRepo.RemoveForSeries(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "CLEAR_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"removed": removed})
 }
 
 // BulkSetSkipStatus sets skip status for all matching issues in a series.

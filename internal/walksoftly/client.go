@@ -1,6 +1,7 @@
 package walksoftly
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -29,20 +30,38 @@ func NewClient() *Client {
 }
 
 // GetWeeklyReleases fetches all comics releasing in the given week.
-// weekNum is Sunday-based week number (matching strftime %U), year is 4-digit year.
+// Background-context shim — new code should use GetWeeklyReleasesCtx.
 func (c *Client) GetWeeklyReleases(weekNum int, year int) ([]Release, error) {
-	// Simple rate limit: 1 request per second
+	return c.GetWeeklyReleasesCtx(context.Background(), weekNum, year)
+}
+
+// GetWeeklyReleasesCtx is the ctx-aware variant. Cancellation aborts the
+// in-flight HTTP request so the caller's request handler isn't pinned to a
+// stalled walksoftly server.
+func (c *Client) GetWeeklyReleasesCtx(ctx context.Context, weekNum int, year int) ([]Release, error) {
+	// Simple rate limit: 1 request per second. ctx-aware so a cancelled
+	// caller doesn't block on the per-second pacing wait.
 	c.mu.Lock()
 	elapsed := time.Since(c.lastCall)
 	if elapsed < time.Second {
-		time.Sleep(time.Second - elapsed)
+		t := time.NewTimer(time.Second - elapsed)
+		c.mu.Unlock()
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			t.Stop()
+			return nil, ctx.Err()
+		}
+	} else {
+		c.mu.Unlock()
 	}
+	c.mu.Lock()
 	c.lastCall = time.Now()
 	c.mu.Unlock()
 
 	reqURL := fmt.Sprintf("%s?week=%d&year=%d", baseURL, weekNum, year)
 
-	req, err := http.NewRequest("GET", reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}

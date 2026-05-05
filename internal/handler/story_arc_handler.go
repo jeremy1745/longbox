@@ -106,7 +106,7 @@ func (h *StoryArcHandler) Import(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fetch from ComicVine
-	cvArc, err := h.cvClient.GetStoryArc(req.ComicVineID)
+	cvArc, err := h.cvClient.GetStoryArc(r.Context(), req.ComicVineID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "CV_FETCH_FAILED", err.Error())
 		return
@@ -126,7 +126,7 @@ func (h *StoryArcHandler) Import(w http.ResponseWriter, r *http.Request) {
 	// For each issue in the arc, look up by CV ID and link
 	linked := 0
 	for i, issueRef := range cvArc.Issues {
-		cvIssue, err := h.cvClient.GetIssue(issueRef.ID)
+		cvIssue, err := h.cvClient.GetIssue(r.Context(), issueRef.ID)
 		if err != nil {
 			slog.Warn("failed to fetch arc issue from CV", "cv_id", issueRef.ID, "error", err)
 			continue
@@ -186,7 +186,7 @@ func (h *StoryArcHandler) Search(w http.ResponseWriter, r *http.Request) {
 		page = 1
 	}
 
-	results, total, err := h.cvClient.SearchStoryArcs(query, page)
+	results, total, err := h.cvClient.SearchStoryArcs(r.Context(), query, page)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "SEARCH_FAILED", err.Error())
 		return

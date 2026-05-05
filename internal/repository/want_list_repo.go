@@ -123,8 +123,23 @@ func (r *WantListRepo) List(page, perPage int, sortBy, order string) ([]model.Wa
 		order = "desc"
 	}
 
+	// Defensive filter: never list wants for issues whose series + issue_number
+	// is already owned, even if the want_list points to a different issue row
+	// (duplicate issues happen when a CV match creates a second row for the
+	// same series+number). Stale rows would otherwise persist if a sync path
+	// ever forgot to call RemoveFulfilled / DeleteByIssueID.
+	const ownedExists = `
+		EXISTS (
+			SELECT 1 FROM issues i2
+			JOIN comic_files cf ON cf.issue_id = i2.id
+			WHERE i2.series_id = i.series_id AND i2.issue_number = i.issue_number
+		)`
 	var total int
-	if err := r.read.QueryRow(`SELECT COUNT(*) FROM want_list`).Scan(&total); err != nil {
+	if err := r.read.QueryRow(`
+		SELECT COUNT(*) FROM want_list w
+		JOIN issues i ON w.issue_id = i.id
+		WHERE NOT ` + ownedExists + `
+	`).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("counting want list: %w", err)
 	}
 
@@ -137,8 +152,9 @@ func (r *WantListRepo) List(page, perPage int, sortBy, order string) ([]model.Wa
 		FROM want_list w
 		JOIN issues i ON w.issue_id = i.id
 		JOIN series s ON i.series_id = s.id
+		WHERE NOT %s
 		ORDER BY %s %s
-		LIMIT ? OFFSET ?`, sortCol, order)
+		LIMIT ? OFFSET ?`, ownedExists, sortCol, order)
 
 	rows, err := r.read.Query(query, perPage, offset)
 	if err != nil {
@@ -174,13 +190,20 @@ func (r *WantListRepo) AddMissingForSeries(seriesID int64) (int, error) {
 	return int(n), nil
 }
 
-// RemoveFulfilled removes want list items for issues that now have a file in the library.
+// RemoveFulfilled removes want list items whose series+issue_number is owned
+// by any issue row in the library — including duplicate issue rows that hold
+// the file under a different ID than the one the want originally referenced.
 func (r *WantListRepo) RemoveFulfilled() (int, error) {
 	res, err := r.write.Exec(`
 		DELETE FROM want_list
 		WHERE issue_id IN (
 			SELECT w.issue_id FROM want_list w
-			JOIN comic_files cf ON cf.issue_id = w.issue_id
+			JOIN issues i ON i.id = w.issue_id
+			WHERE EXISTS (
+				SELECT 1 FROM issues i2
+				JOIN comic_files cf ON cf.issue_id = i2.id
+				WHERE i2.series_id = i.series_id AND i2.issue_number = i.issue_number
+			)
 		)`)
 	if err != nil {
 		return 0, fmt.Errorf("removing fulfilled want list items: %w", err)

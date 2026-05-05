@@ -1,6 +1,7 @@
 package comicvine
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -45,13 +46,24 @@ func (c *Client) HourlyRemaining() int {
 	return c.limiter.HourlyRemaining()
 }
 
-// get performs a rate-limited GET request to the ComicVine API.
-func (c *Client) get(endpoint string, params url.Values) ([]byte, error) {
+// NextResetIn returns the duration until the hourly quota window resets.
+func (c *Client) NextResetIn() time.Duration {
+	return c.limiter.NextResetIn()
+}
+
+// get performs a rate-limited GET request to the ComicVine API. Honors ctx
+// cancellation both during the rate-limit wait and the HTTP roundtrip.
+func (c *Client) get(ctx context.Context, endpoint string, params url.Values) ([]byte, error) {
 	if c.apiKey == "" {
 		return nil, fmt.Errorf("ComicVine API key not configured")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
-	c.limiter.Wait()
+	if err := c.limiter.Wait(ctx); err != nil {
+		return nil, err
+	}
 
 	if params == nil {
 		params = url.Values{}
@@ -61,7 +73,7 @@ func (c *Client) get(endpoint string, params url.Values) ([]byte, error) {
 
 	reqURL := fmt.Sprintf("%s/%s?%s", baseURL, endpoint, params.Encode())
 
-	req, err := http.NewRequest("GET", reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
@@ -89,7 +101,7 @@ func (c *Client) get(endpoint string, params url.Values) ([]byte, error) {
 }
 
 // SearchVolumes searches for comic volumes (series) by name.
-func (c *Client) SearchVolumes(query string, page int) ([]SearchResult, int, error) {
+func (c *Client) SearchVolumes(ctx context.Context, query string, page int) ([]SearchResult, int, error) {
 	params := url.Values{}
 	params.Set("query", query)
 	params.Set("resources", "volume")
@@ -97,7 +109,7 @@ func (c *Client) SearchVolumes(query string, page int) ([]SearchResult, int, err
 	params.Set("offset", fmt.Sprintf("%d", (page-1)*10))
 	params.Set("field_list", "id,name,start_year,count_of_issues,description,publisher,image,resource_type")
 
-	body, err := c.get("search", params)
+	body, err := c.get(ctx, "search", params)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -115,11 +127,11 @@ func (c *Client) SearchVolumes(query string, page int) ([]SearchResult, int, err
 }
 
 // GetVolume fetches detailed volume (series) info including issue list.
-func (c *Client) GetVolume(cvID int) (*Volume, error) {
+func (c *Client) GetVolume(ctx context.Context, cvID int) (*Volume, error) {
 	params := url.Values{}
 	params.Set("field_list", "id,name,start_year,description,count_of_issues,publisher,image,site_detail_url,issues")
 
-	body, err := c.get(fmt.Sprintf("volume/4050-%d", cvID), params)
+	body, err := c.get(ctx, fmt.Sprintf("volume/4050-%d", cvID), params)
 	if err != nil {
 		return nil, err
 	}
@@ -137,11 +149,11 @@ func (c *Client) GetVolume(cvID int) (*Volume, error) {
 }
 
 // GetIssue fetches detailed issue info.
-func (c *Client) GetIssue(cvID int) (*Issue, error) {
+func (c *Client) GetIssue(ctx context.Context, cvID int) (*Issue, error) {
 	params := url.Values{}
 	params.Set("field_list", "id,name,issue_number,description,cover_date,store_date,image,site_detail_url,volume,person_credits")
 
-	body, err := c.get(fmt.Sprintf("issue/4000-%d", cvID), params)
+	body, err := c.get(ctx, fmt.Sprintf("issue/4000-%d", cvID), params)
 	if err != nil {
 		return nil, err
 	}
@@ -159,7 +171,7 @@ func (c *Client) GetIssue(cvID int) (*Issue, error) {
 }
 
 // GetVolumeIssues fetches all issues for a volume, handling pagination.
-func (c *Client) GetVolumeIssues(volumeID int) ([]Issue, error) {
+func (c *Client) GetVolumeIssues(ctx context.Context, volumeID int) ([]Issue, error) {
 	var allIssues []Issue
 	offset := 0
 	limit := 100
@@ -172,7 +184,7 @@ func (c *Client) GetVolumeIssues(volumeID int) ([]Issue, error) {
 		params.Set("limit", fmt.Sprintf("%d", limit))
 		params.Set("offset", fmt.Sprintf("%d", offset))
 
-		body, err := c.get("issues", params)
+		body, err := c.get(ctx, "issues", params)
 		if err != nil {
 			return nil, err
 		}
@@ -198,7 +210,7 @@ func (c *Client) GetVolumeIssues(volumeID int) ([]Issue, error) {
 }
 
 // SearchStoryArcs searches for story arcs by name.
-func (c *Client) SearchStoryArcs(query string, page int) ([]SearchResult, int, error) {
+func (c *Client) SearchStoryArcs(ctx context.Context, query string, page int) ([]SearchResult, int, error) {
 	params := url.Values{}
 	params.Set("query", query)
 	params.Set("resources", "story_arc")
@@ -206,7 +218,7 @@ func (c *Client) SearchStoryArcs(query string, page int) ([]SearchResult, int, e
 	params.Set("offset", fmt.Sprintf("%d", (page-1)*10))
 	params.Set("field_list", "id,name,description,image,resource_type")
 
-	body, err := c.get("search", params)
+	body, err := c.get(ctx, "search", params)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -224,11 +236,11 @@ func (c *Client) SearchStoryArcs(query string, page int) ([]SearchResult, int, e
 }
 
 // GetStoryArc fetches a story arc by ComicVine ID.
-func (c *Client) GetStoryArc(cvID int) (*StoryArc, error) {
+func (c *Client) GetStoryArc(ctx context.Context, cvID int) (*StoryArc, error) {
 	params := url.Values{}
 	params.Set("field_list", "id,name,description,image,issues")
 
-	body, err := c.get(fmt.Sprintf("story_arc/4045-%d", cvID), params)
+	body, err := c.get(ctx, fmt.Sprintf("story_arc/4045-%d", cvID), params)
 	if err != nil {
 		return nil, err
 	}
@@ -247,7 +259,7 @@ func (c *Client) GetStoryArc(cvID int) (*StoryArc, error) {
 
 // GetIssuesByStoreDate fetches all issues from ComicVine with store_date in the given range.
 // Dates should be in YYYY-MM-DD format. This returns ALL comics releasing in that window.
-func (c *Client) GetIssuesByStoreDate(startDate, endDate string) ([]Issue, error) {
+func (c *Client) GetIssuesByStoreDate(ctx context.Context, startDate, endDate string) ([]Issue, error) {
 	var allIssues []Issue
 	offset := 0
 	limit := 100
@@ -260,7 +272,7 @@ func (c *Client) GetIssuesByStoreDate(startDate, endDate string) ([]Issue, error
 		params.Set("limit", fmt.Sprintf("%d", limit))
 		params.Set("offset", fmt.Sprintf("%d", offset))
 
-		body, err := c.get("issues", params)
+		body, err := c.get(ctx, "issues", params)
 		if err != nil {
 			return nil, err
 		}
@@ -301,7 +313,7 @@ func (c *Client) GetIssuesByStoreDate(startDate, endDate string) ([]Issue, error
 // GetVolumesByIDs fetches multiple volumes by their ComicVine IDs.
 // This is used to look up publisher names for issues fetched by store_date.
 // ComicVine supports filtering volumes by pipe-separated IDs.
-func (c *Client) GetVolumesByIDs(ids []int) ([]Volume, error) {
+func (c *Client) GetVolumesByIDs(ctx context.Context, ids []int) ([]Volume, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -329,7 +341,7 @@ func (c *Client) GetVolumesByIDs(ids []int) ([]Volume, error) {
 		params.Set("field_list", "id,name,publisher")
 		params.Set("limit", fmt.Sprintf("%d", batchSize))
 
-		body, err := c.get("volumes", params)
+		body, err := c.get(ctx, "volumes", params)
 		if err != nil {
 			return allVolumes, fmt.Errorf("fetching volumes batch: %w", err)
 		}

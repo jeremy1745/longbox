@@ -23,6 +23,14 @@
 	let error = $state<string | null>(null);
 	let hasSearched = $state(false);
 
+	// Conflict state when CV volume is already owned by another local series.
+	let conflict = $state<{
+		cvId: number;
+		conflictingSeriesId: number;
+		conflictingSeriesTitle: string;
+	} | null>(null);
+	let merging = $state(false);
+
 	async function search() {
 		if (!query.trim()) return;
 		searching = true;
@@ -46,8 +54,32 @@
 		matching = true;
 		matchingId = cvId;
 		error = null;
+		conflict = null;
 		try {
-			await ApiClient.post(`/series/${seriesId}/match`, { comicvine_id: cvId });
+			const res = await fetch(`/api/v1/series/${seriesId}/match`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ comicvine_id: cvId }),
+				credentials: 'include',
+			});
+			if (res.status === 409) {
+				const body = await res.json().catch(() => null);
+				if (body && body.conflicting_series_id) {
+					conflict = {
+						cvId,
+						conflictingSeriesId: body.conflicting_series_id,
+						conflictingSeriesTitle: body.conflicting_series_title || `series #${body.conflicting_series_id}`,
+					};
+					return;
+				}
+				error = body?.error?.message || 'This ComicVine series is already matched to another local series.';
+				return;
+			}
+			if (!res.ok) {
+				const body = await res.json().catch(() => null);
+				error = body?.error?.message || `HTTP ${res.status}`;
+				return;
+			}
 			onMatched();
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Match failed';
@@ -55,6 +87,34 @@
 			matching = false;
 			matchingId = null;
 		}
+	}
+
+	async function mergeIntoConflicting() {
+		if (!conflict) return;
+		merging = true;
+		error = null;
+		try {
+			const res = await fetch(`/api/v1/series/${seriesId}/merge-into/${conflict.conflictingSeriesId}`, {
+				method: 'POST',
+				credentials: 'include',
+			});
+			if (!res.ok) {
+				const body = await res.json().catch(() => null);
+				error = body?.error?.message || `Merge failed (HTTP ${res.status})`;
+				return;
+			}
+			// Source series is gone — caller should navigate away. Hand off via onMatched
+			// but include a hint by routing the parent to the dst series.
+			window.location.href = `/library/${conflict.conflictingSeriesId}`;
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Merge failed';
+		} finally {
+			merging = false;
+		}
+	}
+
+	function cancelConflict() {
+		conflict = null;
 	}
 
 	function nextPage() {
@@ -111,6 +171,39 @@
 				</button>
 			</div>
 		</div>
+
+		{#if conflict}
+			<div class="px-4 pt-3 flex-shrink-0">
+				<div class="bg-amber-900/20 border border-amber-700/60 rounded-lg p-3 space-y-2">
+					<p class="text-sm text-amber-200">
+						This ComicVine volume is already matched to
+						<span class="font-semibold">{conflict.conflictingSeriesTitle}</span>
+						(local series #{conflict.conflictingSeriesId}).
+					</p>
+					<p class="text-xs text-amber-300/80">
+						Merging will move every issue and file from this series into that one,
+						then delete this duplicate series record. The merged series keeps its
+						existing ComicVine match, tracking, and read progress.
+					</p>
+					<div class="flex gap-2 pt-1">
+						<button
+							onclick={mergeIntoConflicting}
+							disabled={merging}
+							class="px-3 py-1.5 text-sm bg-amber-500 hover:bg-amber-600 disabled:bg-gray-600 disabled:cursor-not-allowed text-gray-900 font-semibold rounded-lg transition-colors"
+						>
+							{merging ? 'Merging…' : `Merge into ${conflict.conflictingSeriesTitle}`}
+						</button>
+						<button
+							onclick={cancelConflict}
+							disabled={merging}
+							class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-600 disabled:cursor-not-allowed text-gray-200 rounded-lg transition-colors"
+						>
+							Cancel
+						</button>
+					</div>
+				</div>
+			</div>
+		{/if}
 
 		{#if error}
 			<div class="px-4 pt-3 flex-shrink-0">

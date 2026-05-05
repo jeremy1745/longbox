@@ -14,6 +14,7 @@ import (
 	"github.com/jeremy/longbox/internal/repository"
 	"github.com/jeremy/longbox/internal/scheduler"
 	"github.com/jeremy/longbox/internal/service"
+	"github.com/jeremy/longbox/internal/util/trash"
 )
 
 type FileHandler struct {
@@ -238,6 +239,26 @@ func (h *FileHandler) Duplicates(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *FileHandler) deleteFileRecord(file *model.ComicFile, deleteDisk bool) error {
+	if err := h.fileRepo.Delete(file.ID); err != nil {
+		return err
+	}
+
+	if deleteDisk {
+		if err := trash.MoveToTrash(file.FilePath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+
+		if file.CoverPath != "" {
+			if err := os.Remove(file.CoverPath); err != nil && !os.IsNotExist(err) {
+				slog.Warn("failed to delete cover thumbnail", "path", file.CoverPath, "error", err)
+			}
+		}
+	}
+
+	return nil
+}
+
 // DeleteFile deletes a comic file from the DB and optionally from disk.
 // DELETE /api/v1/files/{id}
 func (h *FileHandler) DeleteFile(w http.ResponseWriter, r *http.Request) {
@@ -257,21 +278,62 @@ func (h *FileHandler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Delete DB record
-	if err := h.fileRepo.Delete(id); err != nil {
+	deleteDisk := r.URL.Query().Get("keep_file") != "true"
+	if err := h.deleteFileRecord(file, deleteDisk); err != nil {
 		writeError(w, http.StatusInternalServerError, "DELETE_FAILED", err.Error())
 		return
 	}
 
-	// Delete from disk if requested (default: yes)
-	deleteDisk := r.URL.Query().Get("keep_file") != "true"
-	if deleteDisk {
-		if err := os.Remove(file.FilePath); err != nil && !os.IsNotExist(err) {
-			slog.Warn("failed to delete file from disk", "path", file.FilePath, "error", err)
-		}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+type bulkDeleteRequest struct {
+	FileIDs  []int64 `json:"file_ids"`
+	KeepFile bool    `json:"keep_file"`
+}
+
+// BulkDelete removes multiple files in one request.
+func (h *FileHandler) BulkDelete(w http.ResponseWriter, r *http.Request) {
+	var req bulkDeleteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+	if len(req.FileIDs) == 0 {
+		writeError(w, http.StatusBadRequest, "EMPTY_LIST", "file_ids is required")
+		return
+	}
+
+	deleteDisk := !req.KeepFile
+	deleted := make([]int64, 0, len(req.FileIDs))
+	failed := map[int64]string{}
+
+	for _, id := range req.FileIDs {
+		file, err := h.fileRepo.GetByID(id)
+		if err != nil {
+			failed[id] = err.Error()
+			continue
+		}
+		if file == nil {
+			failed[id] = "not found"
+			continue
+		}
+
+		if err := h.deleteFileRecord(file, deleteDisk); err != nil {
+			failed[id] = err.Error()
+			continue
+		}
+
+		deleted = append(deleted, id)
+	}
+
+	resp := map[string]any{"deleted": deleted}
+	if len(failed) > 0 {
+		resp["failed"] = failed
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // BackfillHashes triggers a background job to compute hashes for all unhashed files.

@@ -30,9 +30,10 @@ type Scheduler struct {
 	jobRepo  *repository.JobRepo
 	eventBus *EventBus
 
-	mu       sync.Mutex
-	running  map[int64]context.CancelFunc // active job ID → cancel func
-	handlers map[model.JobType]JobFunc
+	mu            sync.Mutex
+	running       map[int64]context.CancelFunc // active job ID → cancel func
+	pendingByType map[model.JobType]int64
+	handlers      map[model.JobType]JobFunc
 
 	queue  chan queuedJob
 	stopCh chan struct{}
@@ -40,12 +41,13 @@ type Scheduler struct {
 
 func NewScheduler(jobRepo *repository.JobRepo, eventBus *EventBus) *Scheduler {
 	s := &Scheduler{
-		jobRepo:  jobRepo,
-		eventBus: eventBus,
-		running:  make(map[int64]context.CancelFunc),
-		handlers: make(map[model.JobType]JobFunc),
-		queue:    make(chan queuedJob, 100),
-		stopCh:   make(chan struct{}),
+		jobRepo:       jobRepo,
+		eventBus:      eventBus,
+		running:       make(map[int64]context.CancelFunc),
+		pendingByType: make(map[model.JobType]int64),
+		handlers:      make(map[model.JobType]JobFunc),
+		queue:         make(chan queuedJob, 100),
+		stopCh:        make(chan struct{}),
 	}
 	go s.processQueue()
 	return s
@@ -64,8 +66,12 @@ func (s *Scheduler) Submit(jobType model.JobType) (*model.Job, error) {
 		return nil, fmt.Errorf("no handler registered for job type %q", jobType)
 	}
 
-	// Check if a job of this type is already running or queued
+	// Check if a job of this type is already running or queued.
 	s.mu.Lock()
+	if pendingID, ok := s.pendingByType[jobType]; ok {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("a %s job is already queued (job #%d)", jobType, pendingID)
+	}
 	for id := range s.running {
 		job, err := s.jobRepo.GetByID(id)
 		if err == nil && job != nil && job.Type == jobType {
@@ -85,6 +91,9 @@ func (s *Scheduler) Submit(jobType model.JobType) (*model.Job, error) {
 	s.eventBus.Publish(Event{Type: "job:created", Data: job})
 
 	// Queue for execution
+	s.mu.Lock()
+	s.pendingByType[jobType] = job.ID
+	s.mu.Unlock()
 	s.queue <- queuedJob{id: job.ID, jobType: jobType, handler: handler}
 
 	return job, nil
@@ -97,6 +106,10 @@ func (s *Scheduler) processQueue() {
 		case <-s.stopCh:
 			return
 		case queued := <-s.queue:
+			s.mu.Lock()
+			delete(s.pendingByType, queued.jobType)
+			s.mu.Unlock()
+
 			// Check if the job was cancelled while waiting in the queue
 			job, err := s.jobRepo.GetByID(queued.id)
 			if err != nil || job == nil || job.Status == model.JobStatusCancelled {
@@ -188,6 +201,14 @@ func (s *Scheduler) Cancel(jobID int64) error {
 	s.mu.Lock()
 	cancel, ok := s.running[jobID]
 	s.mu.Unlock()
+
+	if job, err := s.jobRepo.GetByID(jobID); err == nil && job != nil {
+		s.mu.Lock()
+		if pendingID, exists := s.pendingByType[job.Type]; exists && pendingID == jobID {
+			delete(s.pendingByType, job.Type)
+		}
+		s.mu.Unlock()
+	}
 
 	// Mark cancelled in the DB immediately so the UI reflects it
 	if err := s.jobRepo.MarkCancelled(jobID); err != nil {

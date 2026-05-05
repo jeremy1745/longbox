@@ -146,6 +146,45 @@ func (r *FileRepo) GetByIssueID(issueID int64) (*model.ComicFile, error) {
 	return scanComicFile(row)
 }
 
+// ListAllGroupedBySeries returns every comic_files row in one query, keyed
+// by series_id. Lets bulk maintenance jobs (sidecar writer, folder-image
+// refresh) avoid N round-trips of ListBySeries — one scan + one in-memory
+// index is faster than 5000 separate JOIN queries on a network-attached
+// SQLite db.
+func (r *FileRepo) ListAllGroupedBySeries() (map[int64][]model.ComicFile, error) {
+	rows, err := r.read.Query(`
+		SELECT cf.id, cf.issue_id, cf.file_path, cf.file_name, cf.file_size, cf.file_hash,
+			cf.file_format, cf.page_count, cf.has_comicinfo, cf.cover_path, cf.parsed_series,
+			cf.parsed_number, cf.parsed_year, cf.match_confidence, cf.created_at, cf.updated_at,
+			i.series_id
+		FROM comic_files cf
+		JOIN issues i ON i.id = cf.issue_id
+		ORDER BY i.series_id, i.sort_number ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("listing all files grouped: %w", err)
+	}
+	defer rows.Close()
+
+	out := make(map[int64][]model.ComicFile)
+	for rows.Next() {
+		f := model.ComicFile{}
+		var createdAt, updatedAt string
+		var seriesID int64
+		if err := rows.Scan(
+			&f.ID, &f.IssueID, &f.FilePath, &f.FileName, &f.FileSize, &f.FileHash,
+			&f.FileFormat, &f.PageCount, &f.HasComicInfo, &f.CoverPath, &f.ParsedSeries,
+			&f.ParsedNumber, &f.ParsedYear, &f.MatchConfidence, &createdAt, &updatedAt,
+			&seriesID,
+		); err != nil {
+			return nil, err
+		}
+		f.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		f.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+		out[seriesID] = append(out[seriesID], f)
+	}
+	return out, rows.Err()
+}
+
 // ListBySeries returns all comic files for issues in the given series.
 func (r *FileRepo) ListBySeries(seriesID int64) ([]model.ComicFile, error) {
 	rows, err := r.read.Query(`
@@ -217,6 +256,19 @@ func (r *FileRepo) UpdateHasComicInfo(id int64, hasComicInfo bool) error {
 
 func (r *FileRepo) Delete(id int64) error {
 	_, err := r.write.Exec(`DELETE FROM comic_files WHERE id = ?`, id)
+	return err
+}
+
+// UpdateAfterConversion bundles the field updates needed when an archive has
+// been transcoded (e.g. CBR → CBZ): new path, name, format, size, hash, and
+// flips has_comicinfo to true.
+func (r *FileRepo) UpdateAfterConversion(id int64, filePath, fileName, fileFormat string, fileSize int64, hash string) error {
+	_, err := r.write.Exec(
+		`UPDATE comic_files
+		 SET file_path = ?, file_name = ?, file_format = ?, file_size = ?, file_hash = ?, has_comicinfo = 1, updated_at = ?
+		 WHERE id = ?`,
+		filePath, fileName, fileFormat, fileSize, hash, time.Now().UTC().Format(time.RFC3339), id,
+	)
 	return err
 }
 
@@ -315,6 +367,34 @@ func (r *FileRepo) FindDuplicatesByIssue() ([]DuplicateGroup, error) {
 }
 
 // ListUnhashed returns files with no file_hash.
+// ListOrphanFiles returns every comic_files row whose issue_id is NULL.
+// Caused by ON DELETE SET NULL firing on the issue FK during dedupe-issues
+// (or older imports that landed without an issue link). The reattach
+// maintenance pass uses this to find rows that need re-linking.
+func (r *FileRepo) ListOrphanFiles() ([]model.ComicFile, error) {
+	rows, err := r.read.Query(`
+		SELECT id, issue_id, file_path, file_name, file_size, file_hash,
+			file_format, page_count, has_comicinfo, cover_path, parsed_series,
+			parsed_number, parsed_year, match_confidence, created_at, updated_at
+		FROM comic_files
+		WHERE issue_id IS NULL
+		ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("listing orphan files: %w", err)
+	}
+	defer rows.Close()
+
+	var files []model.ComicFile
+	for rows.Next() {
+		f, err := scanComicFileRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, *f)
+	}
+	return files, nil
+}
+
 func (r *FileRepo) ListUnhashed() ([]model.ComicFile, error) {
 	rows, err := r.read.Query(`
 		SELECT id, issue_id, file_path, file_name, file_size, file_hash,

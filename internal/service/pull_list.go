@@ -137,12 +137,12 @@ func (s *PullListService) RunWeeklySearch(
 			continue
 		}
 
-		if grabbed != nil {
+		if grabbed != nil && grabbed.Item != nil {
 			result.Grabbed++
 			result.ResultsFound++
 			slog.Info("auto-grabbed issue",
 				"label", target.label,
-				"nzb", grabbed.NZBName,
+				"nzb", grabbed.Item.NZBName,
 			)
 		} else {
 			result.Skipped++
@@ -201,7 +201,7 @@ func (s *PullListService) SearchMissing(
 
 	// Step 3: Search concurrently with 3 workers
 	type workerResult struct {
-		grabbed *model.DownloadHistoryItem
+		grabbed *GrabOutcome
 		label   string
 		issueID int64
 		err     error
@@ -263,12 +263,12 @@ func (s *PullListService) SearchMissing(
 			continue
 		}
 
-		if r.grabbed != nil {
+		if r.grabbed != nil && r.grabbed.Item != nil {
 			result.Grabbed++
 			result.ResultsFound++
 			slog.Info("auto-grabbed missing issue",
 				"label", r.label,
-				"nzb", r.grabbed.NZBName,
+				"nzb", r.grabbed.Item.NZBName,
 			)
 		} else {
 			result.Skipped++

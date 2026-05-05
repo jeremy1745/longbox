@@ -1,9 +1,12 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/jeremy/longbox/internal/model"
 	"github.com/jeremy/longbox/internal/repository"
@@ -68,6 +71,12 @@ func (h *CalendarHandler) Upcoming(w http.ResponseWriter, r *http.Request) {
 // Releases fetches ALL comics releasing in a date range from ComicVine,
 // cross-referenced with local ownership and tracking data.
 // Query params: start (YYYY-MM-DD), end (YYYY-MM-DD)
+//
+// Bounded by a 30s request timeout so the handler can't pin the calling
+// page on "Loading…" forever — when a library scan is holding the CV
+// rate limiter, this used to wait for the full hourly reset window
+// before returning. Now it returns 504 with a clear message and the
+// frontend renders an inline error instead of a permanent spinner.
 func (h *CalendarHandler) Releases(w http.ResponseWriter, r *http.Request) {
 	start := r.URL.Query().Get("start")
 	end := r.URL.Query().Get("end")
@@ -77,8 +86,16 @@ func (h *CalendarHandler) Releases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	releases, debug, err := h.metaSvc.GetWeeklyReleases(start, end)
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	releases, debug, err := h.metaSvc.GetWeeklyReleases(ctx, start, end)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			writeError(w, http.StatusGatewayTimeout, "RELEASES_TIMEOUT",
+				"upstream release feed didn't respond in time — a library scan or CV rate-limit is in flight; try again in a minute")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "RELEASES_FAILED", err.Error())
 		return
 	}

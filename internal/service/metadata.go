@@ -2,22 +2,26 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jeremy/longbox/internal/comicvine"
+	"github.com/jeremy/longbox/internal/metron"
 	"github.com/jeremy/longbox/internal/model"
 	"github.com/jeremy/longbox/internal/repository"
 	"github.com/jeremy/longbox/internal/scanner"
 	"github.com/jeremy/longbox/internal/walksoftly"
 )
 
-// MetadataService handles ComicVine metadata operations.
+// MetadataService handles ComicVine and Metron metadata operations.
 type MetadataService struct {
 	cv               *comicvine.Client
+	metron           *metron.Client
 	ws               *walksoftly.Client
 	seriesRepo       *repository.SeriesRepo
 	issueRepo        *repository.IssueRepo
@@ -34,6 +38,7 @@ type MetadataService struct {
 
 func NewMetadataService(
 	cv *comicvine.Client,
+	metronClient *metron.Client,
 	ws *walksoftly.Client,
 	seriesRepo *repository.SeriesRepo,
 	issueRepo *repository.IssueRepo,
@@ -45,6 +50,7 @@ func NewMetadataService(
 ) *MetadataService {
 	return &MetadataService{
 		cv:               cv,
+		metron:           metronClient,
 		ws:               ws,
 		seriesRepo:       seriesRepo,
 		issueRepo:        issueRepo,
@@ -55,6 +61,82 @@ func NewMetadataService(
 		configLibraryDir: configLibraryDir,
 		publisherCache:   make(map[int]string),
 	}
+}
+
+// EnsureMetronCredentials loads Metron username + token from settings if
+// configured. Safe to call repeatedly.
+func (s *MetadataService) EnsureMetronCredentials() error {
+	if s.metron == nil {
+		return nil
+	}
+	user, _ := s.settingRepo.Get("metron_username")
+	token, _ := s.settingRepo.Get("metron_api_token")
+	s.metron.SetCredentials(user, token)
+	return nil
+}
+
+// HasMetronCredentials reports whether the Metron client is configured.
+func (s *MetadataService) HasMetronCredentials() bool {
+	return s.metron != nil && s.metron.HasCredentials()
+}
+
+// SetMetronCredentials persists username + token to settings and pushes them
+// onto the live client so the next request uses them.
+func (s *MetadataService) SetMetronCredentials(username, token string) error {
+	if err := s.settingRepo.Set("metron_username", username); err != nil {
+		return fmt.Errorf("saving metron username: %w", err)
+	}
+	if err := s.settingRepo.Set("metron_api_token", token); err != nil {
+		return fmt.Errorf("saving metron token: %w", err)
+	}
+	if s.metron != nil {
+		s.metron.SetCredentials(username, token)
+	}
+	return nil
+}
+
+// MetronUsername returns the configured Metron username (not secret).
+func (s *MetadataService) MetronUsername() string {
+	v, _ := s.settingRepo.Get("metron_username")
+	return v
+}
+
+// MetronTokenMasked returns "••••••" if a token is configured, empty otherwise.
+func (s *MetadataService) MetronTokenMasked() string {
+	v, _ := s.settingRepo.Get("metron_api_token")
+	if v == "" {
+		return ""
+	}
+	return "••••••"
+}
+
+// MetronTokenSet reports whether a Metron API token is currently saved.
+func (s *MetadataService) MetronTokenSet() bool {
+	v, _ := s.settingRepo.Get("metron_api_token")
+	return v != ""
+}
+
+// MetronQuota returns the most recent rate-limit snapshot from Metron.
+func (s *MetadataService) MetronQuota() metron.QuotaSnapshot {
+	if s.metron == nil {
+		return metron.QuotaSnapshot{}
+	}
+	return s.metron.Quota()
+}
+
+// TestMetron makes a tiny Metron call (1-result series list) to verify that
+// the configured credentials work. Returns the X-RateLimit observations as
+// a side-effect (visible via MetronQuota afterwards).
+func (s *MetadataService) TestMetron(ctx context.Context) error {
+	if s.metron == nil || !s.metron.HasCredentials() {
+		return fmt.Errorf("Metron credentials not configured")
+	}
+	params := url.Values{}
+	params.Set("page_size", "1")
+	if _, err := s.metron.SearchSeries(ctx, params); err != nil {
+		return err
+	}
+	return nil
 }
 
 // EnsureAPIKey loads the API key from settings (priority) or config.
@@ -127,17 +209,23 @@ func (s *MetadataService) HourlyRemaining() int {
 	return s.cv.HourlyRemaining()
 }
 
+// CVNextResetIn returns the duration until the ComicVine hourly quota window
+// resets. Useful for surfacing wait ETAs to the user.
+func (s *MetadataService) CVNextResetIn() time.Duration {
+	return s.cv.NextResetIn()
+}
+
 // SearchResult wraps ComicVine search results with match scoring.
 type MetadataSearchResult struct {
-	ComicVineID   int    `json:"comicvine_id"`
-	Name          string `json:"name"`
-	StartYear     string `json:"start_year"`
-	IssueCount    int    `json:"issue_count"`
-	Publisher     string `json:"publisher"`
-	Description   string `json:"description"`
-	ImageURL      string `json:"image_url"`
-	ResourceType  string `json:"resource_type"`
-	MatchScore    int    `json:"match_score"`
+	ComicVineID  int    `json:"comicvine_id"`
+	Name         string `json:"name"`
+	StartYear    string `json:"start_year"`
+	IssueCount   int    `json:"issue_count"`
+	Publisher    string `json:"publisher"`
+	Description  string `json:"description"`
+	ImageURL     string `json:"image_url"`
+	ResourceType string `json:"resource_type"`
+	MatchScore   int    `json:"match_score"`
 }
 
 // SearchVolumes searches ComicVine for volumes matching a query.
@@ -146,7 +234,7 @@ func (s *MetadataService) SearchVolumes(query string, page int) ([]MetadataSearc
 		return nil, 0, fmt.Errorf("ComicVine API key not configured")
 	}
 
-	results, total, err := s.cv.SearchVolumes(query, page)
+	results, total, err := s.cv.SearchVolumes(context.Background(), query, page)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -186,7 +274,91 @@ func (s *MetadataService) GetVolume(cvID int) (*comicvine.Volume, error) {
 	if !s.cv.HasAPIKey() {
 		return nil, fmt.Errorf("ComicVine API key not configured")
 	}
-	return s.cv.GetVolume(cvID)
+	return s.cv.GetVolume(context.Background(), cvID)
+}
+
+// BackfillSeriesCoverURL fetches just the cover URL for a series and persists
+// it. Cheaper than RefreshSeriesAuto — does not touch issues. CV is preferred
+// (one volume call carries the URL); Metron is used when CV is unavailable
+// (Metron series detail doesn't expose a cover, so this falls through to the
+// first issue's cover when needed). Returns an error if no provider is
+// configured or matched, or if the chosen provider call fails.
+func (s *MetadataService) BackfillSeriesCoverURL(ctx context.Context, seriesID int64) error {
+	series, err := s.seriesRepo.GetByID(seriesID)
+	if err != nil {
+		return fmt.Errorf("getting series: %w", err)
+	}
+	if series == nil {
+		return fmt.Errorf("series %d not found", seriesID)
+	}
+
+	hasCV := series.ComicVineID != nil && s.cv.HasAPIKey()
+	hasMetron := series.MetronID != nil && s.HasMetronCredentials()
+	if !hasCV && !hasMetron {
+		return fmt.Errorf("series is not matched to any metadata provider")
+	}
+
+	tryCV := func() (string, error) {
+		volume, err := s.cv.GetVolume(ctx, int(*series.ComicVineID))
+		if err != nil {
+			return "", err
+		}
+		if volume.Image == nil {
+			return "", nil
+		}
+		return bestImageURL(volume.Image), nil
+	}
+
+	tryMetron := func() (string, error) {
+		// Cover-only: hit the first page of /issue/?series_id=X ordered by
+		// cover_date and grab the first issue's Image. Single HTTP call vs
+		// the full pagination GetSeriesIssues does — saves up to ~10s of
+		// minInterval-spaced calls per series and dramatically reduces the
+		// daily 5000-call sustained Metron quota burn during a poster
+		// refresh of hundreds of series.
+		params := url.Values{}
+		params.Set("series_id", fmt.Sprintf("%d", *series.MetronID))
+		params.Set("ordering", "cover_date")
+		resp, err := s.metron.SearchIssues(ctx, params)
+		if err != nil {
+			return "", err
+		}
+		for _, mi := range resp.Results {
+			if mi.Image != "" {
+				return mi.Image, nil
+			}
+		}
+		return "", nil
+	}
+
+	var url string
+	if hasCV {
+		u, cvErr := tryCV()
+		if cvErr == nil {
+			url = u
+		} else if hasMetron {
+			slog.Warn("backfill cover via CV failed; trying Metron",
+				"series_id", seriesID, "error", cvErr)
+			mu, mErr := tryMetron()
+			if mErr != nil {
+				return mErr
+			}
+			url = mu
+		} else {
+			return cvErr
+		}
+	} else if hasMetron {
+		u, err := tryMetron()
+		if err != nil {
+			return err
+		}
+		url = u
+	}
+
+	if url == "" {
+		return fmt.Errorf("provider returned no cover image")
+	}
+	return s.seriesRepo.SetSeriesCoverImageURL(seriesID, url)
 }
 
 // VolumeIssuePreview is a lightweight issue representation for browse previews.
@@ -206,7 +378,7 @@ func (s *MetadataService) GetVolumeIssuesPreview(cvVolumeID int) ([]VolumeIssueP
 		return nil, fmt.Errorf("ComicVine API key not configured")
 	}
 
-	cvIssues, err := s.cv.GetVolumeIssues(cvVolumeID)
+	cvIssues, err := s.cv.GetVolumeIssues(context.Background(), cvVolumeID)
 	if err != nil {
 		return nil, fmt.Errorf("fetching volume issues: %w", err)
 	}
@@ -235,8 +407,373 @@ func (s *MetadataService) GetVolumeIssuesPreview(cvVolumeID int) ([]VolumeIssueP
 	return out, nil
 }
 
+// MetronMatchConflictError is returned by MatchSeriesToMetronVolume when
+// another local series row already owns the requested Metron series ID.
+type MetronMatchConflictError struct {
+	RequestedSeriesID int64
+	ConflictingSeries *model.Series
+	MetronID          int64
+}
+
+func (e *MetronMatchConflictError) Error() string {
+	title := ""
+	if e.ConflictingSeries != nil {
+		title = e.ConflictingSeries.Title
+	}
+	return fmt.Sprintf("Metron series %d is already matched to local series %q (id=%d)",
+		e.MetronID, title, e.conflictingID())
+}
+
+func (e *MetronMatchConflictError) conflictingID() int64 {
+	if e.ConflictingSeries == nil {
+		return 0
+	}
+	return e.ConflictingSeries.ID
+}
+
+// MatchSeriesToMetronVolume binds a local series to a Metron series and
+// applies the metadata. If Metron carries a cv_id we also cross-link the
+// ComicVine ID, so subsequent ops can pick whichever provider has quota.
+func (s *MetadataService) MatchSeriesToMetronVolume(ctx context.Context, seriesID int64, metronSeriesID int) error {
+	if !s.HasMetronCredentials() {
+		return fmt.Errorf("Metron credentials not configured")
+	}
+
+	series, err := s.seriesRepo.GetByID(seriesID)
+	if err != nil {
+		return fmt.Errorf("getting series: %w", err)
+	}
+	if series == nil {
+		return fmt.Errorf("series %d not found", seriesID)
+	}
+	if series.MetadataLocked {
+		return fmt.Errorf("series metadata is locked")
+	}
+
+	if existing, err := s.seriesRepo.FindByMetronID(int64(metronSeriesID)); err == nil && existing != nil && existing.ID != seriesID {
+		return &MetronMatchConflictError{
+			RequestedSeriesID: seriesID,
+			ConflictingSeries: existing,
+			MetronID:          int64(metronSeriesID),
+		}
+	}
+
+	mSeries, lastModified, err := s.metron.GetSeriesIfModified(ctx, metronSeriesID, time.Time{})
+	if err != nil {
+		return fmt.Errorf("fetching Metron series: %w", err)
+	}
+	defer func() {
+		if lastModified != "" {
+			if err := s.seriesRepo.SetMetronModifiedAt(seriesID, lastModified); err != nil {
+				slog.Debug("failed to save metron Last-Modified", "series_id", seriesID, "error", err)
+			}
+		}
+	}()
+
+	// Publisher: reuse the existing publishers table; tag with cv_id when
+	// possible (Metron doesn't expose CV publisher IDs directly).
+	var publisherID *int64
+	if mSeries.Publisher.Name != "" {
+		pub, err := s.publisherRepo.FindOrCreateByName(mSeries.Publisher.Name, nil)
+		if err == nil && pub != nil {
+			publisherID = &pub.ID
+		}
+	}
+
+	mid := int64(mSeries.ID)
+	series.MetronID = &mid
+	if mSeries.CVID != nil {
+		cv := int64(*mSeries.CVID)
+		series.ComicVineID = &cv
+	}
+	series.Title = mSeries.Name
+	series.SortTitle = scanner.MakeSortTitle(mSeries.Name)
+	series.PublisherID = publisherID
+	series.Description = mSeries.Description
+	if mSeries.YearBegan > 0 {
+		y := mSeries.YearBegan
+		series.Year = &y
+	}
+	series.TotalIssues = mSeries.IssueCount
+	series.Status = strings.ToLower(mSeries.Status)
+	if series.Status == "" {
+		series.Status = "continuing"
+	}
+
+	if err := s.seriesRepo.UpdateFromMetronMetadata(series); err != nil {
+		return fmt.Errorf("updating series: %w", err)
+	}
+
+	slog.Info("matched series to Metron",
+		"series_id", seriesID,
+		"metron_id", metronSeriesID,
+		"title", mSeries.Name,
+		"cross_cv", series.ComicVineID,
+	)
+
+	if err := s.populateIssuesFromMetronSeries(ctx, series); err != nil {
+		slog.Warn("failed to populate issues from Metron", "error", err)
+	}
+	return nil
+}
+
+// populateIssuesFromMetronSeries walks every Metron issue for the series and
+// upserts local issue rows. Matches existing rows first by metron_id, then by
+// comicvine_id (if Metron supplies one), then by issue_number.
+func (s *MetadataService) populateIssuesFromMetronSeries(ctx context.Context, series *model.Series) error {
+	if series.MetronID == nil {
+		return fmt.Errorf("series has no metron_id")
+	}
+	mIssues, err := s.metron.GetSeriesIssues(ctx, int(*series.MetronID))
+	if err != nil {
+		return fmt.Errorf("fetching Metron issues: %w", err)
+	}
+
+	// Use the first issue with an image as the series cover when no cover
+	// URL has been captured yet — Metron series detail doesn't carry one.
+	if series.CoverImageURL == "" {
+		for _, mi := range mIssues {
+			if mi.Image != "" {
+				if err := s.seriesRepo.SetSeriesCoverImageURL(series.ID, mi.Image); err != nil {
+					slog.Debug("failed to set series cover from metron issue", "series_id", series.ID, "error", err)
+				} else {
+					series.CoverImageURL = mi.Image
+				}
+				break
+			}
+		}
+	}
+
+	for _, mi := range mIssues {
+		// Hydrate from list; for credits / desc we'd need the detail endpoint.
+		// Detail fetches are deferred — would burn quota per issue.
+		issue := &model.Issue{
+			SeriesID:    series.ID,
+			IssueNumber: mi.Number,
+			SortNumber:  scanner.SortNumber(mi.Number),
+			Title:       strings.TrimSpace(mi.IssueName),
+			CoverDate:   mi.CoverDate,
+			StoreDate:   mi.StoreDate,
+			CoverURL:    mi.Image,
+			ReadStatus:  "unread",
+		}
+		mid := int64(mi.ID)
+		issue.MetronID = &mid
+
+		var existing *model.Issue
+		if found, _ := s.issueRepo.FindByMetronID(mid); found != nil {
+			existing = found
+		}
+		if existing == nil {
+			if found, _ := s.issueRepo.FindBySeriesAndNumber(series.ID, mi.Number); found != nil {
+				existing = found
+			}
+		}
+		if existing != nil {
+			issue.ID = existing.ID
+			issue.ReadStatus = existing.ReadStatus
+			issue.SkipStatus = existing.SkipStatus
+			issue.Writers = existing.Writers
+			issue.Artists = existing.Artists
+			if existing.ComicVineID != nil {
+				issue.ComicVineID = existing.ComicVineID
+			}
+			if err := s.issueRepo.UpdateFromMetronMetadata(issue); err != nil {
+				slog.Warn("failed to update Metron issue", "issue_id", existing.ID, "error", err)
+			}
+			continue
+		}
+		if err := s.issueRepo.Create(issue); err != nil {
+			slog.Warn("failed to create Metron issue", "series_id", series.ID, "number", mi.Number, "error", err)
+			continue
+		}
+		// After Create the row exists with NULL metron_id (Create's INSERT
+		// doesn't include metron_id); patch it on.
+		if err := s.issueRepo.SetMetronID(issue.ID, &mid); err != nil {
+			slog.Warn("failed to set metron_id on new issue", "issue_id", issue.ID, "error", err)
+		}
+	}
+	return nil
+}
+
+// RefreshSeriesFromMetron re-runs the Metron match using the existing
+// metron_id, picking up new issues / metadata changes. Uses If-Modified-Since
+// against Metron's saved Last-Modified for the series — if the resource is
+// unchanged Metron returns 304 (no quota cost) and we early-return.
+func (s *MetadataService) RefreshSeriesFromMetron(ctx context.Context, seriesID int64) error {
+	series, err := s.seriesRepo.GetByID(seriesID)
+	if err != nil {
+		return fmt.Errorf("getting series: %w", err)
+	}
+	if series == nil {
+		return fmt.Errorf("series %d not found", seriesID)
+	}
+	if series.MetronID == nil {
+		return fmt.Errorf("series is not matched to Metron")
+	}
+
+	var ifMod time.Time
+	if cached, _ := s.seriesRepo.GetMetronModifiedAt(seriesID); cached != "" {
+		if t, err := time.Parse(time.RFC1123, cached); err == nil {
+			ifMod = t
+		}
+	}
+
+	mSeries, lastModified, err := s.metron.GetSeriesIfModified(ctx, int(*series.MetronID), ifMod)
+	if err != nil {
+		if errors.Is(err, metron.ErrNotModified) {
+			slog.Debug("metron series unchanged since last refresh — skipping (no quota cost)",
+				"series_id", seriesID)
+			return nil
+		}
+		return fmt.Errorf("fetching Metron series: %w", err)
+	}
+
+	// Apply metadata + issues, same path as the initial match.
+	if err := s.applyMetronSeries(ctx, series, mSeries); err != nil {
+		return err
+	}
+	if lastModified != "" {
+		if err := s.seriesRepo.SetMetronModifiedAt(seriesID, lastModified); err != nil {
+			slog.Debug("failed to save metron Last-Modified", "series_id", seriesID, "error", err)
+		}
+	}
+	return nil
+}
+
+// applyMetronSeries is the body extracted from MatchSeriesToMetronVolume so
+// RefreshSeriesFromMetron can reuse it with a pre-fetched Series payload (the
+// conditional-GET path doesn't want to re-fetch).
+func (s *MetadataService) applyMetronSeries(ctx context.Context, series *model.Series, mSeries *metron.Series) error {
+	var publisherID *int64
+	if mSeries.Publisher.Name != "" {
+		pub, err := s.publisherRepo.FindOrCreateByName(mSeries.Publisher.Name, nil)
+		if err == nil && pub != nil {
+			publisherID = &pub.ID
+		}
+	}
+
+	mid := int64(mSeries.ID)
+	series.MetronID = &mid
+	if mSeries.CVID != nil {
+		cv := int64(*mSeries.CVID)
+		series.ComicVineID = &cv
+	}
+	series.Title = mSeries.Name
+	series.SortTitle = scanner.MakeSortTitle(mSeries.Name)
+	series.PublisherID = publisherID
+	series.Description = mSeries.Description
+	if mSeries.YearBegan > 0 {
+		y := mSeries.YearBegan
+		series.Year = &y
+	}
+	series.TotalIssues = mSeries.IssueCount
+	series.Status = strings.ToLower(mSeries.Status)
+	if series.Status == "" {
+		series.Status = "continuing"
+	}
+
+	if err := s.seriesRepo.UpdateFromMetronMetadata(series); err != nil {
+		return fmt.Errorf("updating series: %w", err)
+	}
+	if err := s.populateIssuesFromMetronSeries(ctx, series); err != nil {
+		slog.Warn("failed to populate issues from Metron", "error", err)
+	}
+	return nil
+}
+
+// CrossLinkSeriesToMetron looks up the Metron equivalent of an already-CV-matched
+// series via Metron's ?cv_id= filter. Stores the metron_id without touching
+// other fields. Best-effort — silently no-ops if no Metron mapping exists.
+func (s *MetadataService) CrossLinkSeriesToMetron(ctx context.Context, seriesID int64) error {
+	if !s.HasMetronCredentials() {
+		return nil
+	}
+	series, err := s.seriesRepo.GetByID(seriesID)
+	if err != nil || series == nil || series.ComicVineID == nil || series.MetronID != nil {
+		return nil
+	}
+	hit, err := s.metron.SeriesByCVID(ctx, int(*series.ComicVineID))
+	if err != nil || hit == nil {
+		return nil
+	}
+	mid := int64(hit.ID)
+	if err := s.seriesRepo.SetMetronID(seriesID, &mid); err != nil {
+		slog.Warn("cross-link metron_id failed", "series_id", seriesID, "error", err)
+		return err
+	}
+	slog.Info("cross-linked series to Metron via cv_id",
+		"series_id", seriesID, "cv_id", *series.ComicVineID, "metron_id", mid)
+	return nil
+}
+
+// SearchMetronSeries searches the Metron API for a series matching the query.
+// Mirrors the shape the UI already consumes for ComicVine results.
+type MetronSearchResult struct {
+	MetronID    int    `json:"metron_id"`
+	Name        string `json:"name"`
+	YearBegan   int    `json:"year_began"`
+	IssueCount  int    `json:"issue_count"`
+	Volume      int    `json:"volume"`
+	DisplayName string `json:"display_name"`
+}
+
+// SearchMetron returns search results from the Metron series endpoint.
+func (s *MetadataService) SearchMetron(ctx context.Context, query string, page int) ([]MetronSearchResult, int, error) {
+	if !s.HasMetronCredentials() {
+		return nil, 0, fmt.Errorf("Metron credentials not configured")
+	}
+	if page < 1 {
+		page = 1
+	}
+	params := url.Values{}
+	params.Set("name", query)
+	params.Set("page", strconv.Itoa(page))
+	resp, err := s.metron.SearchSeries(ctx, params)
+	if err != nil {
+		return nil, 0, err
+	}
+	out := make([]MetronSearchResult, 0, len(resp.Results))
+	for _, r := range resp.Results {
+		out = append(out, MetronSearchResult{
+			MetronID:    r.ID,
+			Name:        r.Display,
+			DisplayName: r.Display,
+			YearBegan:   r.YearBegan,
+			IssueCount:  r.IssueCount,
+			Volume:      r.Volume,
+		})
+	}
+	return out, resp.Count, nil
+}
+
+// CVMatchConflictError is returned by MatchSeriesToVolume when another local
+// series row already owns the requested ComicVine volume ID. Lets the caller
+// surface a merge-or-unmatch flow instead of leaking a UNIQUE constraint
+// failure to the user.
+type CVMatchConflictError struct {
+	RequestedSeriesID int64
+	ConflictingSeries *model.Series
+	ComicVineID       int
+}
+
+func (e *CVMatchConflictError) Error() string {
+	title := ""
+	if e.ConflictingSeries != nil {
+		title = e.ConflictingSeries.Title
+	}
+	return fmt.Sprintf("ComicVine volume %d is already matched to series %q (id=%d)", e.ComicVineID, title, e.conflictingID())
+}
+
+func (e *CVMatchConflictError) conflictingID() int64 {
+	if e.ConflictingSeries == nil {
+		return 0
+	}
+	return e.ConflictingSeries.ID
+}
+
 // MatchSeriesToVolume matches a local series to a ComicVine volume and applies metadata.
-func (s *MetadataService) MatchSeriesToVolume(seriesID int64, cvVolumeID int) error {
+func (s *MetadataService) MatchSeriesToVolume(ctx context.Context, seriesID int64, cvVolumeID int) error {
 	if !s.cv.HasAPIKey() {
 		return fmt.Errorf("ComicVine API key not configured")
 	}
@@ -253,8 +790,19 @@ func (s *MetadataService) MatchSeriesToVolume(seriesID int64, cvVolumeID int) er
 		return fmt.Errorf("series metadata is locked")
 	}
 
+	// If another local series row already owns this CV ID, surface a typed
+	// conflict so callers can offer a merge instead of failing on the UNIQUE
+	// constraint at UPDATE time.
+	if existing, err := s.seriesRepo.FindByComicVineID(int64(cvVolumeID)); err == nil && existing != nil && existing.ID != seriesID {
+		return &CVMatchConflictError{
+			RequestedSeriesID: seriesID,
+			ConflictingSeries: existing,
+			ComicVineID:       cvVolumeID,
+		}
+	}
+
 	// Fetch volume from ComicVine
-	volume, err := s.cv.GetVolume(cvVolumeID)
+	volume, err := s.cv.GetVolume(ctx, cvVolumeID)
 	if err != nil {
 		return fmt.Errorf("fetching volume from ComicVine: %w", err)
 	}
@@ -283,6 +831,9 @@ func (s *MetadataService) MatchSeriesToVolume(seriesID int64, cvVolumeID int) er
 	series.PublisherID = publisherID
 	series.Description = comicvine.StripHTML(volume.Description)
 	series.TotalIssues = volume.CountOfIssues
+	if volume.Image != nil {
+		series.CoverImageURL = bestImageURL(volume.Image)
+	}
 
 	if volume.StartYear != "" {
 		var year int
@@ -306,8 +857,18 @@ func (s *MetadataService) MatchSeriesToVolume(seriesID int64, cvVolumeID int) er
 	)
 
 	// Now fetch all issues for this volume and populate missing issues
-	if err := s.populateIssuesFromVolume(series, volume); err != nil {
+	if err := s.populateIssuesFromVolume(ctx, series, volume); err != nil {
 		slog.Warn("failed to populate issues from volume", "error", err)
+	}
+
+	// Best-effort cross-link to Metron via ?cv_id= so future ops can route
+	// to whichever provider has quota left. Failure is silent.
+	if s.HasMetronCredentials() {
+		go func(sID int64) {
+			bg, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			_ = s.CrossLinkSeriesToMetron(bg, sID)
+		}(seriesID)
 	}
 
 	return nil
@@ -315,9 +876,9 @@ func (s *MetadataService) MatchSeriesToVolume(seriesID int64, cvVolumeID int) er
 
 // populateIssuesFromVolume creates issue records for any issues from the
 // ComicVine volume that don't exist locally yet, and updates existing ones.
-func (s *MetadataService) populateIssuesFromVolume(series *model.Series, volume *comicvine.Volume) error {
+func (s *MetadataService) populateIssuesFromVolume(ctx context.Context, series *model.Series, volume *comicvine.Volume) error {
 	// Get all issues from ComicVine for this volume
-	cvIssues, err := s.cv.GetVolumeIssues(volume.ID)
+	cvIssues, err := s.cv.GetVolumeIssues(ctx, volume.ID)
 	if err != nil {
 		return fmt.Errorf("fetching volume issues: %w", err)
 	}
@@ -331,9 +892,14 @@ func (s *MetadataService) populateIssuesFromVolume(series *model.Series, volume 
 	updated := 0
 
 	for _, cvIssue := range cvIssues {
-		issueNumber := cvIssue.IssueNumber
+		issueNumber := strings.TrimSpace(cvIssue.IssueNumber)
 		if issueNumber == "" {
-			continue
+			issueNumber = fmt.Sprintf("CV-%d", cvIssue.ID)
+			slog.Warn("comicvine issue missing number; using fallback",
+				"series_id", series.ID,
+				"cv_issue_id", cvIssue.ID,
+				"fallback", issueNumber,
+			)
 		}
 
 		// Build writers and artists strings
@@ -417,8 +983,161 @@ func (s *MetadataService) populateIssuesFromVolume(series *model.Series, volume 
 	return nil
 }
 
+func (s *MetadataService) ensureIssueFromComicVine(seriesID int64, cvIssueID int) error {
+	if !s.cv.HasAPIKey() {
+		return fmt.Errorf("ComicVine API key not configured")
+	}
+
+	cvIssue, err := s.cv.GetIssue(context.Background(), cvIssueID)
+	if err != nil {
+		return fmt.Errorf("fetching issue from ComicVine: %w", err)
+	}
+
+	issueNumber := strings.TrimSpace(cvIssue.IssueNumber)
+	if issueNumber == "" {
+		issueNumber = fmt.Sprintf("CV-%d", cvIssue.ID)
+		slog.Warn("comicvine issue missing number; using fallback",
+			"series_id", seriesID,
+			"cv_issue_id", cvIssue.ID,
+			"fallback", issueNumber,
+		)
+	}
+
+	var writers, artists []string
+	for _, pc := range cvIssue.PersonCredits {
+		role := strings.ToLower(pc.Role)
+		if strings.Contains(role, "writer") {
+			writers = append(writers, pc.Name)
+		}
+		if strings.Contains(role, "artist") || strings.Contains(role, "pencil") ||
+			strings.Contains(role, "ink") || strings.Contains(role, "cover") {
+			artists = append(artists, pc.Name)
+		}
+	}
+
+	coverURL := ""
+	if cvIssue.Image != nil {
+		coverURL = cvIssue.Image.SmallURL
+	}
+
+	desc := comicvine.StripHTML(cvIssue.Description)
+	if len(desc) > 300 {
+		desc = desc[:300] + "..."
+	}
+
+	cvID := int64(cvIssue.ID)
+	issue := &model.Issue{
+		SeriesID:    seriesID,
+		IssueNumber: issueNumber,
+		SortNumber:  scanner.SortNumber(issueNumber),
+		Title:       cvIssue.Name,
+		ComicVineID: &cvID,
+		Description: desc,
+		CoverDate:   cvIssue.CoverDate,
+		StoreDate:   cvIssue.StoreDate,
+		CoverURL:    coverURL,
+		Writers:     strings.Join(writers, ", "),
+		Artists:     strings.Join(artists, ", "),
+		ReadStatus:  "unread",
+	}
+
+	if err := s.issueRepo.Create(issue); err != nil {
+		return fmt.Errorf("creating issue from ComicVine: %w", err)
+	}
+
+	return nil
+}
+
+// RefreshSeriesAuto picks the best metadata provider for a series and refreshes
+// from it. Decision tree:
+//   - If only one provider is matched, use that one.
+//   - If both are matched, prefer whichever has more remaining quota
+//     (Metron's burst counter vs CV's hourly counter, normalized).
+//   - If neither is matched, return an error.
+//
+// Quota-aware fallback: if the chosen provider returns a quota / 429 / context
+// error, automatically retry against the other provider when that one is
+// matched too. Errors from the alternate provider are returned verbatim.
+func (s *MetadataService) RefreshSeriesAuto(ctx context.Context, seriesID int64) error {
+	series, err := s.seriesRepo.GetByID(seriesID)
+	if err != nil {
+		return fmt.Errorf("getting series: %w", err)
+	}
+	if series == nil {
+		return fmt.Errorf("series %d not found", seriesID)
+	}
+	hasCV := series.ComicVineID != nil
+	hasMetron := series.MetronID != nil && s.HasMetronCredentials()
+
+	if !hasCV && !hasMetron {
+		return fmt.Errorf("series is not matched to any metadata provider")
+	}
+
+	primary, fallback := s.pickProvider(hasCV, hasMetron)
+
+	if err := s.refreshVia(ctx, seriesID, primary); err != nil {
+		// Honor cancel
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		if fallback != "" && fallback != primary {
+			slog.Warn("primary provider failed, falling back",
+				"series_id", seriesID, "primary", primary, "fallback", fallback, "error", err)
+			return s.refreshVia(ctx, seriesID, fallback)
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *MetadataService) refreshVia(ctx context.Context, seriesID int64, provider string) error {
+	switch provider {
+	case "metron":
+		return s.RefreshSeriesFromMetron(ctx, seriesID)
+	case "comicvine":
+		return s.RefreshSeriesMetadata(ctx, seriesID)
+	}
+	return fmt.Errorf("unknown provider %q", provider)
+}
+
+// pickProvider returns (primary, fallback). Picks Metron when CV is exhausted
+// or both are configured and Metron has more headroom. Empty fallback means
+// no alternative is matched.
+func (s *MetadataService) pickProvider(hasCV, hasMetron bool) (string, string) {
+	switch {
+	case hasCV && !hasMetron:
+		return "comicvine", ""
+	case hasMetron && !hasCV:
+		return "metron", ""
+	case hasCV && hasMetron:
+		cvLeft := s.cv.HourlyRemaining()
+		mq := s.metron.Quota()
+		// CV: 200/hr, Metron: 5000/day burst-gated by 20/min. Normalize as
+		// "calls available right now": CV uses HourlyRemaining as-is, Metron
+		// uses min(burst, sustained). When CV is at 0 we always prefer Metron;
+		// when Metron is at 0 we prefer CV.
+		mLeft := mq.SustainedRemaining
+		if mq.BurstRemaining > 0 && mq.BurstRemaining < mLeft {
+			mLeft = mq.BurstRemaining
+		}
+		if cvLeft <= 0 && mLeft > 0 {
+			return "metron", "comicvine"
+		}
+		if mLeft <= 0 && cvLeft > 0 {
+			return "comicvine", "metron"
+		}
+		// Both have headroom. Prefer Metron for its larger ceiling and
+		// per-minute window — CV is cheaper to recover but easier to drain.
+		if mLeft >= cvLeft {
+			return "metron", "comicvine"
+		}
+		return "comicvine", "metron"
+	}
+	return "", ""
+}
+
 // RefreshSeriesMetadata re-fetches metadata for a series that's already matched.
-func (s *MetadataService) RefreshSeriesMetadata(seriesID int64) error {
+func (s *MetadataService) RefreshSeriesMetadata(ctx context.Context, seriesID int64) error {
 	series, err := s.seriesRepo.GetByID(seriesID)
 	if err != nil {
 		return fmt.Errorf("getting series: %w", err)
@@ -430,7 +1149,7 @@ func (s *MetadataService) RefreshSeriesMetadata(seriesID int64) error {
 		return fmt.Errorf("series is not matched to ComicVine")
 	}
 
-	return s.MatchSeriesToVolume(seriesID, int(*series.ComicVineID))
+	return s.MatchSeriesToVolume(ctx, seriesID, int(*series.ComicVineID))
 }
 
 // RefreshTrackedSeries re-fetches metadata from ComicVine for all tracked series.
@@ -459,8 +1178,20 @@ func (s *MetadataService) RefreshTrackedSeries(
 		default:
 		}
 
-		if progress != nil {
-			progress(i, total, fmt.Sprintf("Refreshing %s", series.Title))
+		// If the hourly CV quota is exhausted, surface that explicitly so
+		// the user sees in the Jobs UI that we're waiting (not stuck), and
+		// can hit Cancel to abort. The next CV call will block in the
+		// limiter — interruptible — until the window resets.
+		if remaining := s.cv.HourlyRemaining(); remaining == 0 {
+			eta := s.cv.NextResetIn().Round(time.Minute)
+			if eta < time.Minute {
+				eta = time.Minute
+			}
+			if progress != nil {
+				progress(i, total, fmt.Sprintf("ComicVine quota exhausted — waiting %s for reset", eta))
+			}
+		} else if progress != nil {
+			progress(i, total, fmt.Sprintf("Refreshing %s (CV quota: %d remaining)", series.Title, remaining))
 		}
 
 		if series.ComicVineID == nil {
@@ -468,7 +1199,10 @@ func (s *MetadataService) RefreshTrackedSeries(
 			continue
 		}
 
-		if err := s.MatchSeriesToVolume(series.ID, int(*series.ComicVineID)); err != nil {
+		if err := s.RefreshSeriesAuto(ctx, series.ID); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return refreshed, failed, err
+			}
 			slog.Warn("failed to refresh tracked series",
 				"series_id", series.ID,
 				"title", series.Title,
@@ -496,19 +1230,19 @@ func (s *MetadataService) RefreshTrackedSeries(
 // PullListIssue is a release-week issue combining ComicVine data with local ownership info.
 type PullListIssue struct {
 	// ComicVine data
-	ComicVineID   int    `json:"comicvine_id,omitempty"`
-	ComicVineURL  string `json:"comicvine_url,omitempty"`
-	SeriesName    string `json:"series_name"`
-	SeriesCVID    int    `json:"series_cv_id,omitempty"`
-	IssueNumber   string `json:"issue_number"`
-	Title         string `json:"title,omitempty"`
-	Description   string `json:"description,omitempty"`
-	StoreDate     string `json:"store_date"`
-	CoverDate     string `json:"cover_date,omitempty"`
-	CoverURL      string `json:"cover_url,omitempty"`
-	Writers       string `json:"writers,omitempty"`
-	Artists       string `json:"artists,omitempty"`
-	Publisher     string `json:"publisher,omitempty"`
+	ComicVineID  int    `json:"comicvine_id,omitempty"`
+	ComicVineURL string `json:"comicvine_url,omitempty"`
+	SeriesName   string `json:"series_name"`
+	SeriesCVID   int    `json:"series_cv_id,omitempty"`
+	IssueNumber  string `json:"issue_number"`
+	Title        string `json:"title,omitempty"`
+	Description  string `json:"description,omitempty"`
+	StoreDate    string `json:"store_date"`
+	CoverDate    string `json:"cover_date,omitempty"`
+	CoverURL     string `json:"cover_url,omitempty"`
+	Writers      string `json:"writers,omitempty"`
+	Artists      string `json:"artists,omitempty"`
+	Publisher    string `json:"publisher,omitempty"`
 
 	// Local data (if we have this series/issue)
 	LocalSeriesID *int64 `json:"local_series_id,omitempty"`
@@ -521,21 +1255,27 @@ type PullListIssue struct {
 
 // ReleaseDebugInfo provides diagnostic info about what data sources were used.
 type ReleaseDebugInfo struct {
-	Source         string `json:"source"`          // "walksoftly" or "comicvine"
-	WalksoftlyCount int   `json:"walksoftly_count"`
+	Source          string `json:"source"` // "walksoftly" or "comicvine"
+	WalksoftlyCount int    `json:"walksoftly_count"`
 	WalksoftlyError string `json:"walksoftly_error,omitempty"`
-	CVFallbackCount int   `json:"cv_fallback_count,omitempty"`
-	LocalCount     int    `json:"local_count"`
-	TotalResults   int    `json:"total_results"`
-	TrackedCount   int    `json:"tracked_count"`
-	WeekNum        int    `json:"week_num,omitempty"`
+	CVFallbackCount int    `json:"cv_fallback_count,omitempty"`
+	LocalCount      int    `json:"local_count"`
+	TotalResults    int    `json:"total_results"`
+	TrackedCount    int    `json:"tracked_count"`
+	WeekNum         int    `json:"week_num,omitempty"`
 }
 
 // GetWeeklyReleases fetches all comics releasing in a date range.
 // Primary source: walksoftly (pre-aggregated weekly data with ComicVine IDs).
 // Fallback: ComicVine store_date API (works for past weeks).
 // Always cross-references with local data for ownership/tracking status.
-func (s *MetadataService) GetWeeklyReleases(startDate, endDate string) ([]PullListIssue, *ReleaseDebugInfo, error) {
+//
+// ctx bounds both the walksoftly call and the CV fallback. Critical when
+// a library scan is mid-run holding the CV rate limiter — without a
+// cancellable ctx, this handler blocks until the limiter wakes up
+// (potentially the full hourly reset window) and the calling page
+// stays "Loading…" forever.
+func (s *MetadataService) GetWeeklyReleases(ctx context.Context, startDate, endDate string) ([]PullListIssue, *ReleaseDebugInfo, error) {
 	debug := &ReleaseDebugInfo{}
 
 	// Build local data lookups (needed regardless of source)
@@ -559,7 +1299,7 @@ func (s *MetadataService) GetWeeklyReleases(startDate, endDate string) ([]PullLi
 	weekNum, weekYear, err := walksoftly.DateToWeek(startDate)
 	if err == nil {
 		debug.WeekNum = weekNum
-		wsReleases, wsErr := s.ws.GetWeeklyReleases(weekNum, weekYear)
+		wsReleases, wsErr := s.ws.GetWeeklyReleasesCtx(ctx, weekNum, weekYear)
 		if wsErr != nil {
 			slog.Warn("walksoftly fetch failed, will try ComicVine fallback", "error", wsErr)
 			debug.WalksoftlyError = wsErr.Error()
@@ -575,7 +1315,7 @@ func (s *MetadataService) GetWeeklyReleases(startDate, endDate string) ([]PullLi
 		if !s.cv.HasAPIKey() {
 			return nil, debug, fmt.Errorf("ComicVine API key not configured and walksoftly unavailable")
 		}
-		cvResults, cvCount := s.buildResultsFromComicVine(startDate, endDate, localByCV, trackedSeriesByCV, localSeriesByCV, wantedIssueIDs)
+		cvResults, cvCount := s.buildResultsFromComicVine(ctx, startDate, endDate, localByCV, trackedSeriesByCV, localSeriesByCV, wantedIssueIDs)
 		results = cvResults
 		debug.CVFallbackCount = cvCount
 		if debug.Source == "" {
@@ -788,13 +1528,14 @@ func (s *MetadataService) buildResultsFromWalksoftly(
 
 // buildResultsFromComicVine is the fallback path using ComicVine's store_date API.
 func (s *MetadataService) buildResultsFromComicVine(
+	ctx context.Context,
 	startDate, endDate string,
 	localByCV map[int64]*model.Issue,
 	trackedSeriesByCV map[int64]*model.Series,
 	localSeriesByCV map[int64]*model.Series,
 	wantedIssueIDs map[int64]bool,
 ) ([]PullListIssue, int) {
-	cvIssues, err := s.cv.GetIssuesByStoreDate(startDate, endDate)
+	cvIssues, err := s.cv.GetIssuesByStoreDate(ctx, startDate, endDate)
 	if err != nil {
 		slog.Warn("ComicVine fallback failed", "error", err)
 		return nil, 0
@@ -835,7 +1576,7 @@ func (s *MetadataService) buildResultsFromComicVine(
 		}
 	}
 	if len(uniqueUncached) > 0 {
-		volumes, err := s.cv.GetVolumesByIDs(uniqueUncached)
+		volumes, err := s.cv.GetVolumesByIDs(context.Background(), uniqueUncached)
 		if err == nil {
 			for _, v := range volumes {
 				if v.Publisher != nil && v.Publisher.Name != "" {
@@ -1012,7 +1753,7 @@ func (s *MetadataService) TrackFromComicVine(cvVolumeID int, wantListRepo *repos
 		series = existing
 	} else {
 		// Step 2: Fetch volume from ComicVine to get the series name
-		volume, err := s.cv.GetVolume(cvVolumeID)
+		volume, err := s.cv.GetVolume(context.Background(), cvVolumeID)
 		if err != nil {
 			return nil, 0, fmt.Errorf("fetching volume from ComicVine: %w", err)
 		}
@@ -1036,7 +1777,7 @@ func (s *MetadataService) TrackFromComicVine(cvVolumeID int, wantListRepo *repos
 
 		// Step 4: Match the series to the ComicVine volume
 		// (this updates series metadata and populates all issues)
-		if err := s.MatchSeriesToVolume(series.ID, cvVolumeID); err != nil {
+		if err := s.MatchSeriesToVolume(context.Background(), series.ID, cvVolumeID); err != nil {
 			return nil, 0, fmt.Errorf("matching series to volume: %w", err)
 		}
 	}
@@ -1101,7 +1842,7 @@ func (s *MetadataService) WantIssueFromComicVine(cvIssueID int, seriesCVID int, 
 	}
 
 	// Ensure the series (and all its issues) exist locally
-	_, _, err = s.TrackFromComicVine(seriesCVID, wantListRepo)
+	series, _, err := s.TrackFromComicVine(seriesCVID, wantListRepo)
 	if err != nil {
 		return nil, fmt.Errorf("creating series from ComicVine: %w", err)
 	}
@@ -1112,7 +1853,19 @@ func (s *MetadataService) WantIssueFromComicVine(cvIssueID int, seriesCVID int, 
 		return nil, fmt.Errorf("finding issue after series creation: %w", err)
 	}
 	if existing == nil {
-		return nil, fmt.Errorf("issue with ComicVine ID %d not found after populating series", cvIssueID)
+		if series == nil {
+			return nil, fmt.Errorf("issue with ComicVine ID %d not found and series missing", cvIssueID)
+		}
+		if err := s.ensureIssueFromComicVine(series.ID, cvIssueID); err != nil {
+			return nil, fmt.Errorf("creating issue from ComicVine: %w", err)
+		}
+		existing, err = s.issueRepo.FindByComicVineID(cvIssueID64)
+		if err != nil {
+			return nil, fmt.Errorf("finding issue after direct create: %w", err)
+		}
+		if existing == nil {
+			return nil, fmt.Errorf("issue with ComicVine ID %d not found after direct create", cvIssueID)
+		}
 	}
 
 	// Step 4: Add to want list (may already be there from TrackFromComicVine's AddMissingForSeries)
@@ -1249,6 +2002,25 @@ func (s *MetadataService) GetSettings() map[string]interface{} {
 	// Post-process script
 	postProcessScript, _ := s.settingRepo.Get("post_process_script")
 	settings["post_process_script"] = postProcessScript
+
+	// Metron credentials
+	settings["metron_username"] = s.MetronUsername()
+	settings["metron_token_masked"] = s.MetronTokenMasked()
+	settings["metron_token_set"] = s.MetronTokenSet()
+	mq := s.MetronQuota()
+	settings["metron_burst_remaining"] = mq.BurstRemaining
+	settings["metron_sustained_remaining"] = mq.SustainedRemaining
+
+	// Scan reconciliation settings
+	scanAutoQueue, _ := s.settingRepo.Get("scan_auto_queue_backlog")
+	settings["scan_auto_queue_backlog"] = scanAutoQueue == "true"
+
+	scanCVTTLStr, _ := s.settingRepo.Get("scan_cv_refresh_ttl_hours")
+	scanCVTTL := 24
+	if v, err := strconv.Atoi(scanCVTTLStr); err == nil && v > 0 {
+		scanCVTTL = v
+	}
+	settings["scan_cv_refresh_ttl_hours"] = scanCVTTL
 
 	// Backup settings
 	backupOnStart, _ := s.settingRepo.Get("backup_on_start")

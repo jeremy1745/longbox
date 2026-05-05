@@ -6,13 +6,18 @@ import "time"
 type JobType string
 
 const (
-	JobTypeScan           JobType = "scan"
+	JobTypeScan            JobType = "scan"
+	JobTypeScanForceCV     JobType = "scan_force_cv"
 	JobTypeMetadataRefresh JobType = "metadata_refresh"
 	JobTypeSearch          JobType = "search"
 	JobTypePullListSearch  JobType = "pull_list_search"
-	JobTypeMylarMetadata   JobType = "mylar_metadata"
+	JobTypeLongboxMetadata JobType = "longbox_metadata"
+	JobTypeMylarMetadata   JobType = "mylar_metadata" // legacy name kept for older job rows
 	JobTypeMissingSearch   JobType = "missing_search"
 	JobTypeHashBackfill    JobType = "hash_backfill"
+	JobTypeFolderImages    JobType = "folder_images"
+	JobTypeReorganize      JobType = "reorganize"
+	JobTypeAdoptFolders    JobType = "adopt_folders"
 )
 
 // JobStatus tracks the lifecycle of a job.

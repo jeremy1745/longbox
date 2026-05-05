@@ -25,6 +25,8 @@ func NewRouter(
 	issueRepo *repository.IssueRepo,
 	jobRepo *repository.JobRepo,
 	wantListRepo *repository.WantListRepo,
+	backlogRepo *repository.BacklogRepo,
+	backlogSvc *service.BacklogService,
 	indexerRepo *repository.IndexerRepo,
 	dlClientRepo *repository.DownloadClientRepo,
 	dlHistoryRepo *repository.DownloadHistoryRepo,
@@ -38,7 +40,8 @@ func NewRouter(
 	readerSvc *service.ReaderService,
 	searchSvc *service.SearchService,
 	metaWriterSvc *service.MetadataWriterService,
-	mylarSvc *service.MylarMetadataService,
+	longboxMetadataSvc *service.LongboxMetadataService,
+	folderImageSvc *service.FolderImageService,
 	backupSvc *service.BackupService,
 	sched *scheduler.Scheduler,
 	eventBus *scheduler.EventBus,
@@ -58,15 +61,16 @@ func NewRouter(
 	r.Use(MaxBodySize)
 
 	// Handlers
-	libraryH := NewLibraryHandler(librarySvc, fileRepo, seriesRepo, sched)
+	libraryH := NewLibraryHandler(librarySvc, fileRepo, seriesRepo, issueRepo, sched, settingRepo, backlogRepo, indexerRepo, dlClientRepo, wantListRepo, organizeSvc)
 	fileH := NewFileHandler(fileRepo, librarySvc, sched)
 	coverH := NewCoverHandler(coverSvc, fileRepo)
-	seriesH := NewSeriesHandler(seriesRepo, issueRepo, wantListRepo)
-	issueH := NewIssueHandler(issueRepo)
+	seriesH := NewSeriesHandler(seriesRepo, issueRepo, wantListRepo, librarySvc)
+	issueH := NewIssueHandler(issueRepo, librarySvc, organizeSvc)
 	metaH := NewMetadataHandler(metaSvc)
 	settingsH := NewSettingsHandler(metaSvc, librarySvc, watcher, sched, settingRepo)
 	jobH := NewJobHandler(jobRepo, sched, eventBus)
 	wantListH := NewWantListHandler(wantListRepo, searchSvc, settingRepo)
+	backlogH := NewBacklogHandler(backlogRepo, backlogSvc)
 	calendarH := NewCalendarHandler(issueRepo, seriesRepo, wantListRepo, metaSvc, sched, searchSvc, settingRepo)
 	organizeH := NewOrganizeHandler(organizeSvc, librarySvc)
 	readerH := NewReaderHandler(readerSvc, fileRepo, issueRepo)
@@ -74,7 +78,7 @@ func NewRouter(
 	dlClientH := NewDownloadClientHandler(dlClientRepo)
 	searchH := NewSearchHandler(searchSvc, dlHistoryRepo, blocklistRepo, sched)
 	metaWriterH := NewMetadataWriterHandler(metaWriterSvc)
-	mylarH := NewMylarMetadataHandler(seriesRepo, sched)
+	longboxMetadataH := NewLongboxMetadataHandler(seriesRepo, sched, longboxMetadataSvc, folderImageSvc)
 	storyArcH := NewStoryArcHandler(storyArcRepo, metaSvc, cvClient)
 	backupH := NewBackupHandler(backupSvc, settingRepo)
 	opdsH := NewOPDSHandler(fileRepo, seriesRepo, coverSvc)
@@ -84,6 +88,13 @@ func NewRouter(
 	authLimiter := NewRateLimiter(5, 1*time.Minute)
 
 	r.Route("/api/v1", func(r chi.Router) {
+		// Soft 60-second deadline on every API request. ctx-aware handlers
+		// abort instead of blocking forever behind a paused rate limiter or
+		// a stalled upstream — that's the cause of the "Loading…" spinner
+		// that never resolved when a long-running scan held the CV
+		// limiter. SSE event stream is exempt (it's meant to be long-lived).
+		r.Use(RequestTimeout(60*time.Second, "/api/v1/events"))
+
 		// Public auth routes (no auth required)
 		r.Get("/auth/status", authH.Status)
 		r.Post("/auth/login", authLimiter.RateLimit(authH.Login))
@@ -100,7 +111,7 @@ func NewRouter(
 
 			// Admin-only routes
 			r.Group(func(r chi.Router) {
-				r.Use(AdminOnly)
+				r.Use(AdminOnlyWithAuth(authSvc))
 				r.Get("/auth/users", authH.ListUsers)
 				r.Post("/auth/users", authH.CreateUser)
 				r.Delete("/auth/users/{id}", authH.DeleteUser)
@@ -123,8 +134,26 @@ func NewRouter(
 
 			// Library
 			r.Post("/library/scan", libraryH.Scan)
+			r.Post("/library/scan/reconcile-cv", libraryH.ScanForceCV)
+			r.Post("/admin/backfill-read-status", libraryH.BackfillReadStatus)
+			r.Post("/admin/prune-want-list", libraryH.PruneWantList)
+			r.Post("/admin/dedupe-issues", libraryH.DedupeIssues)
+			r.Post("/admin/dedupe-series", libraryH.DedupeSeries)
+			r.Post("/admin/dedupe-files", libraryH.DedupeFiles)
+			r.Post("/admin/reorganize", libraryH.ReorganizeLibrary)
+			r.Post("/admin/adopt-folders", libraryH.AdoptStrandedFolders)
+			r.Post("/admin/reattach-orphans", libraryH.ReattachOrphanFiles)
+			r.Post("/admin/trash-orphan-files", libraryH.TrashOrphanFiles)
+			r.Get("/admin/pipeline-status", libraryH.PipelineStatus)
+			r.Post("/admin/reconcile-backlog", libraryH.ReconcileBacklog)
+			r.Get("/admin/test-search", libraryH.TestSearch)
 			r.Get("/library/stats", libraryH.Stats)
-			r.Post("/library/write-mylar-metadata", mylarH.WriteAll)
+			r.Get("/library/new-this-week", libraryH.NewThisWeek)
+			r.Post("/library/write-longbox-metadata", longboxMetadataH.WriteAll)
+			r.Post("/library/write-mylar-metadata", longboxMetadataH.WriteAll) // legacy alias
+			r.Post("/series/{id}/write-longbox-metadata", longboxMetadataH.WriteForSeries)
+			r.Post("/library/write-folder-images", longboxMetadataH.WriteAllFolderImages)
+			r.Post("/series/{id}/write-folder-image", longboxMetadataH.WriteFolderImageForSeries)
 
 			// Series
 			r.Get("/series", seriesH.List)
@@ -135,15 +164,22 @@ func NewRouter(
 			r.Put("/series/{id}/unlink-annual", seriesH.UnlinkAnnual)
 			r.Put("/series/{id}/track", seriesH.Track)
 			r.Put("/series/{id}/untrack", seriesH.Untrack)
+			r.Delete("/series/{id}/want-list", seriesH.ClearWantList)
+			r.Delete("/series/{id}/issues", seriesH.DeleteAllIssues)
+			r.Delete("/series/{id}", seriesH.Delete)
+			r.Post("/series/{id}/merge-into/{dst_id}", seriesH.MergeInto)
 
 			// Issues
 			r.Get("/issues/{id}", issueH.Get)
+			r.Put("/issues/{id}", issueH.UpdateMetadata)
+			r.Delete("/issues/{id}", issueH.Delete)
 			r.Put("/issues/{id}/read-status", issueH.UpdateReadStatus)
 			r.Put("/issues/{id}/skip-status", issueH.UpdateSkipStatus)
 
 			// Files
 			r.Get("/files", fileH.List)
 			r.Get("/files/duplicates", fileH.Duplicates)
+			r.Post("/files/bulk-delete", fileH.BulkDelete)
 			r.Post("/files/backfill-hashes", fileH.BackfillHashes)
 			r.Get("/files/{id}", fileH.Get)
 			r.Delete("/files/{id}", fileH.DeleteFile)
@@ -154,6 +190,7 @@ func NewRouter(
 
 			// Covers
 			r.Get("/covers/file/{id}", coverH.ServeFileCover)
+			r.Get("/covers/proxy", coverH.ProxyURL)
 
 			// Metadata (ComicVine)
 			r.Get("/metadata/search", metaH.SearchVolumes)
@@ -162,6 +199,11 @@ func NewRouter(
 			r.Get("/metadata/story-arcs/search", storyArcH.Search)
 			r.Post("/series/{id}/match", metaH.MatchSeries)
 			r.Post("/series/{id}/refresh", metaH.RefreshSeries)
+
+			// Metadata (Metron)
+			r.Get("/metadata/metron/search", metaH.SearchMetron)
+			r.Post("/series/{id}/match-metron", metaH.MatchSeriesToMetron)
+			r.Post("/series/{id}/refresh-metron", metaH.RefreshSeriesFromMetron)
 
 			// Story Arcs
 			r.Get("/story-arcs", storyArcH.List)
@@ -173,11 +215,14 @@ func NewRouter(
 			r.Get("/settings", settingsH.GetSettings)
 			r.Put("/settings/comicvine-api-key", settingsH.UpdateAPIKey)
 			r.Post("/settings/comicvine-api-key/test", settingsH.TestAPIKey)
+			r.Put("/settings/metron", settingsH.UpdateMetronCredentials)
+			r.Post("/settings/metron/test", settingsH.TestMetron)
 			r.Put("/settings/library-dir", settingsH.UpdateLibraryDir)
 			r.Put("/settings/pull-list-schedule", settingsH.UpdatePullListSchedule)
 			r.Put("/settings/auto-search", settingsH.UpdateAutoSearch)
 			r.Put("/settings/missing-search", settingsH.UpdateMissingSearch)
 			r.Put("/settings/auto-scan", settingsH.UpdateAutoScan)
+			r.Put("/settings/scan-reconcile", settingsH.UpdateScanReconcile)
 			r.Put("/settings/post-process-script", settingsH.UpdatePostProcessScript)
 			r.Put("/settings/backup", backupH.UpdateBackupSettings)
 			r.Get("/settings/slack", settingsH.GetSlackSettings)
@@ -189,6 +234,15 @@ func NewRouter(
 			r.Post("/want-list", wantListH.Add)
 			r.Put("/want-list/{id}", wantListH.Update)
 			r.Delete("/want-list/{id}", wantListH.Remove)
+
+			// Backlog Runs
+			r.Get("/backlog/runs", backlogH.ListRuns)
+			r.Post("/backlog/runs", backlogH.CreateRun)
+			r.Get("/backlog/items", backlogH.ListItems)
+			r.Post("/backlog/runs/{id}/pause", backlogH.PauseRun)
+			r.Post("/backlog/runs/{id}/resume", backlogH.ResumeRun)
+			r.Post("/backlog/runs/{id}/retry-all", backlogH.RetryAllInRun)
+			r.Post("/backlog/items/{id}/retry", backlogH.RetryItem)
 
 			// Calendar / Pull List
 			r.Get("/calendar", calendarH.Upcoming)

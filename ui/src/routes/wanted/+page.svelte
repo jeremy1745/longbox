@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { ApiClient, type WantListItem, type WantListResponse, type Job } from '$lib/api/client';
 	import SearchResultsModal from '$lib/components/SearchResultsModal.svelte';
+	import { proxiedCoverURL } from '$lib/cover';
 
 	let items = $state<WantListItem[]>([]);
 	let total = $state(0);
@@ -169,7 +170,7 @@
 								<!-- Cover thumbnail -->
 								<div class="w-10 h-14 flex-shrink-0 bg-gray-700 rounded overflow-hidden">
 									{#if item.cover_url}
-										<img src={item.cover_url} alt="#{item.issue_number}" class="w-full h-full object-cover" loading="lazy" />
+										<img src={proxiedCoverURL(item.cover_url)} alt="#{item.issue_number}" class="w-full h-full object-cover" loading="lazy" />
 									{:else}
 										<div class="w-full h-full flex items-center justify-center text-gray-500 text-xs">
 											#{item.issue_number}

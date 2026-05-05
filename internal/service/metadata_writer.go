@@ -3,12 +3,15 @@ package service
 import (
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/jeremy/longbox/internal/archive"
 	"github.com/jeremy/longbox/internal/model"
 	"github.com/jeremy/longbox/internal/repository"
+	"github.com/jeremy/longbox/internal/util/trash"
 )
 
 // MetadataWriterService writes ComicInfo.xml metadata into comic archive files.
@@ -98,16 +101,22 @@ func (s *MetadataWriterService) WriteMetadataForSeries(seriesID int64) ([]WriteR
 }
 
 // writeToFile does the actual work of building ComicInfo from DB data and writing it.
+// CBZ files are rewritten in place. CBR/CB7 files are converted to CBZ (extract +
+// repack as ZIP, since RAR is read-only by license and 7z requires an external
+// binary). The original archive is moved to the OS trash on successful conversion.
+// PDFs are skipped — they have no ComicInfo concept.
 func (s *MetadataWriterService) writeToFile(file *model.ComicFile) (*WriteResult, error) {
 	result := &WriteResult{
 		FileID:   file.ID,
 		FileName: file.FileName,
 	}
 
-	// Only CBZ is writable
-	if file.FileFormat != "cbz" {
+	switch file.FileFormat {
+	case "cbz", "cbr", "cb7":
+		// supported
+	default:
 		result.Skipped = true
-		result.Message = fmt.Sprintf("Skipped: %s format is read-only (only CBZ supports writing)", strings.ToUpper(file.FileFormat))
+		result.Message = fmt.Sprintf("Skipped: %s format is not supported for ComicInfo.xml", strings.ToUpper(file.FileFormat))
 		return result, nil
 	}
 
@@ -142,28 +151,86 @@ func (s *MetadataWriterService) writeToFile(file *model.ComicFile) (*WriteResult
 	// Build ComicInfo
 	ci := s.buildComicInfo(series, issue)
 
-	// Write to file
-	if err := archive.WriteComicInfoToCBZ(file.FilePath, ci); err != nil {
-		result.Success = false
-		result.Message = fmt.Sprintf("Failed: %s", err.Error())
+	// CBZ: rewrite in place. CBR/CB7: convert to CBZ alongside, then trash the
+	// original. The DB row is updated with the new path/format/hash/size.
+	if file.FileFormat == "cbz" {
+		if err := archive.WriteComicInfoToCBZ(file.FilePath, ci); err != nil {
+			result.Success = false
+			result.Message = fmt.Sprintf("Failed: %s", err.Error())
+			return result, nil
+		}
+		if err := s.fileRepo.UpdateHasComicInfo(file.ID, true); err != nil {
+			slog.Warn("failed to update has_comicinfo flag", "file_id", file.ID, "error", err)
+		}
+
+		result.Success = true
+		result.Message = "ComicInfo.xml written successfully"
+		slog.Info("wrote ComicInfo.xml",
+			"file", file.FileName,
+			"series", series.Title,
+			"issue", issue.IssueNumber,
+		)
 		return result, nil
 	}
 
-	// Update DB to reflect that ComicInfo is now embedded
-	if err := s.fileRepo.UpdateHasComicInfo(file.ID, true); err != nil {
-		slog.Warn("failed to update has_comicinfo flag", "file_id", file.ID, "error", err)
+	converted, err := s.convertToCBZ(file, ci)
+	if err != nil {
+		result.Success = false
+		result.Message = fmt.Sprintf("Conversion failed: %s", err.Error())
+		return result, nil
 	}
 
 	result.Success = true
-	result.Message = "ComicInfo.xml written successfully"
-
-	slog.Info("wrote ComicInfo.xml",
-		"file", file.FileName,
+	result.FileName = converted.newName
+	result.Message = fmt.Sprintf("Converted %s → CBZ and embedded ComicInfo.xml", strings.ToUpper(file.FileFormat))
+	slog.Info("converted archive and wrote ComicInfo.xml",
+		"old_path", file.FilePath,
+		"new_path", converted.newPath,
 		"series", series.Title,
 		"issue", issue.IssueNumber,
 	)
-
 	return result, nil
+}
+
+// conversionResult tracks the new on-disk state after a CBR/CB7 → CBZ conversion.
+type conversionResult struct {
+	newPath string
+	newName string
+}
+
+// convertToCBZ extracts a CBR/CB7 file, repacks it as a sibling .cbz with
+// ComicInfo.xml embedded, updates the DB row, and trashes the original. Caller
+// is responsible for serializing concurrent writes to the same file.
+func (s *MetadataWriterService) convertToCBZ(file *model.ComicFile, ci *archive.ComicInfo) (*conversionResult, error) {
+	dir := filepath.Dir(file.FilePath)
+	baseNoExt := strings.TrimSuffix(filepath.Base(file.FilePath), filepath.Ext(file.FilePath))
+	newName := baseNoExt + ".cbz"
+	newPath := filepath.Join(dir, newName)
+
+	if err := archive.ConvertToCBZ(file.FilePath, newPath, ci); err != nil {
+		return nil, err
+	}
+
+	info, err := os.Stat(newPath)
+	if err != nil {
+		return nil, fmt.Errorf("stating new archive: %w", err)
+	}
+	hash, err := computeFileHash(newPath)
+	if err != nil {
+		slog.Warn("converted archive but failed to hash it", "path", newPath, "error", err)
+	}
+
+	if err := s.fileRepo.UpdateAfterConversion(file.ID, newPath, newName, "cbz", info.Size(), hash); err != nil {
+		// Roll back the file write so we don't leave the DB and disk inconsistent.
+		os.Remove(newPath)
+		return nil, fmt.Errorf("updating DB after conversion: %w", err)
+	}
+
+	if err := trash.MoveToTrash(file.FilePath); err != nil {
+		slog.Warn("converted archive but could not trash original", "path", file.FilePath, "error", err)
+	}
+
+	return &conversionResult{newPath: newPath, newName: newName}, nil
 }
 
 // buildComicInfo constructs a ComicInfo struct from the database models.

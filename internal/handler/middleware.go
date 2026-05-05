@@ -1,14 +1,38 @@
 package handler
 
 import (
+	"context"
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+// RequestTimeout attaches a deadline to r.Context() so ctx-aware handlers
+// abort instead of blocking indefinitely (e.g. behind a paused rate
+// limiter or a stalled upstream). Handlers that ignore ctx still complete
+// — this is a "soft" timeout that depends on cooperation. SSE / streaming
+// routes are skipped via the skipPrefixes argument because their whole
+// purpose is to keep a connection open.
+func RequestTimeout(d time.Duration, skipPrefixes ...string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			for _, p := range skipPrefixes {
+				if strings.HasPrefix(r.URL.Path, p) {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), d)
+			defer cancel()
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
 
 func RequestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

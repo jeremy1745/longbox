@@ -9,6 +9,7 @@ type Issue struct {
 	SortNumber     float64   `json:"sort_number"`
 	Title          string    `json:"title,omitempty"`
 	ComicVineID    *int64    `json:"comicvine_id,omitempty"`
+	MetronID       *int64    `json:"metron_id,omitempty"`
 	Description    string    `json:"description,omitempty"`
 	CoverDate      string    `json:"cover_date,omitempty"`
 	StoreDate      string    `json:"store_date,omitempty"`

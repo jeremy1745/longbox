@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/stores';
 	import { ApiClient, type StoryArc, type StoryArcIssue, type StoryArcDetailResponse } from '$lib/api/client';
+	import { proxiedCoverURL } from '$lib/cover';
 
 	let arc = $state<StoryArc | null>(null);
 	let issues = $state<StoryArcIssue[]>([]);
@@ -87,7 +88,7 @@
 							</span>
 							{#if issue.cover_url}
 								<img
-									src={issue.cover_url}
+									src={proxiedCoverURL(issue.cover_url)}
 									alt=""
 									class="w-10 h-14 object-cover rounded flex-shrink-0"
 									loading="lazy"

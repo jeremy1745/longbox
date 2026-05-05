@@ -15,7 +15,6 @@ import (
 	"github.com/jeremy/longbox/internal/archive"
 	"github.com/jeremy/longbox/internal/model"
 	"github.com/jeremy/longbox/internal/repository"
-	tmpl "github.com/jeremy/longbox/internal/template"
 )
 
 // ImportService handles post-processing of completed downloads:
@@ -265,31 +264,7 @@ func (s *ImportService) buildTargetPath(item *model.DownloadHistoryItem, srcPath
 			return filepath.Join(libraryDir, filepath.Base(srcPath)), nil
 		}
 
-		templateStr := s.organizeSvc.GetTemplate()
-		t, err := tmpl.Parse(templateStr)
-		if err != nil {
-			slog.Warn("invalid naming template, using filename", "error", err)
-			return filepath.Join(libraryDir, filepath.Base(srcPath)), nil
-		}
-
-		ctx := tmpl.TemplateContext{
-			Series:     series.Title,
-			SortSeries: series.SortTitle,
-			Number:     issue.IssueNumber,
-			Title:      issue.Title,
-			Format:     ext,
-			CoverDate:  issue.CoverDate,
-			StoreDate:  issue.StoreDate,
-			Publisher:  series.PublisherName,
-		}
-		if issue.Writers != "" {
-			ctx.Writers = strings.TrimSpace(strings.SplitN(issue.Writers, ",", 2)[0])
-		}
-		if issue.Artists != "" {
-			ctx.Artists = strings.TrimSpace(strings.SplitN(issue.Artists, ",", 2)[0])
-		}
-
-		relPath, err := t.Execute(ctx)
+		relPath, err := s.organizeSvc.BuildPath(series, issue, ext)
 		if err != nil {
 			slog.Warn("template execution failed, using filename", "error", err)
 			return filepath.Join(libraryDir, filepath.Base(srcPath)), nil

@@ -132,15 +132,16 @@ func (cs *CronScheduler) checkPullListSchedule() {
 		"hour", now.Hour(),
 	)
 
-	job, err := cs.scheduler.Submit(model.JobTypePullListSearch)
-	if err != nil {
-		slog.Warn("failed to submit pull list search job", "error", err)
-		return
-	}
-
-	// Record that we ran today
+	// Record the attempted run date BEFORE Submit so a "deferred" cron
+	// (live user job already running) doesn't fire again the next tick.
 	if err := cs.settingRepo.Set("pull_list_last_run", today); err != nil {
 		slog.Warn("failed to record pull list last run", "error", err)
+	}
+
+	job, err := cs.scheduler.Submit(model.JobTypePullListSearch)
+	if err != nil {
+		slog.Info("pull list submit deferred (already running)", "error", err)
+		return
 	}
 
 	slog.Info("scheduled pull list search submitted", "job_id", job.ID)
@@ -170,15 +171,20 @@ func (cs *CronScheduler) checkMissingSearch() {
 
 	slog.Info("triggering missing issue search", "interval_min", interval)
 
-	job, err := cs.scheduler.Submit(model.JobTypeMissingSearch)
-	if err != nil {
-		slog.Warn("failed to submit missing search job", "error", err)
-		return
-	}
-
-	// Record that we ran now
+	// Record the attempt timestamp BEFORE Submit. If Submit fails because
+	// the same JobType is already running (e.g. user kicked off a manual
+	// missing search that's still going), the cron has still "fired" for
+	// this interval — it deferred to the live job. Without writing
+	// last_run on the deferred path, the next tick would Submit again and
+	// queue a duplicate run as soon as the user's job ends.
 	if err := cs.settingRepo.Set("missing_search_last_run", time.Now().UTC().Format(time.RFC3339)); err != nil {
 		slog.Warn("failed to record missing search last run", "error", err)
+	}
+
+	job, err := cs.scheduler.Submit(model.JobTypeMissingSearch)
+	if err != nil {
+		slog.Info("missing search submit deferred (already running)", "error", err)
+		return
 	}
 
 	slog.Info("missing issue search submitted", "job_id", job.ID)
@@ -206,14 +212,16 @@ func (cs *CronScheduler) checkAutoScan() {
 
 	slog.Info("triggering automated library scan", "interval_min", interval)
 
-	job, err := cs.scheduler.Submit(model.JobTypeScan)
-	if err != nil {
-		slog.Warn("failed to submit auto scan job", "error", err)
-		return
-	}
-
+	// Record attempt before Submit so a deferred run (user already
+	// running a scan) doesn't immediately re-fire on the next tick.
 	if err := cs.settingRepo.Set("auto_scan_last_run", time.Now().UTC().Format(time.RFC3339)); err != nil {
 		slog.Warn("failed to record auto scan last run", "error", err)
+	}
+
+	job, err := cs.scheduler.Submit(model.JobTypeScan)
+	if err != nil {
+		slog.Info("auto scan submit deferred (already running)", "error", err)
+		return
 	}
 
 	slog.Info("automated library scan submitted", "job_id", job.ID)

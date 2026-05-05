@@ -19,20 +19,43 @@ import (
 )
 
 // DefaultTemplate is the default naming template.
-const DefaultTemplate = "{series}/{series} #{number|pad:3}.{format}"
+//
+// Layout: <series> (<year>)/<series> (<year>) <NNN>.<ext>
+// Example: Absolute Flash (2025)/Absolute Flash (2025) 001.cbz
+//
+// Series + year is the canonical Mylar-shaped folder convention so the
+// folder uniquely identifies a volume even when multiple volumes share a
+// title (Wonder Man 2024 vs Wonder Man 2007). The same `<series> (<year>)`
+// prefix is repeated in the filename so a file separated from its folder
+// (someone copies it to a phone, archives a backup, etc.) is still
+// self-describing. Issue numbers are zero-padded to 3 digits.
+const DefaultTemplate = "{series} ({year})/{series} ({year}) {number|pad:3}.{format}"
 
 // TemplateContext holds the data needed to execute a naming template.
 type TemplateContext struct {
-	Series     string
-	SortSeries string
-	Number     string
-	Title      string
-	Publisher  string
-	Format     string
-	CoverDate  string
-	StoreDate  string
-	Writers    string
-	Artists    string
+	Series          string
+	SortSeries      string
+	Number          string
+	Title           string
+	Publisher       string
+	Format          string
+	CoverDate       string
+	StoreDate       string
+	Writers         string
+	Artists         string
+	ParentSeries    string
+	AnnualSubfolder string
+	// SeriesYear and Year both hold the series START year (volume year).
+	// Same value, two names — `{series_year}` is explicit, `{year}` is
+	// the convenient alias the default template uses. Both are stable
+	// across every issue in a series so a run that crosses calendar
+	// years lands in ONE folder.
+	SeriesYear string
+	Year       string
+	// IssueYear holds the per-issue cover/store date year. Exposed as
+	// `{issue_year}` for templates that want per-issue dating in the
+	// FILENAME; never use it in folder paths or you'll fragment runs.
+	IssueYear string
 }
 
 // tokenType distinguishes literal text from variable references.
@@ -45,9 +68,9 @@ const (
 
 // token represents a parsed template fragment.
 type token struct {
-	Type     tokenType
-	Value    string // literal text, or variable name
-	Filter   string // filter name (e.g., "pad")
+	Type      tokenType
+	Value     string // literal text, or variable name
+	Filter    string // filter name (e.g., "pad")
 	FilterArg string // filter argument (e.g., "3")
 }
 
@@ -179,16 +202,21 @@ func parseVariable(inner string) (name, filter, filterArg string) {
 }
 
 var validVariables = map[string]bool{
-	"series":      true,
-	"sort_series": true,
-	"number":      true,
-	"title":       true,
-	"publisher":   true,
-	"format":      true,
-	"cover_date":  true,
-	"store_date":  true,
-	"writers":     true,
-	"artists":     true,
+	"series":           true,
+	"sort_series":      true,
+	"number":           true,
+	"title":            true,
+	"publisher":        true,
+	"format":           true,
+	"cover_date":       true,
+	"store_date":       true,
+	"writers":          true,
+	"artists":          true,
+	"parent_series":    true,
+	"annual_subfolder": true,
+	"series_year":      true,
+	"year":             true,
+	"issue_year":       true,
 }
 
 func isValidVariable(name string) bool {
@@ -217,6 +245,16 @@ func resolveVariable(name string, ctx TemplateContext) string {
 		return ctx.Writers
 	case "artists":
 		return ctx.Artists
+	case "parent_series":
+		return ctx.ParentSeries
+	case "annual_subfolder":
+		return ctx.AnnualSubfolder
+	case "series_year":
+		return ctx.SeriesYear
+	case "year":
+		return ctx.Year
+	case "issue_year":
+		return ctx.IssueYear
 	default:
 		return ""
 	}

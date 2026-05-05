@@ -107,11 +107,13 @@ export interface Series {
 	status: string;
 	total_issues: number;
 	cover_file_id?: number;
+	cover_image_url?: string;
 	tracked: boolean;
 	issue_count: number;
 	file_count: number;
 	parent_series_id?: number;
 	annual_series?: Series[];
+	metron_id?: number;
 	created_at: string;
 	updated_at: string;
 }
@@ -182,8 +184,12 @@ export interface ScanResult {
 	files_found: number;
 	files_added: number;
 	files_skipped: number;
+	files_removed: number;
 	series_created: number;
 	issues_created: number;
+	series_refreshed: number;
+	issues_newly_missing: number;
+	backlog_runs_created: number;
 	errors: number;
 }
 
@@ -217,6 +223,11 @@ export interface Settings {
 	comicvine_api_key_source: string;
 	comicvine_api_key_set: boolean;
 	comicvine_hourly_remaining: number;
+	metron_username: string;
+	metron_token_masked: string;
+	metron_token_set: boolean;
+	metron_burst_remaining: number;
+	metron_sustained_remaining: number;
 	library_dir: string;
 	pull_list_enabled: boolean;
 	pull_list_day: number;
@@ -230,6 +241,8 @@ export interface Settings {
 	missing_search_interval: number;
 	missing_search_last_run: string;
 	post_process_script: string;
+	scan_auto_queue_backlog: boolean;
+	scan_cv_refresh_ttl_hours: number;
 	backup_on_start: boolean;
 	backup_retention: number;
 }
@@ -242,7 +255,7 @@ export interface APIKeyTestResult {
 
 // --- Job types ---
 
-export type JobType = 'scan' | 'metadata_refresh' | 'search' | 'pull_list_search' | 'mylar_metadata' | 'missing_search' | 'hash_backfill';
+export type JobType = 'scan' | 'scan_force_cv' | 'metadata_refresh' | 'search' | 'pull_list_search' | 'longbox_metadata' | 'mylar_metadata' | 'missing_search' | 'hash_backfill' | 'folder_images' | 'reorganize' | 'adopt_folders';
 export type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
 
 export interface Job {
@@ -615,6 +628,69 @@ export interface BackupInfo {
 
 export interface BackupListResponse {
 	backups: BackupInfo[];
+}
+
+// --- Backlog types ---
+
+export type BacklogRunStatus = 'planning' | 'ready' | 'attention' | 'paused' | 'completed';
+
+export interface BacklogRun {
+	id: number;
+	series_id: number;
+	series_title: string;
+	status: BacklogRunStatus | string;
+	include_variants: boolean;
+	total_issues: number;
+	queued_issues: number;
+	completed_issues: number;
+	failed_issues: number;
+	paused: boolean;
+	created_at: string;
+	updated_at: string;
+}
+
+export type BacklogItemStatus =
+	| 'pending'
+	| 'searching'
+	| 'queued'
+	| 'downloading'
+	| 'completed'
+	| 'failed'
+	| 'error'
+	| 'canceled';
+
+export interface BacklogItem {
+	id: number;
+	backlog_run_id: number;
+	series_id: number;
+	issue_id: number;
+	issue_number?: string;
+	series_title?: string;
+	variant_name?: string;
+	priority: number;
+	status: BacklogItemStatus | string;
+	retry_count: number;
+	retry_at?: string;
+	last_error?: string;
+	sab_nzo_id?: string;
+	nzb_guid?: string;
+	download_history_id?: number;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface BacklogRunListResponse {
+	items: BacklogRun[];
+	total: number;
+	page: number;
+	per_page: number;
+}
+
+export interface BacklogItemListResponse {
+	items: BacklogItem[];
+	total: number;
+	page: number;
+	per_page: number;
 }
 
 // --- Duplicate types ---

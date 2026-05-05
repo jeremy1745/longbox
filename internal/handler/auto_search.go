@@ -19,15 +19,19 @@ func triggerAutoSearch(searchSvc *service.SearchService, settingRepo *repository
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
-		item, err := searchSvc.AutoSearchAndGrab(ctx, issueID)
+		outcome, err := searchSvc.AutoSearchAndGrab(ctx, issueID)
 		if err != nil {
 			slog.Warn("auto-search failed", "issue_id", issueID, "label", label, "error", err)
 			return
 		}
-		if item != nil {
-			slog.Info("auto-search grabbed", "issue_id", issueID, "label", label, "nzb", item.NZBName)
+		if outcome != nil && outcome.Item != nil {
+			slog.Info("auto-search grabbed", "issue_id", issueID, "label", label, "nzb", outcome.Item.NZBName)
 		} else {
-			slog.Info("auto-search found no results", "issue_id", issueID, "label", label)
+			reason := "no results"
+			if outcome != nil && outcome.Reason != "" {
+				reason = outcome.Reason
+			}
+			slog.Info("auto-search no grab", "issue_id", issueID, "label", label, "reason", reason)
 		}
 	}()
 }

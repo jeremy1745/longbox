@@ -21,14 +21,15 @@ import (
 
 // SearchService orchestrates searching indexers and grabbing NZBs.
 type SearchService struct {
-	indexerRepo          *repository.IndexerRepo
-	dlClientRepo         *repository.DownloadClientRepo
-	dlHistoryRepo        *repository.DownloadHistoryRepo
-	issueRepo            *repository.IssueRepo
-	seriesRepo           *repository.SeriesRepo
-	blocklistRepo        *repository.BlocklistRepo
-	eventBus             *scheduler.EventBus
-	onDownloadCompleted  func(item *model.DownloadHistoryItem, storagePath string)
+	indexerRepo             *repository.IndexerRepo
+	dlClientRepo            *repository.DownloadClientRepo
+	dlHistoryRepo           *repository.DownloadHistoryRepo
+	issueRepo               *repository.IssueRepo
+	seriesRepo              *repository.SeriesRepo
+	blocklistRepo           *repository.BlocklistRepo
+	eventBus                *scheduler.EventBus
+	onDownloadCompleted     func(item *model.DownloadHistoryItem, storagePath string)
+	onDownloadStatusChanged func(item *model.DownloadHistoryItem)
 }
 
 func NewSearchService(
@@ -56,6 +57,10 @@ func (s *SearchService) SetOnDownloadCompleted(fn func(item *model.DownloadHisto
 	s.onDownloadCompleted = fn
 }
 
+func (s *SearchService) SetOnDownloadStatusChanged(fn func(item *model.DownloadHistoryItem)) {
+	s.onDownloadStatusChanged = fn
+}
+
 // ScoredResult wraps a Newznab search result with a relevance score.
 type ScoredResult struct {
 	newznab.SearchResult
@@ -80,35 +85,46 @@ func (s *SearchService) SearchForIssue(ctx context.Context, issueID int64) ([]Sc
 		return nil, fmt.Errorf("series %d not found", issue.SeriesID)
 	}
 
-	queries := buildSearchQueries(series, issue)
-
-	// Run all query variants concurrently and merge results
-	type queryResult struct {
-		results []newznab.SearchResult
-	}
-	ch := make(chan queryResult, len(queries))
-	for _, q := range queries {
-		go func(query string) {
-			results, err := s.searchAllIndexers(ctx, query)
-			if err != nil {
-				slog.Warn("search query failed", "query", query, "error", err)
-				ch <- queryResult{}
-				return
-			}
-			ch <- queryResult{results: results}
-		}(q)
+	requireYear := shouldRequireSeriesYear(series, issue)
+	strictQueries, looseQueries := buildSearchQueries(series, issue, requireYear)
+	if requireYear && len(strictQueries) == 0 {
+		requireYear = false
 	}
 
-	seen := make(map[string]bool)
-	var allResults []newznab.SearchResult
-	for range queries {
-		qr := <-ch
-		for _, r := range qr.results {
-			if !seen[r.GUID] {
-				seen[r.GUID] = true
-				allResults = append(allResults, r)
-			}
+	// Strict-first: when the series has a year and the issue is low-numbered,
+	// run year-anchored queries first to avoid pulling in wrong-volume hits.
+	// If they return nothing (indexer titles often don't include the year),
+	// fall back to the loose queries instead of dead-ending. Scoring still
+	// applies the year-mismatch penalty so a wrong-year result that does
+	// surface from a loose query gets pushed below the score threshold.
+	var primaryQueries, fallbackQueries []string
+	if requireYear {
+		primaryQueries = strictQueries
+		fallbackQueries = looseQueries
+	} else {
+		primaryQueries = append(primaryQueries, strictQueries...)
+		primaryQueries = append(primaryQueries, looseQueries...)
+	}
+
+	if len(primaryQueries) == 0 && len(fallbackQueries) == 0 {
+		return nil, nil
+	}
+
+	allResults, seen := s.runQueries(ctx, primaryQueries, nil)
+
+	if requireYear && len(allResults) == 0 && len(fallbackQueries) > 0 {
+		year := 0
+		if series.Year != nil {
+			year = *series.Year
 		}
+		slog.Debug("strict ComicVine year search returned no results, falling back to loose queries",
+			"series_id", series.ID,
+			"issue_id", issue.ID,
+			"year", year,
+		)
+		var more []newznab.SearchResult
+		more, seen = s.runQueries(ctx, fallbackQueries, seen)
+		allResults = append(allResults, more...)
 	}
 
 	// Score results against the specific issue
@@ -126,6 +142,49 @@ func (s *SearchService) SearchForIssue(ctx context.Context, issueID int64) ([]Sc
 	})
 
 	return scored, nil
+}
+
+// runQueries fans out the given query variants concurrently across all enabled
+// indexers and returns the deduped union of results. The seen map carries
+// across calls so a fallback pass doesn't re-emit hits the primary already saw.
+func (s *SearchService) runQueries(ctx context.Context, queries []string, seen map[string]bool) ([]newznab.SearchResult, map[string]bool) {
+	if len(queries) == 0 {
+		if seen == nil {
+			seen = make(map[string]bool)
+		}
+		return nil, seen
+	}
+
+	type queryResult struct {
+		results []newznab.SearchResult
+	}
+	ch := make(chan queryResult, len(queries))
+	for _, q := range queries {
+		go func(query string) {
+			results, err := s.searchAllIndexers(ctx, query)
+			if err != nil {
+				slog.Warn("search query failed", "query", query, "error", err)
+				ch <- queryResult{}
+				return
+			}
+			ch <- queryResult{results: results}
+		}(q)
+	}
+
+	if seen == nil {
+		seen = make(map[string]bool)
+	}
+	var merged []newznab.SearchResult
+	for range queries {
+		qr := <-ch
+		for _, r := range qr.results {
+			if !seen[r.GUID] {
+				seen[r.GUID] = true
+				merged = append(merged, r)
+			}
+		}
+	}
+	return merged, seen
 }
 
 // SearchQuery searches all enabled indexers with a raw query string.
@@ -205,7 +264,12 @@ func (s *SearchService) GrabResult(ctx context.Context, nzbURL, nzbName, nzbGuid
 		Size:             size,
 	}
 	if err := s.dlHistoryRepo.Create(item); err != nil {
-		slog.Error("failed to record download history", "error", err)
+		// Critical: callers (backlog queue, auto-search) use the returned
+		// item.ID as a foreign key — silently continuing here would attach
+		// downloads with FK=0 against a row that doesn't exist. Surface
+		// the failure so the caller can mark the backlog item failed and
+		// the user sees a real error in last_error.
+		return nil, fmt.Errorf("recording download history: %w", err)
 	}
 
 	// Publish event
@@ -304,16 +368,28 @@ func (s *SearchService) reattachAPIKey(nzbURL string) (string, error) {
 	return nzbURL, nil
 }
 
+// GrabOutcome carries the result of an auto-search/grab attempt. When Item
+// is non-nil the grab succeeded. When Item is nil, Reason explains why no
+// grab happened — populated for the queue worker to surface in last_error
+// instead of the previous opaque "no nzb found".
+type GrabOutcome struct {
+	Item   *model.DownloadHistoryItem
+	Reason string
+}
+
 // AutoSearchAndGrab searches for an issue and grabs the best result.
-// Returns nil (no error) if no suitable result was found.
-func (s *SearchService) AutoSearchAndGrab(ctx context.Context, issueID int64) (*model.DownloadHistoryItem, error) {
+// Returns a non-nil GrabOutcome describing the disposition. err is reserved
+// for unexpected failures (DB errors, search subsystem errors); user-facing
+// "nothing to do" outcomes (already grabbed, no hits, all below threshold)
+// land in GrabOutcome.Reason with Item=nil.
+func (s *SearchService) AutoSearchAndGrab(ctx context.Context, issueID int64) (*GrabOutcome, error) {
 	// Check for duplicate grabs first
 	exists, err := s.dlHistoryRepo.ExistsForIssue(issueID)
 	if err != nil {
 		return nil, fmt.Errorf("checking for existing download: %w", err)
 	}
 	if exists {
-		return nil, nil // already grabbed, skip
+		return &GrabOutcome{Reason: "already grabbed"}, nil
 	}
 
 	results, err := s.SearchForIssue(ctx, issueID)
@@ -322,7 +398,7 @@ func (s *SearchService) AutoSearchAndGrab(ctx context.Context, issueID int64) (*
 	}
 
 	if len(results) == 0 {
-		return nil, nil
+		return &GrabOutcome{Reason: "no indexer hits — try a broader match or check Prowlarr categories"}, nil
 	}
 
 	// Filter to results meeting the minimum score threshold
@@ -334,12 +410,21 @@ func (s *SearchService) AutoSearchAndGrab(ctx context.Context, issueID int64) (*
 		}
 	}
 	if len(qualified) == 0 {
+		// Build a descriptive reason: top 3 titles + scores so the user
+		// can see what the indexer returned and why it scored too low.
+		top := results
+		if len(top) > 3 {
+			top = top[:3]
+		}
+		parts := make([]string, 0, len(top))
+		for _, r := range top {
+			parts = append(parts, fmt.Sprintf("%q=%d", r.Title, r.Score))
+		}
+		reason := fmt.Sprintf("no hit above score %d; top %d of %d: %s",
+			minScore, len(top), len(results), strings.Join(parts, "; "))
 		slog.Debug("no results meet score threshold",
-			"issue_id", issueID,
-			"best_score", results[0].Score,
-			"min_score", minScore,
-		)
-		return nil, nil
+			"issue_id", issueID, "best_score", results[0].Score, "min_score", minScore)
+		return &GrabOutcome{Reason: reason}, nil
 	}
 
 	// Sort qualified results by grabs descending, ties broken by score
@@ -358,7 +443,11 @@ func (s *SearchService) AutoSearchAndGrab(ctx context.Context, issueID int64) (*
 		"score", best.Score,
 	)
 
-	return s.GrabResult(ctx, best.NZBURL, best.Title, best.GUID, best.Size, best.IndexerID, &issueID)
+	item, err := s.GrabResult(ctx, best.NZBURL, best.Title, best.GUID, best.Size, best.IndexerID, &issueID)
+	if err != nil {
+		return nil, fmt.Errorf("grabbing %q: %w", best.Title, err)
+	}
+	return &GrabOutcome{Item: item}, nil
 }
 
 // CheckDownloadStatus polls SABnzbd for status updates on active downloads.
@@ -422,6 +511,12 @@ func (s *SearchService) CheckDownloadStatus(ctx context.Context) error {
 					"status": newStatus,
 				},
 			})
+			item.Status = newStatus
+			item.Message = slot.Status
+			if s.onDownloadStatusChanged != nil {
+				updated := item
+				s.onDownloadStatusChanged(&updated)
+			}
 			slog.Info("download status updated",
 				"id", item.ID,
 				"nzb", item.NZBName,
@@ -480,7 +575,7 @@ func (s *SearchService) searchAllIndexers(ctx context.Context, query string) ([]
 			client := newznab.NewClient(idx.URL, idx.APIKey, isProwlarr)
 			categories := strings.Split(idx.Categories, ",")
 
-			results, err := client.Search(query, categories)
+			results, err := client.SearchCtx(ctx, query, categories)
 			if err != nil {
 				slog.Warn("indexer search failed",
 					"indexer", idx.Name,
@@ -510,7 +605,12 @@ func (s *SearchService) searchAllIndexers(ctx context.Context, query string) ([]
 
 	wg.Wait()
 
-	// Deduplicate by GUID and filter blocklist
+	// Deduplicate by GUID, filter blocklist, and reject non-comic releases.
+	// Without the format filter, indexers happily return EXE installers,
+	// PDFs, ebooks, and video rips that share words with the search query
+	// (e.g. "Wolverine" finds Wolverine.2013.MULTi.1080p.BluRay.mkv).
+	// LongBox only knows how to read CBR/CBZ/CB7 archives — anything else
+	// is unusable, so we drop it before scoring.
 	seen := make(map[string]bool)
 	deduped := make([]newznab.SearchResult, 0, len(allResults))
 	for _, r := range allResults {
@@ -518,7 +618,11 @@ func (s *SearchService) searchAllIndexers(ctx context.Context, query string) ([]
 			continue
 		}
 		seen[r.GUID] = true
-		// Check blocklist
+		if !isComicRelease(r.Title) {
+			slog.Debug("dropping non-comic release",
+				"title", r.Title, "indexer", r.IndexerName)
+			continue
+		}
 		if s.blocklistRepo != nil && r.GUID != "" {
 			if blocked, err := s.blocklistRepo.IsBlocked(r.GUID); err == nil && blocked {
 				continue
@@ -530,42 +634,170 @@ func (s *SearchService) searchAllIndexers(ctx context.Context, query string) ([]
 	return deduped, nil
 }
 
+// disallowedReleaseExtensions lists file extensions that unmistakably mark a
+// release as something other than a comic. Matched as a whole word in the
+// release title (case-insensitive) — substrings inside other words don't
+// trigger (e.g. "AVI" inside a title isn't filtered, but ".avi" is).
+//
+// .zip / .rar / .7z are intentionally NOT here: they're sometimes used for
+// scanned-comic archives. CBZ files are zip archives, sometimes mislabeled.
+var disallowedReleaseExtensions = []string{
+	// Executables / installers
+	".exe", ".msi", ".dmg", ".pkg", ".deb", ".rpm", ".apk", ".bat", ".sh",
+	// Documents / ebooks (NOT comic formats)
+	".pdf", ".epub", ".mobi", ".azw", ".azw3", ".kf8", ".prc", ".djvu", ".doc", ".docx",
+	// Video
+	".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".m4v", ".webm", ".ts", ".m2ts",
+	// Audio
+	".mp3", ".flac", ".wav", ".ogg", ".m4a", ".aac", ".wma", ".opus",
+	// Disc images
+	".iso", ".bin", ".cue", ".nrg",
+	// Source / build artifacts
+	".tar", ".gz", ".bz2", ".xz",
+}
+
+// isComicRelease reports whether the given release title is a plausible
+// comic-format archive. The check is conservative — it accepts anything
+// that doesn't contain a known non-comic extension AND prefers titles
+// that explicitly contain `.cbr` / `.cbz` / `.cb7`. Most scene-style
+// comic releases omit the extension entirely (e.g. "Alice.Never.After.001.
+// (2022).(Empire)"), so we don't require .cbz/.cbr presence — only
+// rejecting on positive evidence of a non-comic format.
+func isComicRelease(title string) bool {
+	t := strings.ToLower(title)
+
+	// Hard-allow when the title explicitly carries a comic extension.
+	if strings.Contains(t, ".cbz") || strings.Contains(t, ".cbr") || strings.Contains(t, ".cb7") {
+		return true
+	}
+
+	for _, ext := range disallowedReleaseExtensions {
+		// Match the extension only when followed by a word boundary so
+		// random substrings (e.g. ".isolated") don't trigger.
+		if idx := strings.Index(t, ext); idx >= 0 {
+			end := idx + len(ext)
+			if end == len(t) {
+				return false
+			}
+			c := t[end]
+			if !(c >= 'a' && c <= 'z') && !(c >= '0' && c <= '9') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // buildSearchQueries returns multiple query strings to try against indexers.
-// Older comics use varied naming so we cast a wider net with several strategies.
-func buildSearchQueries(series *model.Series, issue *model.Issue) []string {
-	seen := make(map[string]bool)
-	var queries []string
-	add := func(q string) {
-		if !seen[q] {
-			seen[q] = true
-			queries = append(queries, q)
+//
+// Naming conventions on Usenet:
+//   - Scene/p2p releases use "Title 001" or "Title.001.(Year)" — never "#".
+//     The "#" symbol breaks matches because indexer search engines treat the
+//     query as a literal substring and no release title contains "#".
+//   - Issue numbers are usually zero-padded to three digits ("001"), even
+//     for double-digit issues ("027").
+//
+// We generate the raw forms that actually appear in release titles. The
+// "#" variants are kept as last-resort fallbacks for indexers that index
+// release subjects from forums where "#" does occasionally appear.
+func buildSearchQueries(series *model.Series, issue *model.Issue, requireYear bool) ([]string, []string) {
+	seenStrict := make(map[string]bool)
+	seenLoose := make(map[string]bool)
+	add := func(target *[]string, seen map[string]bool, q string) {
+		q = strings.TrimSpace(q)
+		if q == "" || seen[q] {
+			return
+		}
+		seen[q] = true
+		*target = append(*target, q)
+	}
+
+	title := strings.TrimSpace(series.Title)
+	if title == "" {
+		title = "untitled series"
+	}
+	num := strings.TrimSpace(issue.IssueNumber)
+
+	var strict []string
+	var loose []string
+
+	addLoose := func(q string) {
+		add(&loose, seenLoose, q)
+	}
+	addStrict := func(q string) {
+		add(&strict, seenStrict, q)
+	}
+
+	// Issue number variants we'll try.
+	var nums []string
+	if num != "" {
+		// Strip a leading zero from "01" → "1" so we don't dedupe-skip it
+		// when input is already padded.
+		bare := strings.TrimLeft(num, "0")
+		if bare == "" {
+			bare = "0"
+		}
+		nums = append(nums, bare)
+		// Three-digit padded form (Empire/Pyrate/etc. always use this).
+		if len(bare) < 3 {
+			nums = append(nums, fmt.Sprintf("%03s", bare))
+		}
+		// Two-digit padded for Marvel/DC continuity series.
+		if len(bare) < 2 {
+			nums = append(nums, fmt.Sprintf("%02s", bare))
 		}
 	}
 
-	title := series.Title
-	num := issue.IssueNumber
-
-	// Strategy 1: title + issue (broadest — catches most NZBs)
-	if num != "" {
-		add(fmt.Sprintf("%s #%s", title, num))
+	// Loose: raw release-style queries — "Title 001", "Title 1".
+	if len(nums) > 0 {
+		for _, n := range nums {
+			addLoose(fmt.Sprintf("%s %s", title, n))
+		}
+		// "#" variants AFTER the bare ones so they only fire as fallbacks.
+		for _, n := range nums {
+			addLoose(fmt.Sprintf("%s #%s", title, n))
+		}
 	} else {
-		add(title)
+		addLoose(title)
 	}
 
-	// Strategy 2: title + year + issue (catches posts that include the year)
-	if series.Year != nil && num != "" {
-		add(fmt.Sprintf("%s %d #%s", title, *series.Year, num))
-	} else if series.Year != nil {
-		add(fmt.Sprintf("%s %d", title, *series.Year))
+	// Year-anchored queries — for low-numbered issues of series that share
+	// titles across multiple volumes (e.g., "Detective Comics #1").
+	if series.Year != nil {
+		year := *series.Year
+		var yearQueries []string
+		if len(nums) > 0 {
+			for _, n := range nums {
+				yearQueries = append(yearQueries,
+					fmt.Sprintf("%s %s %d", title, n, year),
+					fmt.Sprintf("%s %d %s", title, year, n),
+					fmt.Sprintf("%s (%d) %s", title, year, n),
+				)
+			}
+		} else {
+			yearQueries = append(yearQueries,
+				fmt.Sprintf("%s %d", title, year),
+				fmt.Sprintf("%s (%d)", title, year),
+			)
+		}
+
+		for _, q := range yearQueries {
+			if requireYear {
+				addStrict(q)
+			} else {
+				addLoose(q)
+			}
+		}
 	}
 
-	// Strategy 3: zero-padded issue number variant (common in older NZB naming)
-	if num != "" && len(num) < 3 {
-		padded := fmt.Sprintf("%03s", num)
-		add(fmt.Sprintf("%s #%s", title, padded))
-	}
+	return strict, loose
+}
 
-	return queries
+func shouldRequireSeriesYear(series *model.Series, issue *model.Issue) bool {
+	if series == nil || issue == nil || series.Year == nil {
+		return false
+	}
+	return isLowIssueNumber(issue)
 }
 
 // yearPattern matches 4-digit years (1900–2099) in NZB titles.
@@ -616,22 +848,41 @@ func scoreResult(result newznab.SearchResult, series *model.Series, issue *model
 
 	// Year / volume disambiguation
 	if series.Year != nil {
-		yearStr := fmt.Sprintf("%d", *series.Year)
-		if strings.Contains(titleLower, yearStr) {
-			score += 15 // NZB title contains the correct series year
-		}
-		// Check for a different year that may indicate wrong volume
+		year := *series.Year
+		yearStr := fmt.Sprintf("%d", year)
+		hasCorrectYear := strings.Contains(titleLower, yearStr)
+		maxWrongDiff := 0
 		matches := yearPattern.FindAllStringSubmatch(result.Title, -1)
 		for _, m := range matches {
 			if y, err := strconv.Atoi(m[1]); err == nil && y >= 1900 && y <= 2099 {
-				diff := y - *series.Year
+				if y == year {
+					hasCorrectYear = true
+					continue
+				}
+				diff := y - year
 				if diff < 0 {
 					diff = -diff
 				}
-				if diff > 3 {
-					score -= 20 // likely wrong volume/series
-					break
+				if diff > maxWrongDiff {
+					maxWrongDiff = diff
 				}
+			}
+		}
+
+		if hasCorrectYear {
+			score += 25
+		} else if maxWrongDiff > 0 {
+			if isLowIssueNumber(issue) {
+				switch {
+				case maxWrongDiff >= 5:
+					score -= 80
+				case maxWrongDiff >= 3:
+					score -= 60
+				default:
+					score -= 40
+				}
+			} else if maxWrongDiff > 3 {
+				score -= 20
 			}
 		}
 	}
@@ -678,6 +929,19 @@ func scoreResult(result newznab.SearchResult, series *model.Series, issue *model
 	}
 
 	return score
+}
+
+func isLowIssueNumber(issue *model.Issue) bool {
+	if issue == nil {
+		return false
+	}
+	if issue.SortNumber > 0 && issue.SortNumber <= 25 {
+		return true
+	}
+	if n, err := strconv.ParseFloat(strings.TrimSpace(issue.IssueNumber), 64); err == nil {
+		return n > 0 && n <= 25
+	}
+	return false
 }
 
 // scoreRawResult scores a result from a manual/raw search query using size and grab signals.
