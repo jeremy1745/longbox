@@ -143,7 +143,6 @@ func NewRouter(
 			r.Post("/admin/reorganize", libraryH.ReorganizeLibrary)
 			r.Post("/admin/adopt-folders", libraryH.AdoptStrandedFolders)
 			r.Post("/admin/reattach-orphans", libraryH.ReattachOrphanFiles)
-			r.Post("/admin/trash-orphan-files", libraryH.TrashOrphanFiles)
 			r.Get("/admin/pipeline-status", libraryH.PipelineStatus)
 			r.Post("/admin/reconcile-backlog", libraryH.ReconcileBacklog)
 			r.Get("/admin/test-search", libraryH.TestSearch)

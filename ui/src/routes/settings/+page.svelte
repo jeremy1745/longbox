@@ -141,52 +141,6 @@
 	let reconcileRunning = $state(false);
 	let reconcileMessage = $state<string | null>(null);
 
-	// Trash orphan files state
-	type TrashOrphansResult = {
-		scanned: number;
-		files_trashed: number;
-		bytes_reclaimed: number;
-		dry_run: boolean;
-		trashed?: string[];
-		errors?: string[];
-	};
-	let orphanRunning = $state(false);
-	let orphanPreview = $state<TrashOrphansResult | null>(null);
-	let orphanMessage = $state<string | null>(null);
-
-	async function previewOrphans() {
-		orphanRunning = true;
-		orphanMessage = null;
-		try {
-			orphanPreview = await ApiClient.post<TrashOrphansResult>('/admin/trash-orphan-files?dry=1');
-			if (orphanPreview.scanned === 0) {
-				orphanMessage = 'No orphan files (all comic_files have an issue link).';
-			}
-		} catch (e) {
-			orphanMessage = e instanceof Error ? e.message : 'Preview failed';
-		} finally {
-			orphanRunning = false;
-		}
-	}
-
-	async function applyTrashOrphans() {
-		if (!orphanPreview || orphanPreview.scanned === 0) return;
-		const mb = (orphanPreview.bytes_reclaimed / (1024 * 1024)).toFixed(1);
-		if (!confirm(`Move ${orphanPreview.scanned} orphan file${orphanPreview.scanned === 1 ? '' : 's'} to the OS recycle bin? Reclaims ~${mb} MB. Reversible from the recycle bin.`)) return;
-		orphanRunning = true;
-		orphanMessage = null;
-		try {
-			const r = await ApiClient.post<TrashOrphansResult>('/admin/trash-orphan-files');
-			orphanPreview = null;
-			const errCount = (r.errors ?? []).length;
-			orphanMessage = `Trashed ${r.files_trashed} of ${r.scanned} orphan files, reclaimed ${(r.bytes_reclaimed / (1024 * 1024)).toFixed(1)} MB${errCount > 0 ? ` · ${errCount} errors` : ''}.`;
-		} catch (e) {
-			orphanMessage = e instanceof Error ? e.message : 'Trash failed';
-		} finally {
-			orphanRunning = false;
-		}
-	}
-
 	// Adopt stranded folders state
 	type AdoptSubmitResult = { job_id: number; status: string; message: string };
 	let adoptRunning = $state(false);
@@ -2566,55 +2520,6 @@
 									<div class="text-gray-500">{p.current_path}</div>
 									<div class="{p.status === 'conflict' ? 'text-red-300' : 'text-green-300'}">→ {p.new_path}{p.reason ? ` (${p.reason})` : ''}</div>
 								</li>
-							{/each}
-						</ul>
-					</div>
-				{/if}
-
-				<div class="flex items-center justify-between gap-4 pt-3 border-t border-gray-700/50">
-					<div class="min-w-0">
-						<p class="text-sm font-medium text-gray-200">Trash Orphan Files</p>
-						<p class="text-xs text-gray-500 mt-0.5">
-							Trashes every <code class="text-amber-400 bg-gray-900 px-1 rounded">comic_files</code>
-							row whose <code class="text-amber-400 bg-gray-900 px-1 rounded">issue_id</code> is NULL.
-							These are files LongBox can't link to any issue — usually duplicates of canonical
-							copies left over after dedupe-issues passes. Reorganize and dedupe-files both
-							ignore them, so they keep non-canonical folders alive on disk forever. Files go
-							to the OS recycle bin (reversible) and the DB rows are removed. Preview first.
-						</p>
-					</div>
-					<div class="flex flex-col gap-1.5">
-						<button
-							onclick={previewOrphans}
-							disabled={orphanRunning}
-							class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed text-gray-100 rounded-lg transition-colors whitespace-nowrap"
-						>
-							{orphanRunning ? 'Working…' : 'Preview Orphans'}
-						</button>
-						{#if orphanPreview && orphanPreview.scanned > 0}
-							<button
-								onclick={applyTrashOrphans}
-								disabled={orphanRunning}
-								class="px-3 py-1.5 text-sm bg-red-600/80 hover:bg-red-600 disabled:opacity-50 text-white rounded-lg transition-colors whitespace-nowrap"
-							>
-								Trash {orphanPreview.scanned}
-							</button>
-						{/if}
-					</div>
-				</div>
-				{#if orphanMessage}
-					<p class="text-sm text-amber-300/90">{orphanMessage}</p>
-				{/if}
-				{#if orphanPreview && orphanPreview.trashed && orphanPreview.scanned > 0}
-					<div class="bg-gray-900/40 rounded p-3 mt-2 max-h-72 overflow-y-auto">
-						<p class="text-xs text-gray-400 mb-2">
-							{orphanPreview.scanned} orphan file{orphanPreview.scanned === 1 ? '' : 's'} ·
-							would reclaim {(orphanPreview.bytes_reclaimed / (1024 * 1024)).toFixed(1)} MB
-							{#if orphanPreview.dry_run} (preview){:else} · {orphanPreview.files_trashed} trashed{/if}
-						</p>
-						<ul class="text-xs text-gray-300 space-y-0.5 font-mono">
-							{#each orphanPreview.trashed as p}
-								<li class="text-red-300">trash: {p}</li>
 							{/each}
 						</ul>
 					</div>

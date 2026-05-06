@@ -58,23 +58,6 @@ func NewLibraryHandler(
 	}
 }
 
-// TrashOrphanFiles trashes every comic_files row whose issue_id is NULL,
-// removing both the on-disk file (to OS recycle bin) and the DB row.
-// Used to clean up persistent orphans that the reattach pass can't
-// reconnect to a valid issue.
-//
-// POST /api/v1/admin/trash-orphan-files          — applies trash + delete
-// POST /api/v1/admin/trash-orphan-files?dry=1    — preview only
-func (h *LibraryHandler) TrashOrphanFiles(w http.ResponseWriter, r *http.Request) {
-	dry := r.URL.Query().Get("dry") == "1"
-	res, err := h.librarySvc.TrashOrphanFiles(r.Context(), dry)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "TRASH_ORPHANS_FAILED", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, res)
-}
-
 // ReattachOrphanFiles relinks comic_files rows whose issue_id is NULL.
 // Synchronous endpoint — bounded by the request timeout. Bigger libraries
 // would need a background-job variant; for the user's case (≤100 orphans

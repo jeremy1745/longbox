@@ -1150,69 +1150,6 @@ type AdoptStrandedFoldersResult struct {
 //
 // Files only — folders are not deleted by this pass; the Reorganize
 // `cleanEmptyDirs` step does that after the moves.
-// TrashOrphanFilesResult summarizes a trash-orphans pass.
-type TrashOrphanFilesResult struct {
-	Scanned        int      `json:"scanned"`
-	FilesTrashed   int      `json:"files_trashed"`
-	BytesReclaimed int64    `json:"bytes_reclaimed"`
-	DryRun         bool     `json:"dry_run"`
-	Errors         []string `json:"errors,omitempty"`
-	Trashed        []string `json:"trashed,omitempty"`
-}
-
-// TrashOrphanFiles trashes every comic_files row whose issue_id is NULL.
-// These rows are files that LongBox can no longer link to any issue —
-// usually casualties of historical dedupe-issues passes whose
-// RelinkIssueRefs missed them, or filenames the parser couldn't match
-// against existing series. They're invisible to reorganize and dedupe-
-// files (both rely on issue_id), so they accumulate forever and keep
-// non-canonical folders alive on disk.
-//
-// Both the on-disk file and the DB row are removed. Files go to the OS
-// recycle bin (reversible from there) via the existing trash util.
-// dryRun=true previews without touching disk or DB.
-func (s *LibraryService) TrashOrphanFiles(ctx context.Context, dryRun bool) (*TrashOrphanFilesResult, error) {
-	orphans, err := s.fileRepo.ListOrphanFiles()
-	if err != nil {
-		return nil, fmt.Errorf("listing orphan files: %w", err)
-	}
-	res := &TrashOrphanFilesResult{Scanned: len(orphans), DryRun: dryRun}
-	for _, f := range orphans {
-		select {
-		case <-ctx.Done():
-			return res, ctx.Err()
-		default:
-		}
-		res.Trashed = append(res.Trashed, f.FilePath)
-		res.BytesReclaimed += f.FileSize
-		if dryRun {
-			res.FilesTrashed++
-			continue
-		}
-		if err := trash.MoveToTrash(f.FilePath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			res.Errors = append(res.Errors,
-				fmt.Sprintf("trash %s: %v", f.FilePath, err))
-			continue
-		}
-		if f.CoverPath != "" {
-			if rmErr := os.Remove(f.CoverPath); rmErr != nil && !os.IsNotExist(rmErr) {
-				slog.Debug("could not remove orphan cover thumb",
-					"path", f.CoverPath, "error", rmErr)
-			}
-		}
-		if err := s.fileRepo.Delete(f.ID); err != nil {
-			res.Errors = append(res.Errors,
-				fmt.Sprintf("delete row %d: %v", f.ID, err))
-			continue
-		}
-		res.FilesTrashed++
-	}
-	slog.Info("trash-orphans complete",
-		"dry_run", dryRun, "scanned", res.Scanned,
-		"trashed", res.FilesTrashed, "errors", len(res.Errors))
-	return res, nil
-}
-
 // ReattachOrphanFilesResult summarizes a reattach pass.
 type ReattachOrphanFilesResult struct {
 	Scanned        int      `json:"scanned"`
