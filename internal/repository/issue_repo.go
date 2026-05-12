@@ -135,6 +135,13 @@ func (r *IssueRepo) FindByComicVineID(cvID int64) (*model.Issue, error) {
 
 // ListByDateRange returns issues with store_date in the given range.
 // Optionally filters to only tracked series.
+//
+// has_file / file_id are computed via scalar subqueries (not a LEFT
+// JOIN on comic_files) so an issue with N files still produces exactly
+// ONE result row. The earlier LEFT JOIN form duplicated each issue
+// once per attached file, and downstream callers re-emitted each
+// duplicate as its own PullListIssue, which is how the pull-list UI
+// ended up rendering "Teenage Mutant Ninja Turtles #18" three times.
 func (r *IssueRepo) ListByDateRange(start, end string, trackedOnly bool) ([]model.Issue, error) {
 	whereClause := `WHERE i.store_date >= ? AND i.store_date <= ? AND i.store_date != ''`
 	if trackedOnly {
@@ -145,11 +152,10 @@ func (r *IssueRepo) ListByDateRange(start, end string, trackedOnly bool) ([]mode
 		SELECT i.id, i.series_id, i.issue_number, i.sort_number, COALESCE(i.title,''), i.comicvine_id,
 			COALESCE(i.description,''), COALESCE(i.cover_date,''), COALESCE(i.store_date,''), COALESCE(i.cover_url,''), COALESCE(i.writers,''), COALESCE(i.artists,''),
 			i.read_status, i.skip_status, i.rating, i.last_read_page, i.metadata_locked, i.created_at, i.updated_at,
-			CASE WHEN cf.id IS NOT NULL THEN 1 ELSE 0 END as has_file,
-			cf.id as file_id,
+			CASE WHEN EXISTS(SELECT 1 FROM comic_files cf WHERE cf.issue_id = i.id) THEN 1 ELSE 0 END as has_file,
+			(SELECT cf.id FROM comic_files cf WHERE cf.issue_id = i.id ORDER BY cf.id LIMIT 1) as file_id,
 			s.title as series_title
 		FROM issues i
-		LEFT JOIN comic_files cf ON cf.issue_id = i.id
 		JOIN series s ON i.series_id = s.id
 		%s
 		ORDER BY i.store_date ASC, s.title ASC, i.sort_number ASC`, whereClause)

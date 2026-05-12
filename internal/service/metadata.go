@@ -659,14 +659,22 @@ func (s *MetadataService) GetWeeklyReleases(startDate, endDate string) ([]PullLi
 		}
 	}
 
-	// Supplement with local-only issues not in primary results
-	seen := make(map[int]bool)
+	// Supplement with local-only issues not in primary results.
+	// The seen-set tracks BOTH issue CV IDs and (series CV ID, issue number)
+	// keys; without the second key, a local issue whose series matches a
+	// walksoftly release but whose issue-level CV ID is absent (common for
+	// future issues) gets re-emitted as a "local-only" duplicate.
+	seenCV := make(map[int]bool)
+	seenSeriesIssue := make(map[string]bool)
 	for _, r := range results {
 		if r.ComicVineID > 0 {
-			seen[r.ComicVineID] = true
+			seenCV[r.ComicVineID] = true
+		}
+		if r.SeriesCVID > 0 && r.IssueNumber != "" {
+			seenSeriesIssue[fmt.Sprintf("%d:%s", r.SeriesCVID, r.IssueNumber)] = true
 		}
 	}
-	localSupp := s.buildLocalOnlyResults(localIssues, seen, trackedSeriesByCV, wantedIssueIDs)
+	localSupp := s.buildLocalOnlyResults(localIssues, seenCV, seenSeriesIssue, trackedSeriesByCV, wantedIssueIDs)
 	results = append(results, localSupp...)
 
 	debug.TotalResults = len(results)
@@ -1119,16 +1127,27 @@ func (s *MetadataService) buildResultsFromComicVine(
 }
 
 // buildLocalOnlyResults adds local issues that weren't found in the primary results.
+//
+// Skips a local issue if EITHER the issue CV ID OR the (series CV ID,
+// issue number) tuple was already emitted upstream. The two-key check
+// matters for future issues, where walksoftly has the series CV ID but
+// not the issue CV ID — keying only on issue CV ID would let the local
+// row be re-emitted as a duplicate.
 func (s *MetadataService) buildLocalOnlyResults(
 	localIssues []model.Issue,
-	seen map[int]bool,
+	seenCV map[int]bool,
+	seenSeriesIssue map[string]bool,
 	trackedSeriesByCV map[int64]*model.Series,
 	wantedIssueIDs map[int64]bool,
 ) []PullListIssue {
 	var results []PullListIssue
+	emitted := make(map[int64]bool) // protects against duplicate localIssues rows
 
 	for _, li := range localIssues {
-		if li.ComicVineID != nil && seen[int(*li.ComicVineID)] {
+		if emitted[li.ID] {
+			continue
+		}
+		if li.ComicVineID != nil && seenCV[int(*li.ComicVineID)] {
 			continue
 		}
 
@@ -1172,6 +1191,16 @@ func (s *MetadataService) buildLocalOnlyResults(
 			}
 		}
 
+		// Second dedupe check: skip if upstream already emitted this
+		// (series CV ID, issue number) tuple — typical for future issues
+		// where walksoftly has the series but not the issue CV ID.
+		if item.SeriesCVID > 0 && item.IssueNumber != "" {
+			if seenSeriesIssue[fmt.Sprintf("%d:%s", item.SeriesCVID, item.IssueNumber)] {
+				continue
+			}
+		}
+
+		emitted[li.ID] = true
 		results = append(results, item)
 	}
 
