@@ -3,6 +3,7 @@ package repository
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jeremy/longbox/internal/model"
@@ -36,7 +37,7 @@ func (r *SeriesRepo) Create(s *model.Series) error {
 
 func (r *SeriesRepo) GetByID(id int64) (*model.Series, error) {
 	row := r.read.QueryRow(`
-		SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id,
+		SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id, s.metron_id, s.metron_modified_at,
 			COALESCE(s.description,''), s.status, s.total_issues, s.cover_file_id, s.tracked,
 			s.metadata_locked, s.last_cv_sync, s.parent_series_id, s.created_at, s.updated_at,
 			COALESCE((SELECT COUNT(*) FROM issues WHERE series_id = s.id), 0) as issue_count,
@@ -54,7 +55,7 @@ func (r *SeriesRepo) GetByID(id int64) (*model.Series, error) {
 // because the orphan's parsed year doesn't match any local series year.
 func (r *SeriesRepo) ListByTitle(title string) ([]model.Series, error) {
 	rows, err := r.read.Query(`
-		SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id,
+		SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id, s.metron_id, s.metron_modified_at,
 			COALESCE(s.description,''), s.status, s.total_issues, s.cover_file_id, s.tracked,
 			s.metadata_locked, s.last_cv_sync, s.parent_series_id, s.created_at, s.updated_at,
 			0 as issue_count, 0 as file_count, COALESCE(p.name, '') as publisher_name
@@ -82,7 +83,7 @@ func (r *SeriesRepo) FindByTitleAndYear(title string, year *int) (*model.Series,
 	var row *sql.Row
 	if year != nil {
 		row = r.read.QueryRow(`
-			SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id,
+			SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id, s.metron_id, s.metron_modified_at,
 				s.description, s.status, s.total_issues, s.cover_file_id, s.tracked,
 				s.metadata_locked, s.last_cv_sync, s.parent_series_id, s.created_at, s.updated_at,
 				0 as issue_count, 0 as file_count, '' as publisher_name
@@ -90,7 +91,7 @@ func (r *SeriesRepo) FindByTitleAndYear(title string, year *int) (*model.Series,
 			WHERE LOWER(s.title) = LOWER(?) AND s.year = ?`, title, *year)
 	} else {
 		row = r.read.QueryRow(`
-			SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id,
+			SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id, s.metron_id, s.metron_modified_at,
 				s.description, s.status, s.total_issues, s.cover_file_id, s.tracked,
 				s.metadata_locked, s.last_cv_sync, s.parent_series_id, s.created_at, s.updated_at,
 				0 as issue_count, 0 as file_count, '' as publisher_name
@@ -137,7 +138,7 @@ func (r *SeriesRepo) List(page, perPage int, sortBy, order string, trackedOnly .
 	}
 
 	query := fmt.Sprintf(`
-		SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id,
+		SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id, s.metron_id, s.metron_modified_at,
 			COALESCE(s.description,''), s.status, s.total_issues, s.cover_file_id, s.tracked,
 			s.metadata_locked, s.last_cv_sync, s.parent_series_id, s.created_at, s.updated_at,
 			COALESCE((SELECT COUNT(*) FROM issues WHERE series_id = s.id), 0) as issue_count,
@@ -171,7 +172,7 @@ func (r *SeriesRepo) List(page, perPage int, sortBy, order string, trackedOnly .
 // Used by the publisher-backfill pass to know what to touch.
 func (r *SeriesRepo) ListWithoutPublisher() ([]model.Series, error) {
 	rows, err := r.read.Query(`
-		SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id,
+		SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id, s.metron_id, s.metron_modified_at,
 			COALESCE(s.description,''), s.status, s.total_issues, s.cover_file_id, s.tracked,
 			s.metadata_locked, s.last_cv_sync, s.parent_series_id, s.created_at, s.updated_at,
 			0 as issue_count, 0 as file_count, '' as publisher_name
@@ -226,7 +227,7 @@ func (r *SeriesRepo) UpdateFromMetadata(s *model.Series) error {
 // FindByComicVineID finds a series by ComicVine ID.
 func (r *SeriesRepo) FindByComicVineID(cvID int64) (*model.Series, error) {
 	row := r.read.QueryRow(`
-		SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id,
+		SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id, s.metron_id, s.metron_modified_at,
 			COALESCE(s.description,''), s.status, s.total_issues, s.cover_file_id, s.tracked,
 			s.metadata_locked, s.last_cv_sync, s.parent_series_id, s.created_at, s.updated_at,
 			COALESCE((SELECT COUNT(*) FROM issues WHERE series_id = s.id), 0) as issue_count,
@@ -236,6 +237,42 @@ func (r *SeriesRepo) FindByComicVineID(cvID int64) (*model.Series, error) {
 		LEFT JOIN publishers p ON s.publisher_id = p.id
 		WHERE s.comicvine_id = ?`, cvID)
 	return scanSeries(row)
+}
+
+// SetMetronID stores Metron's series ID + its modified-at timestamp on a
+// local series row. Idempotent — calling twice with the same value is a
+// no-op. metron_id is UNIQUE so attempting to set the same id on two
+// rows surfaces as an SQLite UNIQUE-constraint error to the caller.
+func (r *SeriesRepo) SetMetronID(id, metronID int64, modifiedAt string) error {
+	_, err := r.write.Exec(`
+		UPDATE series
+		SET metron_id = ?, metron_modified_at = ?,
+		    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+		WHERE id = ?`, metronID, modifiedAt, id)
+	if err != nil {
+		return fmt.Errorf("setting metron_id: %w", err)
+	}
+	return nil
+}
+
+// FillDescriptionIfEmpty writes the supplied description ONLY if the
+// existing series.description column is empty/NULL. Used by the
+// metadata-enrich pass to fill in Metron data without clobbering CV
+// descriptions that the user may already be happy with.
+func (r *SeriesRepo) FillDescriptionIfEmpty(id int64, desc string) error {
+	desc = strings.TrimSpace(desc)
+	if desc == "" {
+		return nil
+	}
+	_, err := r.write.Exec(`
+		UPDATE series
+		SET description = ?,
+		    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+		WHERE id = ? AND (description IS NULL OR description = '')`, desc, id)
+	if err != nil {
+		return fmt.Errorf("filling series description: %w", err)
+	}
+	return nil
 }
 
 // SetTracked sets the tracked flag on a series.
@@ -248,7 +285,7 @@ func (r *SeriesRepo) SetTracked(id int64, tracked bool) error {
 // ListTracked returns all tracked series (no pagination — typically a small set).
 func (r *SeriesRepo) ListTracked() ([]model.Series, error) {
 	rows, err := r.read.Query(`
-		SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id,
+		SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id, s.metron_id, s.metron_modified_at,
 			COALESCE(s.description,''), s.status, s.total_issues, s.cover_file_id, s.tracked,
 			s.metadata_locked, s.last_cv_sync, s.parent_series_id, s.created_at, s.updated_at,
 			COALESCE((SELECT COUNT(*) FROM issues WHERE series_id = s.id), 0) as issue_count,
@@ -277,7 +314,7 @@ func (r *SeriesRepo) ListTracked() ([]model.Series, error) {
 // ListWithComicVineID returns all series that have been matched to ComicVine.
 func (r *SeriesRepo) ListWithComicVineID() ([]model.Series, error) {
 	rows, err := r.read.Query(`
-		SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id,
+		SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id, s.metron_id, s.metron_modified_at,
 			COALESCE(s.description,''), s.status, s.total_issues, s.cover_file_id, s.tracked,
 			s.metadata_locked, s.last_cv_sync, s.parent_series_id, s.created_at, s.updated_at,
 			COALESCE((SELECT COUNT(*) FROM issues WHERE series_id = s.id), 0) as issue_count,
@@ -319,7 +356,7 @@ func (r *SeriesRepo) SetParentSeries(id int64, parentID *int64) error {
 // GetChildSeries returns all series that are children (annuals) of the given parent.
 func (r *SeriesRepo) GetChildSeries(parentID int64) ([]model.Series, error) {
 	rows, err := r.read.Query(`
-		SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id,
+		SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id, s.metron_id, s.metron_modified_at,
 			COALESCE(s.description,''), s.status, s.total_issues, s.cover_file_id, s.tracked,
 			s.metadata_locked, s.last_cv_sync, s.parent_series_id, s.created_at, s.updated_at,
 			COALESCE((SELECT COUNT(*) FROM issues WHERE series_id = s.id), 0) as issue_count,
@@ -349,7 +386,7 @@ func scanSeries(row *sql.Row) (*model.Series, error) {
 	s := &model.Series{}
 	var createdAt, updatedAt string
 	err := row.Scan(
-		&s.ID, &s.Title, &s.SortTitle, &s.Year, &s.PublisherID, &s.ComicVineID,
+		&s.ID, &s.Title, &s.SortTitle, &s.Year, &s.PublisherID, &s.ComicVineID, &s.MetronID, &s.MetronModified,
 		&s.Description, &s.Status, &s.TotalIssues, &s.CoverFileID, &s.Tracked,
 		&s.MetadataLocked, &s.LastCVSync, &s.ParentSeriesID, &createdAt, &updatedAt,
 		&s.IssueCount, &s.FileCount, &s.PublisherName,
@@ -369,7 +406,7 @@ func scanSeriesRow(rows *sql.Rows) (*model.Series, error) {
 	s := &model.Series{}
 	var createdAt, updatedAt string
 	err := rows.Scan(
-		&s.ID, &s.Title, &s.SortTitle, &s.Year, &s.PublisherID, &s.ComicVineID,
+		&s.ID, &s.Title, &s.SortTitle, &s.Year, &s.PublisherID, &s.ComicVineID, &s.MetronID, &s.MetronModified,
 		&s.Description, &s.Status, &s.TotalIssues, &s.CoverFileID, &s.Tracked,
 		&s.MetadataLocked, &s.LastCVSync, &s.ParentSeriesID, &createdAt, &updatedAt,
 		&s.IssueCount, &s.FileCount, &s.PublisherName,

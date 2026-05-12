@@ -168,6 +168,214 @@ func (s *MetadataService) TestMetronConnection() error {
 	return s.metron.TestConnection()
 }
 
+// EnrichResult is what EnrichSeriesFromMetron returns.
+type EnrichResult struct {
+	SeriesID         int64  `json:"series_id"`
+	SeriesTitle      string `json:"series_title"`
+	MetronID         int64  `json:"metron_id,omitempty"`
+	MetronLinked     bool   `json:"metron_linked"`
+	IssuesUpdated    int    `json:"issues_updated"`
+	IssuesUnmatched  int    `json:"issues_unmatched"`
+	DescriptionSet   bool   `json:"description_set,omitempty"`
+	Note             string `json:"note,omitempty"`
+}
+
+// EnrichSeriesFromMetron resolves a local series's Metron record (via
+// metron_id if already set, else via cv_id) and pulls Metron's metadata
+// into the local row:
+//
+//   - series.metron_id + series.metron_modified_at are set (idempotent)
+//   - series.description is filled in if currently empty (Metron desc only
+//     wins when CV's was missing — descriptions are subjective)
+//   - issue rows matched by issue_number get their metron_id +
+//     metron_modified_at set AND their cover_url overwritten with
+//     Metron's higher-res image (per "always prefer Metron covers")
+//
+// Skips quietly when:
+//   - Metron credentials are not configured (returns a note)
+//   - Series has no comicvine_id AND no metron_id (can't resolve)
+//   - Metron has no matching record for the cv_id
+func (s *MetadataService) EnrichSeriesFromMetron(ctx context.Context, seriesID int64) (*EnrichResult, error) {
+	if !s.HasMetron() {
+		return &EnrichResult{SeriesID: seriesID, Note: "metron credentials not configured"}, nil
+	}
+	ser, err := s.seriesRepo.GetByID(seriesID)
+	if err != nil {
+		return nil, fmt.Errorf("loading series: %w", err)
+	}
+	if ser == nil {
+		return nil, fmt.Errorf("series %d not found", seriesID)
+	}
+
+	result := &EnrichResult{SeriesID: seriesID, SeriesTitle: ser.Title}
+
+	// Resolve Metron series id.
+	var metronSeriesID int
+	var metronModified string
+	if ser.MetronID != nil {
+		metronSeriesID = int(*ser.MetronID)
+	} else if ser.ComicVineID != nil {
+		hit, err := s.metron.FindSeriesByCVID(int(*ser.ComicVineID))
+		if err != nil {
+			return nil, fmt.Errorf("metron find by cv_id %d: %w", *ser.ComicVineID, err)
+		}
+		if hit == nil {
+			result.Note = "no metron record for this comicvine_id"
+			return result, nil
+		}
+		metronSeriesID = hit.ID
+		// Persist the link immediately so the next pass takes the fast path.
+		if err := s.seriesRepo.SetMetronID(seriesID, int64(hit.ID), metronModified); err != nil {
+			slog.Warn("enrich: set metron_id", "series_id", seriesID, "error", err)
+		}
+		result.MetronLinked = true
+		result.MetronID = int64(hit.ID)
+	} else {
+		result.Note = "series has neither comicvine_id nor metron_id"
+		return result, nil
+	}
+
+	// Pull series detail for desc + a fresh modified_at, and the issue list.
+	det, derr := s.metron.GetSeries(metronSeriesID)
+	if derr != nil {
+		slog.Warn("enrich: get series detail", "metron_id", metronSeriesID, "error", derr)
+	} else if det != nil {
+		metronModified = det.ModifiedAt.Format(time.RFC3339)
+		if !result.MetronLinked {
+			// Refresh the modified-at column even on the fast path.
+			_ = s.seriesRepo.SetMetronID(seriesID, int64(metronSeriesID), metronModified)
+		}
+		if ser.Description == "" && det.Description != "" {
+			if err := s.seriesRepo.FillDescriptionIfEmpty(seriesID, det.Description); err == nil {
+				result.DescriptionSet = true
+			}
+		}
+		result.MetronID = int64(metronSeriesID)
+	}
+
+	issues, ierr := s.metron.ListIssues(metronSeriesID)
+	if ierr != nil {
+		return result, fmt.Errorf("metron list issues for series %d: %w", metronSeriesID, ierr)
+	}
+	localIssues, err := s.issueRepo.ListBySeries(seriesID)
+	if err != nil {
+		return result, fmt.Errorf("loading local issues: %w", err)
+	}
+	localByNum := make(map[string]*model.Issue, len(localIssues))
+	for i := range localIssues {
+		localByNum[normalizeIssueNumberKey(localIssues[i].IssueNumber)] = &localIssues[i]
+	}
+
+	for _, mi := range issues {
+		select {
+		case <-ctx.Done():
+			return result, ctx.Err()
+		default:
+		}
+		key := normalizeIssueNumberKey(mi.Number)
+		local, ok := localByNum[key]
+		if !ok {
+			result.IssuesUnmatched++
+			continue
+		}
+		modified := mi.ModifiedAt.Format(time.RFC3339)
+		if err := s.issueRepo.EnrichFromMetron(local.ID, int64(mi.ID), modified, mi.ImageURL); err != nil {
+			slog.Warn("enrich: issue update", "issue_id", local.ID, "error", err)
+			continue
+		}
+		result.IssuesUpdated++
+	}
+
+	slog.Info("enrich series from metron",
+		"series_id", seriesID,
+		"title", ser.Title,
+		"metron_id", metronSeriesID,
+		"linked", result.MetronLinked,
+		"issues_updated", result.IssuesUpdated,
+		"issues_unmatched", result.IssuesUnmatched,
+	)
+	return result, nil
+}
+
+// normalizeIssueNumberKey strips zero-padding so "001" matches "1".
+// Mirrors the heuristic used elsewhere (search.go, calendar handler) so
+// merge consumers all agree on what "issue 1" means.
+func normalizeIssueNumberKey(n string) string {
+	n = strings.TrimSpace(n)
+	if n == "" {
+		return ""
+	}
+	bare := strings.TrimLeft(n, "0")
+	if bare == "" {
+		bare = "0"
+	}
+	return strings.ToLower(bare)
+}
+
+// BulkEnrichResult summarizes an enrich-all-tracked pass.
+type BulkEnrichResult struct {
+	Total            int     `json:"total"`
+	Linked           int     `json:"linked"`
+	AlreadyLinked    int     `json:"already_linked"`
+	NoMatchOnMetron  int     `json:"no_match_on_metron"`
+	Skipped          int     `json:"skipped"`
+	Errors           int     `json:"errors"`
+	IssuesUpdated    int     `json:"issues_updated_total"`
+}
+
+// EnrichAllTrackedFromMetron walks every tracked series and runs
+// EnrichSeriesFromMetron. Sequential — Metron's rate limit dominates
+// throughput (~3s per series; about 174 series ≈ 9 min for the live
+// catalog).
+func (s *MetadataService) EnrichAllTrackedFromMetron(ctx context.Context, progress func(processed, total int, msg string)) (*BulkEnrichResult, error) {
+	if !s.HasMetron() {
+		return nil, fmt.Errorf("metron credentials not configured")
+	}
+	tracked, err := s.seriesRepo.ListTracked()
+	if err != nil {
+		return nil, fmt.Errorf("listing tracked series: %w", err)
+	}
+	res := &BulkEnrichResult{Total: len(tracked)}
+	for i, ser := range tracked {
+		select {
+		case <-ctx.Done():
+			return res, ctx.Err()
+		default:
+		}
+		if progress != nil {
+			progress(i, len(tracked), ser.Title)
+		}
+		alreadyLinked := ser.MetronID != nil
+		out, err := s.EnrichSeriesFromMetron(ctx, ser.ID)
+		if err != nil {
+			slog.Warn("bulk enrich: series", "series_id", ser.ID, "error", err)
+			res.Errors++
+			continue
+		}
+		switch {
+		case strings.HasPrefix(out.Note, "metron credentials"):
+			res.Skipped++
+		case out.Note == "no metron record for this comicvine_id":
+			res.NoMatchOnMetron++
+		case alreadyLinked:
+			res.AlreadyLinked++
+		case out.MetronLinked:
+			res.Linked++
+		default:
+			res.Skipped++
+		}
+		res.IssuesUpdated += out.IssuesUpdated
+	}
+	if progress != nil {
+		progress(len(tracked), len(tracked), "enrich complete")
+	}
+	slog.Info("bulk enrich-from-metron complete",
+		"total", res.Total, "linked", res.Linked, "already_linked", res.AlreadyLinked,
+		"no_match", res.NoMatchOnMetron, "skipped", res.Skipped, "errors", res.Errors,
+		"issues_updated", res.IssuesUpdated)
+	return res, nil
+}
+
 // FindIssueByCVID finds a local issue by its ComicVine ID.
 func (s *MetadataService) FindIssueByCVID(cvID int64) (*model.Issue, error) {
 	return s.issueRepo.FindByComicVineID(cvID)

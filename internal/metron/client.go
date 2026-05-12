@@ -117,6 +117,33 @@ func stripYearSuffix(name string) string {
 	return strings.TrimSpace(trailingYearSuffix.ReplaceAllString(name, ""))
 }
 
+// FindSeriesByCVID resolves a Metron series via its ComicVine cross-reference.
+// Metron stores cv_id on each series and exposes it as a query filter, so
+// CV-tracked series can be linked without name-heuristic matching.
+// Returns nil when Metron has no record for the given CV volume.
+func (c *Client) FindSeriesByCVID(cvID int) (*SearchResult, error) {
+	if !c.HasCredentials() {
+		return nil, fmt.Errorf("metron credentials not configured")
+	}
+	q := url.Values{}
+	q.Set("cv_id", fmt.Sprintf("%d", cvID))
+	q.Set("page_size", "5")
+	var page paginated[seriesListItem]
+	if err := c.get("/series/", q, &page); err != nil {
+		return nil, fmt.Errorf("metron find by cv_id: %w", err)
+	}
+	if len(page.Results) == 0 {
+		return nil, nil
+	}
+	r := page.Results[0]
+	return &SearchResult{
+		ID:          r.ID,
+		Name:        stripYearSuffix(r.Name),
+		YearStarted: r.YearBegan,
+		IssueCount:  r.IssueCount,
+	}, nil
+}
+
 // GetSeries fetches /series/{id}/ for full metadata.
 func (c *Client) GetSeries(id int) (*Series, error) {
 	if !c.HasCredentials() {

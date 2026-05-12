@@ -1,9 +1,12 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jeremy/longbox/internal/service"
@@ -94,6 +97,53 @@ func (h *MetadataHandler) MatchSeries(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "matched"})
+}
+
+// EnrichFromMetron resolves the Metron record for a local series via
+// cv_id (or its already-set metron_id) and pulls Metron's issue covers,
+// description, and IDs into the local rows. Synchronous — one series
+// usually finishes in 6-9 seconds (one /series/?cv_id call + one /issue/
+// list + N issue writes).
+//
+// POST /api/v1/series/{id}/enrich-metron
+func (h *MetadataHandler) EnrichFromMetron(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	seriesID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid series ID")
+		return
+	}
+	result, err := h.metaSvc.EnrichSeriesFromMetron(r.Context(), seriesID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "ENRICH_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// EnrichAllFromMetron walks every tracked series and enriches it from
+// Metron. Fire-and-forget — returns 202 immediately with a count, then
+// runs the bulk pass in a background goroutine (the work runs at
+// Metron's rate-limit pace ~3s per series, so a 174-series catalog
+// takes ~9 min and would otherwise block the HTTP response).
+//
+// POST /api/v1/admin/enrich-all-from-metron
+func (h *MetadataHandler) EnrichAllFromMetron(w http.ResponseWriter, r *http.Request) {
+	if !h.metaSvc.HasMetron() {
+		writeError(w, http.StatusBadRequest, "METRON_UNCONFIGURED", "metron credentials not configured")
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+		if _, err := h.metaSvc.EnrichAllTrackedFromMetron(ctx, nil); err != nil {
+			slog.Warn("bulk enrich-from-metron failed", "error", err)
+		}
+	}()
+	writeJSON(w, http.StatusAccepted, map[string]string{
+		"status":  "started",
+		"message": "Metron enrich running in background; check logs / re-query to see progress",
+	})
 }
 
 // GetVolumeIssues returns all issues for a ComicVine volume (read-only preview).

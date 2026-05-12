@@ -9,6 +9,8 @@ type Series struct {
 	Year           *int      `json:"year,omitempty"`
 	PublisherID    *int64    `json:"publisher_id,omitempty"`
 	ComicVineID    *int64    `json:"comicvine_id,omitempty"`
+	MetronID       *int64    `json:"metron_id,omitempty"`
+	MetronModified *string   `json:"metron_modified_at,omitempty"`
 	Description    string    `json:"description,omitempty"`
 	Status         string    `json:"status"`
 	TotalIssues    int       `json:"total_issues"`

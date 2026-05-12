@@ -187,6 +187,27 @@ func (r *IssueRepo) UpdateLastReadPage(id int64, page int) error {
 }
 
 // SetSkipStatus sets the skip status of an issue.
+// EnrichFromMetron writes Metron's identifier + modified-at AND overwrites
+// the cover URL on an issue. cover_url is set unconditionally per the
+// "always prefer Metron covers" policy; the metron_id pair is set with
+// the standard UNIQUE-constraint behavior. Pass empty coverURL to skip
+// the cover write.
+func (r *IssueRepo) EnrichFromMetron(id, metronID int64, modifiedAt, coverURL string) error {
+	if coverURL != "" {
+		_, err := r.write.Exec(`
+			UPDATE issues
+			SET metron_id = ?, metron_modified_at = ?, cover_url = ?,
+			    updated_at = ?
+			WHERE id = ?`, metronID, modifiedAt, coverURL, time.Now().UTC().Format(time.RFC3339), id)
+		return err
+	}
+	_, err := r.write.Exec(`
+		UPDATE issues
+		SET metron_id = ?, metron_modified_at = ?, updated_at = ?
+		WHERE id = ?`, metronID, modifiedAt, time.Now().UTC().Format(time.RFC3339), id)
+	return err
+}
+
 func (r *IssueRepo) SetSkipStatus(id int64, status *string) error {
 	_, err := r.write.Exec(`UPDATE issues SET skip_status = ?, updated_at = ? WHERE id = ?`,
 		status, time.Now().UTC().Format(time.RFC3339), id)

@@ -117,6 +117,7 @@ func NewRouter(
 				r.Post("/admin/reattach-orphans", libraryH.ReattachOrphans)
 				r.Post("/admin/backfill-publishers", libraryH.BackfillPublishers)
 				r.Post("/admin/backfill-series-folders", libraryH.BackfillSeriesFolders)
+				r.Post("/admin/enrich-all-from-metron", metaH.EnrichAllFromMetron)
 				r.Post("/admin/shutdown", func(w http.ResponseWriter, r *http.Request) {
 					w.Header().Set("Content-Type", "application/json")
 					json.NewEncoder(w).Encode(map[string]string{"message": "server is shutting down"})
@@ -170,6 +171,7 @@ func NewRouter(
 			r.Get("/metadata/volume/{cvid}/issues", metaH.GetVolumeIssues)
 			r.Get("/metadata/story-arcs/search", storyArcH.Search)
 			r.Post("/series/{id}/match", metaH.MatchSeries)
+			r.Post("/series/{id}/enrich-metron", metaH.EnrichFromMetron)
 			r.Post("/series/{id}/refresh", metaH.RefreshSeries)
 
 			// Story Arcs
