@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -97,7 +98,7 @@ func (c *Client) SearchSeries(query string) ([]SearchResult, error) {
 	for _, r := range page.Results {
 		out = append(out, SearchResult{
 			ID:          r.ID,
-			Name:        r.Name,
+			Name:        stripYearSuffix(r.Name),
 			YearStarted: r.YearBegan,
 			IssueCount:  r.IssueCount,
 			ImageURL:    r.Image,
@@ -105,6 +106,15 @@ func (c *Client) SearchSeries(query string) ([]SearchResult, error) {
 		})
 	}
 	return out, nil
+}
+
+// stripYearSuffix removes a trailing " (YYYY)" or " (YYYY-YYYY)" / " (YYYY-)"
+// from a Metron series-list display name like "Absolute Batman (2024)" so
+// it lines up with the bare names returned by ComicVine's search. Idempotent.
+var trailingYearSuffix = regexp.MustCompile(`\s*\((\d{4})(?:-(?:\d{4})?)?\)\s*$`)
+
+func stripYearSuffix(name string) string {
+	return strings.TrimSpace(trailingYearSuffix.ReplaceAllString(name, ""))
 }
 
 // GetSeries fetches /series/{id}/ for full metadata.

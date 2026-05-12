@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -315,11 +316,21 @@ func (s *MetadataService) SearchVolumes(query string, page int) ([]MetadataSearc
 
 	// Build by (normalized name, year) key so duplicates from both sources
 	// collapse into one row with both IDs populated.
+	//
+	// Normalization rules — discovered empirically against the live Metron
+	// API (see commit message of the merge-tightening commit):
+	//   * Lowercase + trim whitespace.
+	//   * Strip a trailing " (YYYY)" / " (YYYY-)" / " (YYYY-YYYY)" suffix —
+	//     Metron's list endpoint formats names that way, ComicVine doesn't.
+	//   * Collapse all internal whitespace runs to single spaces.
+	//
+	// The year axis stays separate so multi-volume series ("Batman" 1940
+	// vs "Batman" 2016) don't collapse into one row.
 	merged := make(map[string]*MetadataSearchResult)
 	order := []string{}
 
 	addKey := func(name, year string) string {
-		return strings.ToLower(strings.TrimSpace(name)) + "|" + year
+		return normalizeSearchKey(name) + "|" + year
 	}
 
 	for _, r := range cv.results {
@@ -420,6 +431,21 @@ func appendUnique(slice []string, v string) []string {
 		}
 	}
 	return append(slice, v)
+}
+
+// trailingYearSuffixRE matches " (YYYY)" / " (YYYY-)" / " (YYYY-YYYY)"
+// at the end of a series name. Mirrors the helper in the metron client
+// — duplicated to avoid an import cycle and so MetadataService can run
+// the merge with no per-source-specific knowledge.
+var trailingYearSuffixRE = regexp.MustCompile(`\s*\((\d{4})(?:-(?:\d{4})?)?\)\s*$`)
+
+// multiSpaceRE collapses runs of whitespace.
+var multiSpaceRE = regexp.MustCompile(`\s+`)
+
+func normalizeSearchKey(name string) string {
+	name = trailingYearSuffixRE.ReplaceAllString(name, "")
+	name = multiSpaceRE.ReplaceAllString(name, " ")
+	return strings.ToLower(strings.TrimSpace(name))
 }
 
 // GetVolume fetches volume details from ComicVine.
