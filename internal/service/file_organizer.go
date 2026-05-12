@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/jeremy/longbox/internal/model"
 	"github.com/jeremy/longbox/internal/repository"
 	tmpl "github.com/jeremy/longbox/internal/template"
 )
@@ -18,7 +19,7 @@ type RenamePreview struct {
 	FileID      int64  `json:"file_id"`
 	CurrentPath string `json:"current_path"`
 	NewPath     string `json:"new_path"`
-	Status      string `json:"status"` // "move", "skip", "conflict", "unlinked"
+	Status      string `json:"status"`
 	Reason      string `json:"reason,omitempty"`
 }
 
@@ -33,10 +34,11 @@ type RenameResult struct {
 
 // FileOrganizerService handles template-based file organization.
 type FileOrganizerService struct {
-	fileRepo    *repository.FileRepo
-	issueRepo   *repository.IssueRepo
-	seriesRepo  *repository.SeriesRepo
-	settingRepo *repository.SettingRepo
+	fileRepo     *repository.FileRepo
+	issueRepo    *repository.IssueRepo
+	seriesRepo   *repository.SeriesRepo
+	settingRepo  *repository.SettingRepo
+	annualFolder string
 }
 
 func NewFileOrganizerService(
@@ -44,12 +46,18 @@ func NewFileOrganizerService(
 	issueRepo *repository.IssueRepo,
 	seriesRepo *repository.SeriesRepo,
 	settingRepo *repository.SettingRepo,
+	annualSubfolder string,
 ) *FileOrganizerService {
+	folder := tmpl.SanitizePathComponent(annualSubfolder)
+	if folder == "" {
+		folder = "Annuals"
+	}
 	return &FileOrganizerService{
-		fileRepo:    fileRepo,
-		issueRepo:   issueRepo,
-		seriesRepo:  seriesRepo,
-		settingRepo: settingRepo,
+		fileRepo:     fileRepo,
+		issueRepo:    issueRepo,
+		seriesRepo:   seriesRepo,
+		settingRepo:  settingRepo,
+		annualFolder: folder,
 	}
 }
 
@@ -71,6 +79,16 @@ func (s *FileOrganizerService) SetTemplate(template string) error {
 	return s.settingRepo.Set(settingKeyNamingTemplate, template)
 }
 
+// BuildPath renders the naming template for a specific issue/series.
+func (s *FileOrganizerService) BuildPath(series *model.Series, issue *model.Issue, format string) (string, error) {
+	templateStr := s.GetTemplate()
+	t, err := tmpl.Parse(templateStr)
+	if err != nil {
+		return "", err
+	}
+	return s.renderPath(t, series, issue, format, nil)
+}
+
 // Preview generates a dry-run list of all proposed renames.
 func (s *FileOrganizerService) Preview(libraryDir, templateStr string) ([]RenamePreview, error) {
 	if templateStr == "" {
@@ -87,16 +105,13 @@ func (s *FileOrganizerService) Preview(libraryDir, templateStr string) ([]Rename
 		return nil, fmt.Errorf("listing files: %w", err)
 	}
 
+	parentCache := make(map[int64]*model.Series)
 	var previews []RenamePreview
-	newPaths := make(map[string]int64) // track path → fileID to detect conflicts
+	newPaths := make(map[string]int64)
 
 	for _, f := range files {
-		preview := RenamePreview{
-			FileID:      f.ID,
-			CurrentPath: f.FilePath,
-		}
+		preview := RenamePreview{FileID: f.ID, CurrentPath: f.FilePath}
 
-		// Skip files without a linked issue
 		if f.IssueID == nil {
 			preview.Status = "unlinked"
 			preview.Reason = "File not linked to an issue"
@@ -105,7 +120,6 @@ func (s *FileOrganizerService) Preview(libraryDir, templateStr string) ([]Rename
 			continue
 		}
 
-		// Load issue and series data
 		issue, err := s.issueRepo.GetByID(*f.IssueID)
 		if err != nil || issue == nil {
 			preview.Status = "unlinked"
@@ -124,29 +138,7 @@ func (s *FileOrganizerService) Preview(libraryDir, templateStr string) ([]Rename
 			continue
 		}
 
-		// Build template context
-		ctx := tmpl.TemplateContext{
-			Series:     series.Title,
-			SortSeries: series.SortTitle,
-			Number:     issue.IssueNumber,
-			Title:      issue.Title,
-			Format:     f.FileFormat,
-			CoverDate:  issue.CoverDate,
-			StoreDate:  issue.StoreDate,
-			Publisher:  series.PublisherName,
-		}
-		if issue.Writers != "" {
-			// Use first writer only for filename
-			ctx.Writers = strings.SplitN(issue.Writers, ",", 2)[0]
-			ctx.Writers = strings.TrimSpace(ctx.Writers)
-		}
-		if issue.Artists != "" {
-			ctx.Artists = strings.SplitN(issue.Artists, ",", 2)[0]
-			ctx.Artists = strings.TrimSpace(ctx.Artists)
-		}
-
-		// Execute template
-		relPath, err := t.Execute(ctx)
+		relPath, err := s.renderPath(t, series, issue, f.FileFormat, parentCache)
 		if err != nil {
 			preview.Status = "unlinked"
 			preview.Reason = fmt.Sprintf("Template error: %v", err)
@@ -158,7 +150,6 @@ func (s *FileOrganizerService) Preview(libraryDir, templateStr string) ([]Rename
 		newFullPath := filepath.Join(libraryDir, relPath)
 		preview.NewPath = newFullPath
 
-		// Check if already at correct location
 		if filepath.Clean(f.FilePath) == filepath.Clean(newFullPath) {
 			preview.Status = "skip"
 			preview.Reason = "Already organized"
@@ -166,7 +157,6 @@ func (s *FileOrganizerService) Preview(libraryDir, templateStr string) ([]Rename
 			continue
 		}
 
-		// Check for conflicts
 		if existingID, exists := newPaths[newFullPath]; exists {
 			preview.Status = "conflict"
 			preview.Reason = fmt.Sprintf("Path conflicts with file #%d", existingID)
@@ -189,11 +179,7 @@ func (s *FileOrganizerService) Execute(libraryDir string) (*RenameResult, error)
 		return nil, err
 	}
 
-	result := &RenameResult{
-		TotalFiles: len(previews),
-	}
-
-	// Track original directories for cleanup
+	result := &RenameResult{TotalFiles: len(previews)}
 	origDirs := make(map[string]bool)
 
 	for _, p := range previews {
@@ -202,10 +188,8 @@ func (s *FileOrganizerService) Execute(libraryDir string) (*RenameResult, error)
 			continue
 		}
 
-		// Track original directory for later cleanup
 		origDirs[filepath.Dir(p.CurrentPath)] = true
 
-		// Ensure target directory exists
 		targetDir := filepath.Dir(p.NewPath)
 		if err := os.MkdirAll(targetDir, 0755); err != nil {
 			result.Errors++
@@ -214,7 +198,6 @@ func (s *FileOrganizerService) Execute(libraryDir string) (*RenameResult, error)
 			continue
 		}
 
-		// Check if target already exists (safety check)
 		if _, err := os.Stat(p.NewPath); err == nil {
 			result.Errors++
 			result.ErrorDetails = append(result.ErrorDetails,
@@ -222,7 +205,6 @@ func (s *FileOrganizerService) Execute(libraryDir string) (*RenameResult, error)
 			continue
 		}
 
-		// Move the file
 		if err := os.Rename(p.CurrentPath, p.NewPath); err != nil {
 			result.Errors++
 			result.ErrorDetails = append(result.ErrorDetails,
@@ -230,10 +212,8 @@ func (s *FileOrganizerService) Execute(libraryDir string) (*RenameResult, error)
 			continue
 		}
 
-		// Update database
 		newName := filepath.Base(p.NewPath)
 		if err := s.fileRepo.UpdatePath(p.FileID, p.NewPath, newName); err != nil {
-			// File was moved but DB update failed — try to move it back
 			slog.Error("DB update failed after file move, attempting rollback",
 				"file_id", p.FileID, "new_path", p.NewPath, "error", err)
 			if rbErr := os.Rename(p.NewPath, p.CurrentPath); rbErr != nil {
@@ -250,7 +230,6 @@ func (s *FileOrganizerService) Execute(libraryDir string) (*RenameResult, error)
 		slog.Debug("file moved", "from", p.CurrentPath, "to", p.NewPath)
 	}
 
-	// Clean up empty directories
 	for dir := range origDirs {
 		cleanEmptyDirs(dir, libraryDir)
 	}
@@ -262,6 +241,72 @@ func (s *FileOrganizerService) Execute(libraryDir string) (*RenameResult, error)
 	)
 
 	return result, nil
+}
+
+func (s *FileOrganizerService) renderPath(t *tmpl.Template, series *model.Series, issue *model.Issue, format string, parentCache map[int64]*model.Series) (string, error) {
+	if parentCache == nil {
+		parentCache = make(map[int64]*model.Series)
+	}
+
+	ctx := tmpl.TemplateContext{
+		Series:          series.Title,
+		SortSeries:      series.SortTitle,
+		Number:          issue.IssueNumber,
+		Title:           issue.Title,
+		Format:          format,
+		CoverDate:       issue.CoverDate,
+		StoreDate:       issue.StoreDate,
+		Publisher:       series.PublisherName,
+		AnnualSubfolder: s.annualFolder,
+	}
+
+	if issue.Writers != "" {
+		ctx.Writers = strings.TrimSpace(strings.SplitN(issue.Writers, ",", 2)[0])
+	}
+	if issue.Artists != "" {
+		ctx.Artists = strings.TrimSpace(strings.SplitN(issue.Artists, ",", 2)[0])
+	}
+	if series.Year != nil {
+		ctx.SeriesYear = fmt.Sprintf("%d", *series.Year)
+	}
+	if year := extractYear(issue.CoverDate, issue.StoreDate); year != "" {
+		ctx.Year = year
+	} else if series.Year != nil {
+		ctx.Year = fmt.Sprintf("%d", *series.Year)
+	}
+
+	var parentSeries *model.Series
+	if series.ParentSeriesID != nil {
+		parentSeries = s.lookupParent(*series.ParentSeriesID, parentCache)
+		if parentSeries != nil {
+			ctx.ParentSeries = parentSeries.Title
+		}
+	}
+
+	relPath, err := t.Execute(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	if parentSeries != nil {
+		parentName := tmpl.SanitizePathComponent(parentSeries.Title)
+		relPath = filepath.Join(parentName, s.annualFolder, relPath)
+	}
+
+	return relPath, nil
+}
+
+func (s *FileOrganizerService) lookupParent(id int64, cache map[int64]*model.Series) *model.Series {
+	if parent, ok := cache[id]; ok {
+		return parent
+	}
+	parent, err := s.seriesRepo.GetByID(id)
+	if err != nil || parent == nil {
+		cache[id] = nil
+		return nil
+	}
+	cache[id] = parent
+	return parent
 }
 
 // cleanEmptyDirs removes empty directories from bottom up, stopping at libraryDir.
@@ -281,4 +326,16 @@ func cleanEmptyDirs(dir, stopAt string) {
 		}
 		dir = filepath.Dir(dir)
 	}
+}
+
+func extractYear(values ...string) string {
+	for _, v := range values {
+		if len(v) >= 4 {
+			year := v[:4]
+			if _, err := fmt.Sscanf(year, "%04d", new(int)); err == nil {
+				return year
+			}
+		}
+	}
+	return ""
 }

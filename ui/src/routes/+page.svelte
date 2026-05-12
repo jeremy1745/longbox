@@ -16,7 +16,7 @@
 		try {
 			const [statsData, seriesData] = await Promise.all([
 				ApiClient.get<LibraryStats>('/library/stats'),
-				ApiClient.get<SeriesListResponse>('/series?per_page=12&sort=updated_at&order=desc')
+				ApiClient.get<SeriesListResponse>('/series?per_page=12&sort=created_at&order=desc')
 			]);
 			stats = statsData;
 			recentSeries = seriesData.series || [];
@@ -176,7 +176,7 @@
 	{:else if recentSeries.length > 0}
 		<div>
 			<div class="flex items-center justify-between mb-4">
-				<h2 class="text-xl font-semibold">Recently Updated</h2>
+				<h2 class="text-xl font-semibold">Recently Added</h2>
 				<a href="/library" class="text-amber-400 hover:text-amber-300 text-sm">View All &rarr;</a>
 			</div>
 			<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">

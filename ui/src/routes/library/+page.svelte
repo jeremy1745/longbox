@@ -1,9 +1,20 @@
 <script lang="ts">
 	import { ApiClient, type Series, type SeriesListResponse } from '$lib/api/client';
 	import SeriesCard from '$lib/components/SeriesCard.svelte';
+	import SeriesGroupCard, { type SeriesGroup } from '$lib/components/SeriesGroupCard.svelte';
 
-	// View mode: 'grid' = flat series grid (original), 'browse' = folder hierarchy
+	// View mode: 'grid' = flat series/series-group grid, 'browse' = folder hierarchy
 	let viewMode = $state<'grid' | 'browse'>('grid');
+	let groupMode = $state(true);
+	let selectedGroup = $state<SeriesGroup | null>(null);
+
+	let selectedGroupCompletion = $derived(() => {
+		if (!selectedGroup) return 0;
+		if (selectedGroup.totalIssues > 0) {
+			return Math.min(100, Math.round((selectedGroup.fileCount / selectedGroup.totalIssues) * 100));
+		}
+		return selectedGroup.series.length > 0 ? 100 : 0;
+	});
 
 	// --- Grid mode state ---
 	let series = $state<Series[]>([]);
@@ -49,6 +60,37 @@
 				return sPub === pub;
 			})
 			.sort((a, b) => a.title.localeCompare(b.title));
+	});
+
+	function baseSeriesTitle(title: string): string {
+		const match = title.match(/^(.*)\s\((\d{4})(?:[^)]*)?\)$/);
+		if (match) {
+			return match[1].trim();
+		}
+		return title.trim();
+	}
+
+	let seriesGroups = $derived(() => {
+		if (!groupMode) return [] as SeriesGroup[];
+		const source = allSeries.length > 0 ? allSeries : series;
+		const map = new Map<string, SeriesGroup>();
+		for (const s of source) {
+			const key = baseSeriesTitle(s.title);
+			let group = map.get(key);
+			if (!group) {
+				group = { title: key, series: [], coverSeries: null, fileCount: 0, totalIssues: 0 };
+				map.set(key, group);
+			}
+			group.series.push(s);
+			group.fileCount += s.file_count;
+			group.totalIssues += s.total_issues || 0;
+			if (!group.coverSeries || (!group.coverSeries.cover_file_id && s.cover_file_id)) {
+				group.coverSeries = s;
+			} else if ((s.year || 0) > (group.coverSeries.year || 0)) {
+				group.coverSeries = s;
+			}
+		}
+		return [...map.values()].sort((a, b) => a.title.localeCompare(b.title));
 	});
 
 	async function loadSeries() {
@@ -104,6 +146,15 @@
 		}
 	}
 
+	function switchGroupMode(value: boolean) {
+		groupMode = value;
+		if (value) {
+			loadAllSeries();
+		} else {
+			selectedGroup = null;
+		}
+	}
+
 	function navigateTo(...path: string[]) {
 		browsePath = path;
 	}
@@ -111,8 +162,18 @@
 	let totalPages = $derived(Math.ceil(total / perPage));
 
 	$effect(() => {
-		if (viewMode === 'grid') {
+		if (viewMode === 'grid' && !groupMode) {
+			page;
+			sortBy;
+			order;
+			trackedFilter;
 			loadSeries();
+		}
+	});
+
+	$effect(() => {
+		if (viewMode === 'grid' && groupMode) {
+			loadAllSeries();
 		}
 	});
 </script>
@@ -123,7 +184,9 @@
 			<h1 class="text-3xl font-bold">Library</h1>
 			<p class="text-gray-400 mt-1">
 				{#if viewMode === 'grid'}
-					{#if total > 0}
+					{#if groupMode}
+						{seriesGroups.length} collections
+					{:else if total > 0}
 						{total} series
 					{:else}
 						No series found
@@ -159,6 +222,32 @@
 					Browse
 				</button>
 			</div>
+		{#if viewMode === 'grid'}
+			<!-- Group mode toggle -->
+			<div class="flex gap-1 mr-2 border-r border-gray-700 pr-3">
+				<button
+					onclick={() => switchGroupMode(true)}
+					class="px-3 py-1.5 text-sm rounded-md transition-colors flex items-center gap-1.5
+						{groupMode ? 'bg-amber-500 text-gray-900' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}"
+				>
+					<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+					</svg>
+					Folders
+				</button>
+				<button
+					onclick={() => switchGroupMode(false)}
+					class="px-3 py-1.5 text-sm rounded-md transition-colors flex items-center gap-1.5
+						{!groupMode ? 'bg-gray-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}"
+				>
+					<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16" />
+					</svg>
+					Volumes
+				</button>
+			</div>
+		{/if}
+
 
 			{#if viewMode === 'grid'}
 				<!-- Tracked filter -->
@@ -206,45 +295,65 @@
 
 	<!-- ==================== GRID VIEW ==================== -->
 	{#if viewMode === 'grid'}
-		{#if loading}
-			<div class="flex items-center justify-center py-20">
-				<div class="text-gray-400">Loading...</div>
-			</div>
-		{:else if series.length > 0}
-			<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
-				{#each series as s (s.id)}
-					<SeriesCard series={s} />
-				{/each}
-			</div>
-
-			<!-- Pagination -->
-			{#if totalPages > 1}
-				<div class="flex items-center justify-center gap-2 pt-4">
-					<button
-						onclick={() => { page = Math.max(1, page - 1); loadSeries(); }}
-						disabled={page <= 1}
-						class="px-3 py-1.5 text-sm bg-gray-700 rounded-md hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"
-					>
-						Previous
-					</button>
-					<span class="text-sm text-gray-400">
-						Page {page} of {totalPages}
-					</span>
-					<button
-						onclick={() => { page = Math.min(totalPages, page + 1); loadSeries(); }}
-						disabled={page >= totalPages}
-						class="px-3 py-1.5 text-sm bg-gray-700 rounded-md hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"
-					>
-						Next
-					</button>
+		{#if groupMode}
+			{#if browseLoading && allSeries.length === 0}
+				<div class="flex items-center justify-center py-20">
+					<div class="text-gray-400">Loading...</div>
+				</div>
+			{:else if seriesGroups.length > 0}
+				<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
+					{#each seriesGroups as group (group.title)}
+						<SeriesGroupCard {group} on:select={(event) => selectedGroup = event.detail} />
+					{/each}
+				</div>
+			{:else}
+				<div class="flex flex-col items-center justify-center py-20 text-gray-400">
+					<p class="text-lg font-medium">No series found</p>
+					<p class="text-sm mt-2">Scan your library from the dashboard to discover comics.</p>
 				</div>
 			{/if}
 		{:else}
-			<div class="flex flex-col items-center justify-center py-20 text-gray-400">
-				<p class="text-lg font-medium">No series found</p>
-				<p class="text-sm mt-2">Scan your library from the dashboard to discover comics.</p>
-			</div>
+			{#if loading}
+				<div class="flex items-center justify-center py-20">
+					<div class="text-gray-400">Loading...</div>
+				</div>
+			{:else if series.length > 0}
+				<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
+					{#each series as s (s.id)}
+						<SeriesCard series={s} />
+					{/each}
+				</div>
+
+				<!-- Pagination -->
+				{#if totalPages > 1}
+					<div class="flex items-center justify-center gap-2 pt-4">
+						<button
+							onclick={() => { page = Math.max(1, page - 1); loadSeries(); }}
+							disabled={page <= 1}
+							class="px-3 py-1.5 text-sm bg-gray-700 rounded-md hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"
+						>
+							Previous
+						</button>
+						<span class="text-sm text-gray-400">
+							Page {page} of {totalPages}
+						</span>
+						<button
+							onclick={() => { page = Math.min(totalPages, page + 1); loadSeries(); }}
+							disabled={page >= totalPages}
+							class="px-3 py-1.5 text-sm bg-gray-700 rounded-md hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"
+						>
+							Next
+						</button>
+					</div>
+				{/if}
+			{:else}
+				<div class="flex flex-col items-center justify-center py-20 text-gray-400">
+					<p class="text-lg font-medium">No series found</p>
+					<p class="text-sm mt-2">Scan your library from the dashboard to discover comics.</p>
+				</div>
+			{/if}
 		{/if}
+
 
 	<!-- ==================== BROWSE VIEW ==================== -->
 	{:else}
@@ -322,3 +431,87 @@
 		{/if}
 	{/if}
 </div>
+
+	{#if selectedGroup}
+		<div
+			class="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50"
+			role="dialog"
+			aria-modal="true"
+			tabindex="-1"
+			onkeydown={(event) => { if (event.key === 'Escape') selectedGroup = null; }}
+			onclick={(event) => {
+				if (event.target === event.currentTarget) {
+					selectedGroup = null;
+				}
+			}}
+		>
+			<div class="bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl w-full max-w-6xl max-h-[92vh] overflow-hidden">
+				<div class="grid md:grid-cols-[260px,1fr] h-full">
+					<div class="bg-gray-950/60 border-b md:border-b-0 md:border-r border-gray-800">
+						<div class="relative aspect-[2/3]">
+							{#if selectedGroup.coverSeries?.cover_file_id}
+								<img
+									src={`/api/v1/covers/file/${selectedGroup.coverSeries.cover_file_id}`}
+									alt={selectedGroup.title}
+									class="w-full h-full object-cover"
+								/>
+							{:else}
+								<div class="w-full h-full bg-gray-800 flex items-center justify-center">
+									<svg class="w-12 h-12 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+											d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+									</svg>
+								</div>
+							{/if}
+							<div class="absolute top-3 left-3 bg-black/70 text-xs text-gray-100 px-2 py-0.5 rounded">{selectedGroup.series.length} volumes</div>
+						</div>
+						<div class="p-4 space-y-3">
+							<h3 class="text-lg font-semibold text-white">{selectedGroup.title}</h3>
+							<p class="text-xs text-gray-500">{selectedGroup.fileCount} file{selectedGroup.fileCount === 1 ? '' : 's'} · {selectedGroup.totalIssues} total issues</p>
+							{#if selectedGroup.totalIssues > 0}
+								<div>
+									<div class="h-1.5 bg-gray-800 rounded-full overflow-hidden">
+										<div
+											class={`h-full rounded-full ${selectedGroupCompletion === 100 ? 'bg-green-500' : 'bg-amber-500'}`}
+											style={`width: ${selectedGroupCompletion}%`}
+										></div>
+									</div>
+									<p class="text-[10px] text-gray-500 mt-1 text-right">{selectedGroupCompletion}% complete</p>
+								</div>
+							{/if}
+							<button
+								onclick={() => selectedGroup = null}
+								class="w-full mt-2 text-sm px-3 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-100 transition-colors"
+							>
+								Close
+							</button>
+						</div>
+					</div>
+					<div class="flex-1 flex flex-col">
+						<div class="flex items-center justify-between px-4 py-3 border-b border-gray-800">
+							<div>
+								<p class="text-xs uppercase tracking-wide text-gray-500">Volumes</p>
+								<p class="text-sm text-gray-300">{selectedGroup.series.length} available</p>
+							</div>
+							<button
+								onclick={() => selectedGroup = null}
+								class="text-gray-400 hover:text-white transition-colors"
+								title="Close"
+							>
+								<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+								</svg>
+							</button>
+						</div>
+						<div class="p-4 overflow-y-auto">
+							<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+								{#each selectedGroup.series as s (s.id)}
+									<SeriesCard series={s} />
+								{/each}
+							</div>
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+	{/if}

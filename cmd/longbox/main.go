@@ -34,6 +34,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	backlogSettings := service.BacklogSettings{
+		DefaultIncludeVariants: cfg.Backlog.EnableVariants,
+		MaxRetries:             cfg.Backlog.MaxRetries,
+		RetryBackoffMinutes:    cfg.Backlog.RetryBackoffMinutes,
+	}
+
 	// Configure logging
 	var logLevel slog.Level
 	switch cfg.LogLevel {
@@ -73,6 +79,7 @@ func main() {
 		slog.Info("cleaned up orphaned jobs from previous run", "count", cleaned)
 	}
 	wantListRepo := repository.NewWantListRepo(db.Read, db.Write)
+	backlogRepo := repository.NewBacklogRepo(db.Read, db.Write)
 	settingRepo := repository.NewSettingRepo(db.Read, db.Write)
 	publisherRepo := repository.NewPublisherRepo(db.Read, db.Write)
 	indexerRepo := repository.NewIndexerRepo(db.Read, db.Write)
@@ -100,7 +107,7 @@ func main() {
 		slog.Info("loaded library directory from settings", "dir", dbLibDir)
 	}
 	readerSvc := service.NewReaderService()
-	organizeSvc := service.NewFileOrganizerService(fileRepo, issueRepo, seriesRepo, settingRepo)
+	organizeSvc := service.NewFileOrganizerService(fileRepo, issueRepo, seriesRepo, settingRepo, cfg.Backlog.AnnualSubfolder)
 	metaWriterSvc := service.NewMetadataWriterService(fileRepo, issueRepo, seriesRepo)
 	mylarSvc := service.NewMylarMetadataService(seriesRepo, fileRepo, issueRepo, cvClient)
 	backupSvc := service.NewBackupService(cfg.DatabasePath(), cfg.DataDir)
@@ -123,6 +130,11 @@ func main() {
 
 	// Search service (needs eventBus for SSE updates)
 	searchSvc := service.NewSearchService(indexerRepo, dlClientRepo, dlHistoryRepo, issueRepo, seriesRepo, blocklistRepo, eventBus)
+	backlogSvc := service.NewBacklogService(backlogRepo, issueRepo, seriesRepo, eventBus, backlogSettings)
+	searchSvc.SetOnDownloadStatusChanged(backlogSvc.HandleDownloadStatus)
+
+	backlogQueue := service.NewBacklogQueue(backlogRepo, searchSvc, backlogSvc, backlogSettings, cfg.Backlog.MaxConcurrentDownloads)
+	backlogQueue.Start()
 
 	// Import service for post-processing completed downloads
 	importSvc := service.NewImportService(librarySvc, organizeSvc, wantListRepo, dlHistoryRepo, fileRepo, issueRepo, seriesRepo, settingRepo, cfg.LibraryDir)
@@ -223,6 +235,8 @@ func main() {
 		issueRepo,
 		jobRepo,
 		wantListRepo,
+		backlogRepo,
+		backlogSvc,
 		indexerRepo,
 		dlClientRepo,
 		dlHistoryRepo,
@@ -259,6 +273,7 @@ func main() {
 	close(sessionCleanupDone)
 	notifSvc.Stop()
 	cronSched.Stop()
+	backlogQueue.Stop()
 	sched.Shutdown()
 	if watcher != nil {
 		watcher.Stop()

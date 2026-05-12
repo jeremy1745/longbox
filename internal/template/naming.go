@@ -23,16 +23,20 @@ const DefaultTemplate = "{series}/{series} #{number|pad:3}.{format}"
 
 // TemplateContext holds the data needed to execute a naming template.
 type TemplateContext struct {
-	Series     string
-	SortSeries string
-	Number     string
-	Title      string
-	Publisher  string
-	Format     string
-	CoverDate  string
-	StoreDate  string
-	Writers    string
-	Artists    string
+	Series          string
+	SortSeries      string
+	Number          string
+	Title           string
+	Publisher       string
+	Format          string
+	CoverDate       string
+	StoreDate       string
+	Writers         string
+	Artists         string
+	ParentSeries    string
+	AnnualSubfolder string
+	SeriesYear      string
+	Year            string
 }
 
 // tokenType distinguishes literal text from variable references.
@@ -45,9 +49,9 @@ const (
 
 // token represents a parsed template fragment.
 type token struct {
-	Type     tokenType
-	Value    string // literal text, or variable name
-	Filter   string // filter name (e.g., "pad")
+	Type      tokenType
+	Value     string // literal text, or variable name
+	Filter    string // filter name (e.g., "pad")
 	FilterArg string // filter argument (e.g., "3")
 }
 
@@ -179,16 +183,20 @@ func parseVariable(inner string) (name, filter, filterArg string) {
 }
 
 var validVariables = map[string]bool{
-	"series":      true,
-	"sort_series": true,
-	"number":      true,
-	"title":       true,
-	"publisher":   true,
-	"format":      true,
-	"cover_date":  true,
-	"store_date":  true,
-	"writers":     true,
-	"artists":     true,
+	"series":           true,
+	"sort_series":      true,
+	"number":           true,
+	"title":            true,
+	"publisher":        true,
+	"format":           true,
+	"cover_date":       true,
+	"store_date":       true,
+	"writers":          true,
+	"artists":          true,
+	"parent_series":    true,
+	"annual_subfolder": true,
+	"series_year":      true,
+	"year":             true,
 }
 
 func isValidVariable(name string) bool {
@@ -217,6 +225,14 @@ func resolveVariable(name string, ctx TemplateContext) string {
 		return ctx.Writers
 	case "artists":
 		return ctx.Artists
+	case "parent_series":
+		return ctx.ParentSeries
+	case "annual_subfolder":
+		return ctx.AnnualSubfolder
+	case "series_year":
+		return ctx.SeriesYear
+	case "year":
+		return ctx.Year
 	default:
 		return ""
 	}

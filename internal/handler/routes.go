@@ -25,6 +25,8 @@ func NewRouter(
 	issueRepo *repository.IssueRepo,
 	jobRepo *repository.JobRepo,
 	wantListRepo *repository.WantListRepo,
+	backlogRepo *repository.BacklogRepo,
+	backlogSvc *service.BacklogService,
 	indexerRepo *repository.IndexerRepo,
 	dlClientRepo *repository.DownloadClientRepo,
 	dlHistoryRepo *repository.DownloadHistoryRepo,
@@ -67,6 +69,7 @@ func NewRouter(
 	settingsH := NewSettingsHandler(metaSvc, librarySvc, watcher, sched, settingRepo)
 	jobH := NewJobHandler(jobRepo, sched, eventBus)
 	wantListH := NewWantListHandler(wantListRepo, searchSvc, settingRepo)
+	backlogH := NewBacklogHandler(backlogRepo, backlogSvc)
 	calendarH := NewCalendarHandler(issueRepo, seriesRepo, wantListRepo, metaSvc, sched, searchSvc, settingRepo)
 	organizeH := NewOrganizeHandler(organizeSvc, librarySvc)
 	readerH := NewReaderHandler(readerSvc, fileRepo, issueRepo)
@@ -189,6 +192,14 @@ func NewRouter(
 			r.Post("/want-list", wantListH.Add)
 			r.Put("/want-list/{id}", wantListH.Update)
 			r.Delete("/want-list/{id}", wantListH.Remove)
+
+			// Backlog Runs
+			r.Get("/backlog/runs", backlogH.ListRuns)
+			r.Post("/backlog/runs", backlogH.CreateRun)
+			r.Get("/backlog/items", backlogH.ListItems)
+			r.Post("/backlog/runs/{id}/pause", backlogH.PauseRun)
+			r.Post("/backlog/runs/{id}/resume", backlogH.ResumeRun)
+			r.Post("/backlog/items/{id}/retry", backlogH.RetryItem)
 
 			// Calendar / Pull List
 			r.Get("/calendar", calendarH.Upcoming)

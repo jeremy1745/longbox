@@ -129,15 +129,15 @@ func (s *MetadataService) HourlyRemaining() int {
 
 // SearchResult wraps ComicVine search results with match scoring.
 type MetadataSearchResult struct {
-	ComicVineID   int    `json:"comicvine_id"`
-	Name          string `json:"name"`
-	StartYear     string `json:"start_year"`
-	IssueCount    int    `json:"issue_count"`
-	Publisher     string `json:"publisher"`
-	Description   string `json:"description"`
-	ImageURL      string `json:"image_url"`
-	ResourceType  string `json:"resource_type"`
-	MatchScore    int    `json:"match_score"`
+	ComicVineID  int    `json:"comicvine_id"`
+	Name         string `json:"name"`
+	StartYear    string `json:"start_year"`
+	IssueCount   int    `json:"issue_count"`
+	Publisher    string `json:"publisher"`
+	Description  string `json:"description"`
+	ImageURL     string `json:"image_url"`
+	ResourceType string `json:"resource_type"`
+	MatchScore   int    `json:"match_score"`
 }
 
 // SearchVolumes searches ComicVine for volumes matching a query.
@@ -331,9 +331,14 @@ func (s *MetadataService) populateIssuesFromVolume(series *model.Series, volume 
 	updated := 0
 
 	for _, cvIssue := range cvIssues {
-		issueNumber := cvIssue.IssueNumber
+		issueNumber := strings.TrimSpace(cvIssue.IssueNumber)
 		if issueNumber == "" {
-			continue
+			issueNumber = fmt.Sprintf("CV-%d", cvIssue.ID)
+			slog.Warn("comicvine issue missing number; using fallback",
+				"series_id", series.ID,
+				"cv_issue_id", cvIssue.ID,
+				"fallback", issueNumber,
+			)
 		}
 
 		// Build writers and artists strings
@@ -417,6 +422,71 @@ func (s *MetadataService) populateIssuesFromVolume(series *model.Series, volume 
 	return nil
 }
 
+func (s *MetadataService) ensureIssueFromComicVine(seriesID int64, cvIssueID int) error {
+	if !s.cv.HasAPIKey() {
+		return fmt.Errorf("ComicVine API key not configured")
+	}
+
+	cvIssue, err := s.cv.GetIssue(cvIssueID)
+	if err != nil {
+		return fmt.Errorf("fetching issue from ComicVine: %w", err)
+	}
+
+	issueNumber := strings.TrimSpace(cvIssue.IssueNumber)
+	if issueNumber == "" {
+		issueNumber = fmt.Sprintf("CV-%d", cvIssue.ID)
+		slog.Warn("comicvine issue missing number; using fallback",
+			"series_id", seriesID,
+			"cv_issue_id", cvIssue.ID,
+			"fallback", issueNumber,
+		)
+	}
+
+	var writers, artists []string
+	for _, pc := range cvIssue.PersonCredits {
+		role := strings.ToLower(pc.Role)
+		if strings.Contains(role, "writer") {
+			writers = append(writers, pc.Name)
+		}
+		if strings.Contains(role, "artist") || strings.Contains(role, "pencil") ||
+			strings.Contains(role, "ink") || strings.Contains(role, "cover") {
+			artists = append(artists, pc.Name)
+		}
+	}
+
+	coverURL := ""
+	if cvIssue.Image != nil {
+		coverURL = cvIssue.Image.SmallURL
+	}
+
+	desc := comicvine.StripHTML(cvIssue.Description)
+	if len(desc) > 300 {
+		desc = desc[:300] + "..."
+	}
+
+	cvID := int64(cvIssue.ID)
+	issue := &model.Issue{
+		SeriesID:    seriesID,
+		IssueNumber: issueNumber,
+		SortNumber:  scanner.SortNumber(issueNumber),
+		Title:       cvIssue.Name,
+		ComicVineID: &cvID,
+		Description: desc,
+		CoverDate:   cvIssue.CoverDate,
+		StoreDate:   cvIssue.StoreDate,
+		CoverURL:    coverURL,
+		Writers:     strings.Join(writers, ", "),
+		Artists:     strings.Join(artists, ", "),
+		ReadStatus:  "unread",
+	}
+
+	if err := s.issueRepo.Create(issue); err != nil {
+		return fmt.Errorf("creating issue from ComicVine: %w", err)
+	}
+
+	return nil
+}
+
 // RefreshSeriesMetadata re-fetches metadata for a series that's already matched.
 func (s *MetadataService) RefreshSeriesMetadata(seriesID int64) error {
 	series, err := s.seriesRepo.GetByID(seriesID)
@@ -496,19 +566,19 @@ func (s *MetadataService) RefreshTrackedSeries(
 // PullListIssue is a release-week issue combining ComicVine data with local ownership info.
 type PullListIssue struct {
 	// ComicVine data
-	ComicVineID   int    `json:"comicvine_id,omitempty"`
-	ComicVineURL  string `json:"comicvine_url,omitempty"`
-	SeriesName    string `json:"series_name"`
-	SeriesCVID    int    `json:"series_cv_id,omitempty"`
-	IssueNumber   string `json:"issue_number"`
-	Title         string `json:"title,omitempty"`
-	Description   string `json:"description,omitempty"`
-	StoreDate     string `json:"store_date"`
-	CoverDate     string `json:"cover_date,omitempty"`
-	CoverURL      string `json:"cover_url,omitempty"`
-	Writers       string `json:"writers,omitempty"`
-	Artists       string `json:"artists,omitempty"`
-	Publisher     string `json:"publisher,omitempty"`
+	ComicVineID  int    `json:"comicvine_id,omitempty"`
+	ComicVineURL string `json:"comicvine_url,omitempty"`
+	SeriesName   string `json:"series_name"`
+	SeriesCVID   int    `json:"series_cv_id,omitempty"`
+	IssueNumber  string `json:"issue_number"`
+	Title        string `json:"title,omitempty"`
+	Description  string `json:"description,omitempty"`
+	StoreDate    string `json:"store_date"`
+	CoverDate    string `json:"cover_date,omitempty"`
+	CoverURL     string `json:"cover_url,omitempty"`
+	Writers      string `json:"writers,omitempty"`
+	Artists      string `json:"artists,omitempty"`
+	Publisher    string `json:"publisher,omitempty"`
 
 	// Local data (if we have this series/issue)
 	LocalSeriesID *int64 `json:"local_series_id,omitempty"`
@@ -521,14 +591,14 @@ type PullListIssue struct {
 
 // ReleaseDebugInfo provides diagnostic info about what data sources were used.
 type ReleaseDebugInfo struct {
-	Source         string `json:"source"`          // "walksoftly" or "comicvine"
-	WalksoftlyCount int   `json:"walksoftly_count"`
+	Source          string `json:"source"` // "walksoftly" or "comicvine"
+	WalksoftlyCount int    `json:"walksoftly_count"`
 	WalksoftlyError string `json:"walksoftly_error,omitempty"`
-	CVFallbackCount int   `json:"cv_fallback_count,omitempty"`
-	LocalCount     int    `json:"local_count"`
-	TotalResults   int    `json:"total_results"`
-	TrackedCount   int    `json:"tracked_count"`
-	WeekNum        int    `json:"week_num,omitempty"`
+	CVFallbackCount int    `json:"cv_fallback_count,omitempty"`
+	LocalCount      int    `json:"local_count"`
+	TotalResults    int    `json:"total_results"`
+	TrackedCount    int    `json:"tracked_count"`
+	WeekNum         int    `json:"week_num,omitempty"`
 }
 
 // GetWeeklyReleases fetches all comics releasing in a date range.
@@ -1101,7 +1171,7 @@ func (s *MetadataService) WantIssueFromComicVine(cvIssueID int, seriesCVID int, 
 	}
 
 	// Ensure the series (and all its issues) exist locally
-	_, _, err = s.TrackFromComicVine(seriesCVID, wantListRepo)
+	series, _, err := s.TrackFromComicVine(seriesCVID, wantListRepo)
 	if err != nil {
 		return nil, fmt.Errorf("creating series from ComicVine: %w", err)
 	}
@@ -1112,7 +1182,19 @@ func (s *MetadataService) WantIssueFromComicVine(cvIssueID int, seriesCVID int, 
 		return nil, fmt.Errorf("finding issue after series creation: %w", err)
 	}
 	if existing == nil {
-		return nil, fmt.Errorf("issue with ComicVine ID %d not found after populating series", cvIssueID)
+		if series == nil {
+			return nil, fmt.Errorf("issue with ComicVine ID %d not found and series missing", cvIssueID)
+		}
+		if err := s.ensureIssueFromComicVine(series.ID, cvIssueID); err != nil {
+			return nil, fmt.Errorf("creating issue from ComicVine: %w", err)
+		}
+		existing, err = s.issueRepo.FindByComicVineID(cvIssueID64)
+		if err != nil {
+			return nil, fmt.Errorf("finding issue after direct create: %w", err)
+		}
+		if existing == nil {
+			return nil, fmt.Errorf("issue with ComicVine ID %d not found after direct create", cvIssueID)
+		}
 	}
 
 	// Step 4: Add to want list (may already be there from TrackFromComicVine's AddMissingForSeries)
