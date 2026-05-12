@@ -21,14 +21,15 @@ import (
 
 // SearchService orchestrates searching indexers and grabbing NZBs.
 type SearchService struct {
-	indexerRepo          *repository.IndexerRepo
-	dlClientRepo         *repository.DownloadClientRepo
-	dlHistoryRepo        *repository.DownloadHistoryRepo
-	issueRepo            *repository.IssueRepo
-	seriesRepo           *repository.SeriesRepo
-	blocklistRepo        *repository.BlocklistRepo
-	eventBus             *scheduler.EventBus
-	onDownloadCompleted  func(item *model.DownloadHistoryItem, storagePath string)
+	indexerRepo             *repository.IndexerRepo
+	dlClientRepo            *repository.DownloadClientRepo
+	dlHistoryRepo           *repository.DownloadHistoryRepo
+	issueRepo               *repository.IssueRepo
+	seriesRepo              *repository.SeriesRepo
+	blocklistRepo           *repository.BlocklistRepo
+	eventBus                *scheduler.EventBus
+	onDownloadCompleted     func(item *model.DownloadHistoryItem, storagePath string)
+	onDownloadStatusChanged func(item *model.DownloadHistoryItem)
 }
 
 func NewSearchService(
@@ -54,6 +55,10 @@ func NewSearchService(
 // SetOnDownloadCompleted registers a callback invoked when a download completes.
 func (s *SearchService) SetOnDownloadCompleted(fn func(item *model.DownloadHistoryItem, storagePath string)) {
 	s.onDownloadCompleted = fn
+}
+
+func (s *SearchService) SetOnDownloadStatusChanged(fn func(item *model.DownloadHistoryItem)) {
+	s.onDownloadStatusChanged = fn
 }
 
 // ScoredResult wraps a Newznab search result with a relevance score.
@@ -422,6 +427,12 @@ func (s *SearchService) CheckDownloadStatus(ctx context.Context) error {
 					"status": newStatus,
 				},
 			})
+			item.Status = newStatus
+			item.Message = slot.Status
+			if s.onDownloadStatusChanged != nil {
+				updated := item
+				s.onDownloadStatusChanged(&updated)
+			}
 			slog.Info("download status updated",
 				"id", item.ID,
 				"nzb", item.NZBName,
@@ -510,7 +521,10 @@ func (s *SearchService) searchAllIndexers(ctx context.Context, query string) ([]
 
 	wg.Wait()
 
-	// Deduplicate by GUID and filter blocklist
+	// Deduplicate by GUID, reject non-comic releases, filter blocklist.
+	// The non-comic filter sits BEFORE the blocklist check because the
+	// blocklist is keyed on GUID — once we know the release is video/TV/
+	// adult content the GUID is irrelevant.
 	seen := make(map[string]bool)
 	deduped := make([]newznab.SearchResult, 0, len(allResults))
 	for _, r := range allResults {
@@ -518,7 +532,11 @@ func (s *SearchService) searchAllIndexers(ctx context.Context, query string) ([]
 			continue
 		}
 		seen[r.GUID] = true
-		// Check blocklist
+		if !isComicRelease(r.Title) {
+			slog.Debug("dropping non-comic release",
+				"title", r.Title, "indexer", r.IndexerName)
+			continue
+		}
 		if s.blocklistRepo != nil && r.GUID != "" {
 			if blocked, err := s.blocklistRepo.IsBlocked(r.GUID); err == nil && blocked {
 				continue
@@ -571,20 +589,86 @@ func buildSearchQueries(series *model.Series, issue *model.Issue) []string {
 // yearPattern matches 4-digit years (1900–2099) in NZB titles.
 var yearPattern = regexp.MustCompile(`(?:^|[\s._(-])(\d{4})(?:[\s._)\-]|$)`)
 
+// hardRejectPattern matches tokens that unambiguously identify a release
+// as non-comic content: TV episode notation, video resolution markers,
+// video-only codecs/containers, and adult-content keywords. Any release
+// whose title contains one of these as a whole-word token is dropped
+// from results before scoring — same severity as the existing extension
+// filter would have provided.
+//
+// The pattern is intentionally narrow:
+//   - resolution markers (480p / 720p / 1080p / 2160p) — never appear in comic releases
+//   - SxxExx / Sxxxxxx / NxN episode tokens — TV-only
+//   - video-only stream tags (WEB-DL, BluRay, HDTV, BDRip, HDRip) —
+//     plain "Webrip" / "Digital" are intentionally NOT here; those are
+//     valid scene-style tags on comic releases (e.g. "(Webrip) (Empire)")
+//   - explicit adult-content keywords seen in real bad grabs
+var hardRejectPattern = regexp.MustCompile(`(?i)(?:^|[\W_])(s\d{2}e\d{2}|s\d{4}e\d{2}|\d{1,2}x\d{2}|480p|720p|1080p|2160p|web-dl|bluray|bdrip|brrip|hdtv|hdrip|xxx|porn|hentai|brazzers|manyvids|onlyfans|loveherboobs|latinacasting|ultimatesurrender|enjoyx)(?:[\W_]|$)`)
+
+// isComicRelease reports whether the given release title is plausibly a
+// comic archive. The check rejects on positive evidence of being a
+// non-comic release (TV episode notation, video quality tags, adult
+// keywords). Titles explicitly carrying a comic extension (.cbz / .cbr /
+// .cb7) are hard-allowed so we never reject something that names its
+// payload as a comic.
+//
+// History: this filter exists because removing the Prowlarr category
+// guard let through scene-style video and adult releases that overlapped
+// comic series titles on substring match. The reject tokens here are the
+// signatures of the bad grabs that actually polluted the library.
+func isComicRelease(title string) bool {
+	t := strings.ToLower(title)
+	if strings.Contains(t, ".cbz") || strings.Contains(t, ".cbr") || strings.Contains(t, ".cb7") {
+		return true
+	}
+	return !hardRejectPattern.MatchString(title)
+}
+
+// containsWord reports whether `haystack` contains `needle` as a
+// whole-word token. Word characters are [a-z0-9]; any other byte
+// (dots, hyphens, spaces, brackets) is treated as a boundary. This
+// prevents short series titles (e.g. "Star") from substring-matching
+// inside unrelated words (e.g. "Pornstar.Sweethearts.XXX...").
+//
+// Both arguments must already be lowercased.
+func containsWord(haystack, needle string) bool {
+	if needle == "" || haystack == "" {
+		return false
+	}
+	for i := 0; ; {
+		idx := strings.Index(haystack[i:], needle)
+		if idx < 0 {
+			return false
+		}
+		start := i + idx
+		end := start + len(needle)
+		prevOK := start == 0 || !isWordByte(haystack[start-1])
+		nextOK := end == len(haystack) || !isWordByte(haystack[end])
+		if prevOK && nextOK {
+			return true
+		}
+		i = start + 1
+	}
+}
+
+func isWordByte(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+}
+
 func scoreResult(result newznab.SearchResult, series *model.Series, issue *model.Issue) int {
 	score := 0
 	titleLower := strings.ToLower(result.Title)
 	seriesLower := strings.ToLower(series.Title)
 
-	// Title contains series name
-	if strings.Contains(titleLower, seriesLower) {
+	// Title contains series name (as a whole-word token)
+	if containsWord(titleLower, seriesLower) {
 		score += 50
 	} else {
 		// Check individual significant words
 		words := strings.Fields(seriesLower)
 		matched := 0
 		for _, w := range words {
-			if len(w) > 2 && strings.Contains(titleLower, w) {
+			if len(w) > 2 && containsWord(titleLower, w) {
 				matched++
 			}
 		}
