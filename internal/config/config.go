@@ -24,6 +24,8 @@ type Config struct {
 	DataDir             string        `yaml:"data_dir"`
 	LogLevel            string        `yaml:"log_level"`
 	ComicVineAPIKey     string        `yaml:"comicvine_api_key"`
+	MetronUsername      string        `yaml:"metron_username"`
+	MetronAPIToken      string        `yaml:"metron_api_token"`
 	SessionLifetimeDays int           `yaml:"session_lifetime_days"`
 	Backlog             BacklogConfig `yaml:"backlog"`
 }
@@ -73,6 +75,12 @@ func Load(path string) (*Config, error) {
 	}
 	if v := os.Getenv("LONGBOX_COMICVINE_API_KEY"); v != "" {
 		cfg.ComicVineAPIKey = v
+	}
+	if v := os.Getenv("LONGBOX_METRON_USERNAME"); v != "" {
+		cfg.MetronUsername = v
+	}
+	if v := os.Getenv("LONGBOX_METRON_API_TOKEN"); v != "" {
+		cfg.MetronAPIToken = v
 	}
 	if v := os.Getenv("LONGBOX_SESSION_LIFETIME_DAYS"); v != "" {
 		fmt.Sscanf(v, "%d", &cfg.SessionLifetimeDays)

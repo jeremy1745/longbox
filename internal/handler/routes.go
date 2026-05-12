@@ -182,6 +182,8 @@ func NewRouter(
 			r.Get("/settings", settingsH.GetSettings)
 			r.Put("/settings/comicvine-api-key", settingsH.UpdateAPIKey)
 			r.Post("/settings/comicvine-api-key/test", settingsH.TestAPIKey)
+			r.Put("/settings/metron", settingsH.UpdateMetronCreds)
+			r.Post("/settings/metron/test", settingsH.TestMetron)
 			r.Put("/settings/library-dir", settingsH.UpdateLibraryDir)
 			r.Put("/settings/pull-list-schedule", settingsH.UpdatePullListSchedule)
 			r.Put("/settings/auto-search", settingsH.UpdateAutoSearch)

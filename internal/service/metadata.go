@@ -10,15 +10,17 @@ import (
 	"time"
 
 	"github.com/jeremy/longbox/internal/comicvine"
+	"github.com/jeremy/longbox/internal/metron"
 	"github.com/jeremy/longbox/internal/model"
 	"github.com/jeremy/longbox/internal/repository"
 	"github.com/jeremy/longbox/internal/scanner"
 	"github.com/jeremy/longbox/internal/walksoftly"
 )
 
-// MetadataService handles ComicVine metadata operations.
+// MetadataService handles ComicVine + Metron metadata operations.
 type MetadataService struct {
 	cv               *comicvine.Client
+	metron           *metron.Client
 	ws               *walksoftly.Client
 	seriesRepo       *repository.SeriesRepo
 	issueRepo        *repository.IssueRepo
@@ -26,6 +28,8 @@ type MetadataService struct {
 	wantListRepo     *repository.WantListRepo
 	settingRepo      *repository.SettingRepo
 	configAPIKey     string
+	configMetronUser string
+	configMetronTok  string
 	configLibraryDir string
 
 	// In-memory cache: ComicVine volume ID → publisher name.
@@ -39,6 +43,7 @@ type MetadataService struct {
 
 func NewMetadataService(
 	cv *comicvine.Client,
+	metronClient *metron.Client,
 	ws *walksoftly.Client,
 	seriesRepo *repository.SeriesRepo,
 	issueRepo *repository.IssueRepo,
@@ -46,10 +51,13 @@ func NewMetadataService(
 	wantListRepo *repository.WantListRepo,
 	settingRepo *repository.SettingRepo,
 	configAPIKey string,
+	configMetronUser string,
+	configMetronTok string,
 	configLibraryDir string,
 ) *MetadataService {
 	return &MetadataService{
 		cv:               cv,
+		metron:           metronClient,
 		ws:               ws,
 		seriesRepo:       seriesRepo,
 		issueRepo:        issueRepo,
@@ -57,6 +65,8 @@ func NewMetadataService(
 		wantListRepo:     wantListRepo,
 		settingRepo:      settingRepo,
 		configAPIKey:     configAPIKey,
+		configMetronUser: configMetronUser,
+		configMetronTok:  configMetronTok,
 		configLibraryDir: configLibraryDir,
 		publisherCache:   make(map[int]string),
 	}
@@ -83,6 +93,78 @@ func (s *MetadataService) EnsureAPIKey() error {
 // HasAPIKey returns true if a ComicVine API key is available.
 func (s *MetadataService) HasAPIKey() bool {
 	return s.cv.HasAPIKey()
+}
+
+// EnsureMetronCreds loads Metron credentials from settings (priority) or
+// config and pushes them into the Metron client. Idempotent — safe to call
+// at startup AND after a settings PUT.
+func (s *MetadataService) EnsureMetronCreds() error {
+	if s.metron == nil {
+		return nil
+	}
+	user, _ := s.settingRepo.Get("metron_username")
+	tok, _ := s.settingRepo.Get("metron_api_token")
+	if user == "" {
+		user = s.configMetronUser
+	}
+	if tok == "" {
+		tok = s.configMetronTok
+	}
+	s.metron.SetCredentials(user, tok)
+	return nil
+}
+
+// HasMetron returns true when Metron is reachable (credentials are set).
+func (s *MetadataService) HasMetron() bool {
+	return s.metron != nil && s.metron.HasCredentials()
+}
+
+// MetronStatus is the shape returned to the settings UI so users can see
+// their Metron credential state + remaining quota at a glance.
+type MetronStatus struct {
+	Username        string `json:"username"`
+	TokenMasked     string `json:"token_masked"`
+	HasCredentials  bool   `json:"has_credentials"`
+	BurstRemaining  int    `json:"burst_remaining"`
+	DailyRemaining  int    `json:"daily_remaining"`
+}
+
+// GetMetronStatus returns a snapshot of the current Metron config + quota
+// state. The token is masked for display.
+func (s *MetadataService) GetMetronStatus() MetronStatus {
+	st := MetronStatus{}
+	if s.metron == nil {
+		return st
+	}
+	user, _ := s.settingRepo.Get("metron_username")
+	tok, _ := s.settingRepo.Get("metron_api_token")
+	if user == "" {
+		user = s.configMetronUser
+	}
+	if tok == "" {
+		tok = s.configMetronTok
+	}
+	st.Username = user
+	st.HasCredentials = s.metron.HasCredentials()
+	st.BurstRemaining = s.metron.BurstRemaining()
+	st.DailyRemaining = s.metron.DailyRemaining()
+	if tok != "" {
+		if len(tok) <= 8 {
+			st.TokenMasked = "****"
+		} else {
+			st.TokenMasked = tok[:4] + "..." + tok[len(tok)-4:]
+		}
+	}
+	return st
+}
+
+// TestMetronConnection runs a single authenticated request against Metron
+// to verify credentials. Returns nil on success.
+func (s *MetadataService) TestMetronConnection() error {
+	if s.metron == nil {
+		return fmt.Errorf("metron client not configured")
+	}
+	return s.metron.TestConnection()
 }
 
 // FindIssueByCVID finds a local issue by its ComicVine ID.
@@ -127,37 +209,120 @@ func (s *MetadataService) SetAPIKey(key string) error {
 	return nil
 }
 
+// SetMetronCredentials persists Metron credentials to settings and
+// updates the live client. Either field may be empty to clear it.
+func (s *MetadataService) SetMetronCredentials(username, token string) error {
+	if err := s.settingRepo.Set("metron_username", strings.TrimSpace(username)); err != nil {
+		return fmt.Errorf("saving metron_username: %w", err)
+	}
+	if err := s.settingRepo.Set("metron_api_token", strings.TrimSpace(token)); err != nil {
+		return fmt.Errorf("saving metron_api_token: %w", err)
+	}
+	if s.metron != nil {
+		s.metron.SetCredentials(username, token)
+	}
+	return nil
+}
+
 // HourlyRemaining returns how many API calls are left this hour.
 func (s *MetadataService) HourlyRemaining() int {
 	return s.cv.HourlyRemaining()
 }
 
-// SearchResult wraps ComicVine search results with match scoring.
+// MetadataSearchResult wraps a volume/series search hit from ComicVine
+// and/or Metron. A row is the merged view of the same series — if both
+// sources return it, ComicVineID and MetronID are both populated and
+// Sources lists the providers that contributed.
+//
+// The merge happens by normalized (name, year). Cover URL preference is
+// Metron-first to match the per-cover preference (Metron's covers are
+// higher-res). Description prefers whichever source returned a non-empty
+// value, again preferring Metron.
 type MetadataSearchResult struct {
-	ComicVineID  int    `json:"comicvine_id"`
-	Name         string `json:"name"`
-	StartYear    string `json:"start_year"`
-	IssueCount   int    `json:"issue_count"`
-	Publisher    string `json:"publisher"`
-	Description  string `json:"description"`
-	ImageURL     string `json:"image_url"`
-	ResourceType string `json:"resource_type"`
-	MatchScore   int    `json:"match_score"`
+	ComicVineID  int      `json:"comicvine_id,omitempty"`
+	MetronID     int      `json:"metron_id,omitempty"`
+	Sources      []string `json:"sources"` // "comicvine", "metron"
+	Name         string   `json:"name"`
+	StartYear    string   `json:"start_year"`
+	IssueCount   int      `json:"issue_count"`
+	Publisher    string   `json:"publisher"`
+	Description  string   `json:"description"`
+	ImageURL     string   `json:"image_url"`
+	ResourceType string   `json:"resource_type"`
+	MatchScore   int      `json:"match_score"`
 }
 
-// SearchVolumes searches ComicVine for volumes matching a query.
+// SearchVolumes searches BOTH ComicVine and Metron for series matching a
+// query and returns the union. Same-series rows are merged into a single
+// result with both source IDs populated; the caller picks which source
+// gets used for the eventual Track action.
+//
+// If either source is unavailable (no API key / no credentials) the
+// remaining source is queried alone. Total count is the union size — the
+// page param is currently only honored by ComicVine (Metron returns the
+// first page of its own results, which is sufficient for the search UI).
 func (s *MetadataService) SearchVolumes(query string, page int) ([]MetadataSearchResult, int, error) {
-	if !s.cv.HasAPIKey() {
-		return nil, 0, fmt.Errorf("ComicVine API key not configured")
+	cvAvailable := s.cv.HasAPIKey()
+	metronAvailable := s.HasMetron()
+	if !cvAvailable && !metronAvailable {
+		return nil, 0, fmt.Errorf("no metadata source configured — set ComicVine API key or Metron credentials in Settings")
 	}
 
-	results, total, err := s.cv.SearchVolumes(query, page)
-	if err != nil {
-		return nil, 0, err
+	type cvOut struct {
+		results []comicvine.SearchResult
+		total   int
+		err     error
+	}
+	type metronOut struct {
+		results []metron.SearchResult
+		err     error
 	}
 
-	var out []MetadataSearchResult
-	for _, r := range results {
+	var (
+		cvCh     = make(chan cvOut, 1)
+		metronCh = make(chan metronOut, 1)
+	)
+	if cvAvailable {
+		go func() {
+			r, t, err := s.cv.SearchVolumes(query, page)
+			cvCh <- cvOut{r, t, err}
+		}()
+	} else {
+		cvCh <- cvOut{}
+	}
+	if metronAvailable {
+		go func() {
+			r, err := s.metron.SearchSeries(query)
+			metronCh <- metronOut{r, err}
+		}()
+	} else {
+		metronCh <- metronOut{}
+	}
+
+	cv := <-cvCh
+	mt := <-metronCh
+
+	// If both errored, surface the first error rather than an empty list.
+	if cv.err != nil && (mt.err != nil || !metronAvailable) {
+		return nil, 0, cv.err
+	}
+	if cv.err != nil {
+		slog.Warn("comicvine search failed; using metron only", "error", cv.err)
+	}
+	if mt.err != nil {
+		slog.Warn("metron search failed; using comicvine only", "error", mt.err)
+	}
+
+	// Build by (normalized name, year) key so duplicates from both sources
+	// collapse into one row with both IDs populated.
+	merged := make(map[string]*MetadataSearchResult)
+	order := []string{}
+
+	addKey := func(name, year string) string {
+		return strings.ToLower(strings.TrimSpace(name)) + "|" + year
+	}
+
+	for _, r := range cv.results {
 		publisher := ""
 		if r.Publisher != nil {
 			publisher = r.Publisher.Name
@@ -170,9 +335,24 @@ func (s *MetadataService) SearchVolumes(query string, page int) ([]MetadataSearc
 		if len(desc) > 300 {
 			desc = desc[:300] + "..."
 		}
-
-		out = append(out, MetadataSearchResult{
+		key := addKey(r.Name, r.StartYear)
+		if existing, ok := merged[key]; ok {
+			existing.ComicVineID = r.ID
+			existing.Sources = appendUnique(existing.Sources, "comicvine")
+			if existing.Description == "" {
+				existing.Description = desc
+			}
+			if existing.IssueCount == 0 {
+				existing.IssueCount = r.CountOfIssues
+			}
+			if existing.Publisher == "" {
+				existing.Publisher = publisher
+			}
+			continue
+		}
+		merged[key] = &MetadataSearchResult{
 			ComicVineID:  r.ID,
+			Sources:      []string{"comicvine"},
 			Name:         r.Name,
 			StartYear:    r.StartYear,
 			IssueCount:   r.CountOfIssues,
@@ -180,10 +360,66 @@ func (s *MetadataService) SearchVolumes(query string, page int) ([]MetadataSearc
 			Description:  desc,
 			ImageURL:     imageURL,
 			ResourceType: r.ResourceType,
-		})
+		}
+		order = append(order, key)
 	}
 
-	return out, total, nil
+	for _, r := range mt.results {
+		year := ""
+		if r.YearStarted > 0 {
+			year = fmt.Sprintf("%d", r.YearStarted)
+		}
+		key := addKey(r.Name, year)
+		desc := strings.TrimSpace(r.Description)
+		if len(desc) > 300 {
+			desc = desc[:300] + "..."
+		}
+		if existing, ok := merged[key]; ok {
+			existing.MetronID = r.ID
+			existing.Sources = appendUnique(existing.Sources, "metron")
+			// Metron-preferred for cover + description (when present).
+			if strings.TrimSpace(r.ImageURL) != "" {
+				existing.ImageURL = r.ImageURL
+			}
+			if desc != "" {
+				existing.Description = desc
+			}
+			if existing.IssueCount == 0 {
+				existing.IssueCount = r.IssueCount
+			}
+			if existing.Publisher == "" {
+				existing.Publisher = r.PublisherName
+			}
+			continue
+		}
+		merged[key] = &MetadataSearchResult{
+			MetronID:     r.ID,
+			Sources:      []string{"metron"},
+			Name:         r.Name,
+			StartYear:    year,
+			IssueCount:   r.IssueCount,
+			Publisher:    r.PublisherName,
+			Description:  desc,
+			ImageURL:     r.ImageURL,
+			ResourceType: "volume",
+		}
+		order = append(order, key)
+	}
+
+	out := make([]MetadataSearchResult, 0, len(order))
+	for _, k := range order {
+		out = append(out, *merged[k])
+	}
+	return out, len(out), nil
+}
+
+func appendUnique(slice []string, v string) []string {
+	for _, x := range slice {
+		if x == v {
+			return slice
+		}
+	}
+	return append(slice, v)
 }
 
 // GetVolume fetches volume details from ComicVine.
@@ -1413,11 +1649,17 @@ func (s *MetadataService) SetLibraryDir(dir string) error {
 
 // GetSettings returns all current settings for display.
 func (s *MetadataService) GetSettings() map[string]interface{} {
+	mst := s.GetMetronStatus()
 	settings := map[string]interface{}{
 		"comicvine_api_key_masked":   s.GetAPIKeyMasked(),
 		"comicvine_api_key_source":   s.GetAPIKeySource(),
 		"comicvine_api_key_set":      s.HasAPIKey(),
 		"comicvine_hourly_remaining": s.HourlyRemaining(),
+		"metron_username":            mst.Username,
+		"metron_token_masked":        mst.TokenMasked,
+		"metron_token_set":           mst.HasCredentials,
+		"metron_burst_remaining":     mst.BurstRemaining,
+		"metron_sustained_remaining": mst.DailyRemaining,
 	}
 
 	// Library dir: DB setting takes priority, config is fallback

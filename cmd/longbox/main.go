@@ -11,6 +11,7 @@ import (
 
 	longbox "github.com/jeremy/longbox"
 	"github.com/jeremy/longbox/internal/comicvine"
+	"github.com/jeremy/longbox/internal/metron"
 	"github.com/jeremy/longbox/internal/config"
 	"github.com/jeremy/longbox/internal/database"
 	"github.com/jeremy/longbox/internal/handler"
@@ -91,14 +92,18 @@ func main() {
 
 	// External clients
 	cvClient := comicvine.NewClient(cfg.ComicVineAPIKey)
+	metronClient := metron.NewClient(cfg.MetronUsername, cfg.MetronAPIToken)
 	wsClient := walksoftly.NewClient()
 
 	// Services
 	coverSvc := service.NewCoverService(cfg.CoversDir(), fileRepo)
 	librarySvc := service.NewLibraryService(cfg.LibraryDir, fileRepo, seriesRepo, issueRepo, publisherRepo, coverSvc)
-	metaSvc := service.NewMetadataService(cvClient, wsClient, seriesRepo, issueRepo, publisherRepo, wantListRepo, settingRepo, cfg.ComicVineAPIKey, cfg.LibraryDir)
+	metaSvc := service.NewMetadataService(cvClient, metronClient, wsClient, seriesRepo, issueRepo, publisherRepo, wantListRepo, settingRepo, cfg.ComicVineAPIKey, cfg.MetronUsername, cfg.MetronAPIToken, cfg.LibraryDir)
 	if err := metaSvc.EnsureAPIKey(); err != nil {
 		slog.Warn("failed to load ComicVine API key from settings", "error", err)
+	}
+	if err := metaSvc.EnsureMetronCreds(); err != nil {
+		slog.Warn("failed to load Metron credentials from settings", "error", err)
 	}
 
 	// Load library dir from DB settings (overrides config file)

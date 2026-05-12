@@ -79,6 +79,50 @@ func (h *SettingsHandler) UpdateAPIKey(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// UpdateMetronCreds saves Metron credentials (username + personal API token).
+// PUT /api/v1/settings/metron
+// Body: {"username": "...", "api_token": "..."}
+func (h *SettingsHandler) UpdateMetronCreds(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Username string `json:"username"`
+		APIToken string `json:"api_token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	if err := h.metaSvc.SetMetronCredentials(req.Username, req.APIToken); err != nil {
+		writeError(w, http.StatusInternalServerError, "SAVE_FAILED", err.Error())
+		return
+	}
+	status := h.metaSvc.GetMetronStatus()
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":              "updated",
+		"metron_username":     status.Username,
+		"metron_token_masked": status.TokenMasked,
+		"metron_token_set":    status.HasCredentials,
+	})
+}
+
+// TestMetron verifies Metron credentials by making one authenticated call.
+// POST /api/v1/settings/metron/test
+func (h *SettingsHandler) TestMetron(w http.ResponseWriter, r *http.Request) {
+	if err := h.metaSvc.TestMetronConnection(); err != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"valid":   false,
+			"message": err.Error(),
+		})
+		return
+	}
+	st := h.metaSvc.GetMetronStatus()
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"valid":              true,
+		"message":            "Metron credentials are valid",
+		"burst_remaining":    st.BurstRemaining,
+		"daily_remaining":    st.DailyRemaining,
+	})
+}
+
 // TestAPIKey tests the ComicVine API key by making a simple search.
 // POST /api/v1/settings/comicvine-api-key/test
 func (h *SettingsHandler) TestAPIKey(w http.ResponseWriter, r *http.Request) {
