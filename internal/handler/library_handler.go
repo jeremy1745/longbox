@@ -15,6 +15,7 @@ type LibraryHandler struct {
 	librarySvc *service.LibraryService
 	fileRepo   *repository.FileRepo
 	seriesRepo *repository.SeriesRepo
+	folderSvc  *service.SeriesFolderService
 	scheduler  *scheduler.Scheduler
 }
 
@@ -22,12 +23,14 @@ func NewLibraryHandler(
 	librarySvc *service.LibraryService,
 	fileRepo *repository.FileRepo,
 	seriesRepo *repository.SeriesRepo,
+	folderSvc *service.SeriesFolderService,
 	sched *scheduler.Scheduler,
 ) *LibraryHandler {
 	return &LibraryHandler{
 		librarySvc: librarySvc,
 		fileRepo:   fileRepo,
 		seriesRepo: seriesRepo,
+		folderSvc:  folderSvc,
 		scheduler:  sched,
 	}
 }
@@ -40,6 +43,30 @@ func (h *LibraryHandler) Scan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, job)
+}
+
+// BackfillSeriesFolders walks every tracked series and ensures its on-disk
+// folder + folder.jpg / cover.jpg posters exist. Idempotent per series.
+// Synchronous — a 200-series library finishes in a few minutes because the
+// only per-series I/O is at most one cover-image HTTP fetch.
+//
+// POST /api/v1/admin/backfill-series-folders
+func (h *LibraryHandler) BackfillSeriesFolders(w http.ResponseWriter, r *http.Request) {
+	if h.folderSvc == nil {
+		writeError(w, http.StatusInternalServerError, "BACKFILL_FAILED", "folder service not wired")
+		return
+	}
+	result, err := h.folderSvc.BackfillAllTracked(r.Context(), nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "BACKFILL_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+	slog.Info("backfill-series-folders handler complete",
+		"total", result.Total, "created", result.Created,
+		"already_existed", result.AlreadyExisted,
+		"no_cover", result.NoCover, "errors", result.Errors,
+	)
 }
 
 // BackfillPublishers walks every series whose publisher_id is NULL, reads

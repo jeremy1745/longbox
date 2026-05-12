@@ -143,6 +143,82 @@ func (s *SeriesFolderService) downloadTo(ctx context.Context, url, dest string) 
 	return os.Rename(tmp, dest)
 }
 
+// FolderBackfillResult summarizes a bulk folder-backfill pass.
+type FolderBackfillResult struct {
+	Total          int `json:"total"`
+	Created        int `json:"created"`         // folder + poster created fresh
+	AlreadyExisted int `json:"already_existed"` // folder.jpg already on disk
+	NoCover        int `json:"no_cover"`        // folder created, no cover URL available
+	Errors         int `json:"errors"`
+}
+
+// BackfillAllTracked runs EnsureFolderAndPoster for every tracked series.
+// Sequential — each iteration does at most one CV/Metron image download,
+// so a 200-series catalog finishes in a few minutes. Idempotent per series.
+func (s *SeriesFolderService) BackfillAllTracked(ctx context.Context, progress func(processed, total int, msg string)) (*FolderBackfillResult, error) {
+	tracked, err := s.seriesRepo.ListTracked()
+	if err != nil {
+		return nil, fmt.Errorf("listing tracked series: %w", err)
+	}
+
+	result := &FolderBackfillResult{Total: len(tracked)}
+	for i, ser := range tracked {
+		select {
+		case <-ctx.Done():
+			return result, ctx.Err()
+		default:
+		}
+		if progress != nil {
+			progress(i, len(tracked), ser.Title)
+		}
+
+		folderName := buildSeriesFolderName(ser.Title, ser.Year)
+		if folderName == "" {
+			result.Errors++
+			continue
+		}
+		folderPath := filepath.Join(s.librarySvc.GetLibraryDir(), folderName)
+		posterPath := filepath.Join(folderPath, "folder.jpg")
+		preExisted := false
+		if _, err := os.Stat(posterPath); err == nil {
+			preExisted = true
+		}
+
+		if err := s.EnsureFolderAndPoster(ctx, ser.ID); err != nil {
+			slog.Warn("folder backfill: ensure", "series_id", ser.ID, "error", err)
+			result.Errors++
+			continue
+		}
+
+		switch {
+		case preExisted:
+			result.AlreadyExisted++
+		case fileExists(posterPath):
+			result.Created++
+		default:
+			// folder made but no cover URL was available
+			result.NoCover++
+		}
+	}
+
+	if progress != nil {
+		progress(len(tracked), len(tracked), "folder backfill complete")
+	}
+	slog.Info("series folder backfill complete",
+		"total", result.Total,
+		"created", result.Created,
+		"already_existed", result.AlreadyExisted,
+		"no_cover", result.NoCover,
+		"errors", result.Errors,
+	)
+	return result, nil
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
 func buildSeriesFolderName(title string, year *int) string {
 	title = strings.TrimSpace(title)
 	if title == "" {

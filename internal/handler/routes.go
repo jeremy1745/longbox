@@ -60,7 +60,8 @@ func NewRouter(
 	r.Use(MaxBodySize)
 
 	// Handlers
-	libraryH := NewLibraryHandler(librarySvc, fileRepo, seriesRepo, sched)
+	folderSvc := service.NewSeriesFolderService(librarySvc, seriesRepo, issueRepo)
+	libraryH := NewLibraryHandler(librarySvc, fileRepo, seriesRepo, folderSvc, sched)
 	fileH := NewFileHandler(fileRepo, librarySvc, sched)
 	coverH := NewCoverHandler(coverSvc, fileRepo)
 	seriesH := NewSeriesHandler(seriesRepo, issueRepo, wantListRepo)
@@ -70,7 +71,6 @@ func NewRouter(
 	jobH := NewJobHandler(jobRepo, sched, eventBus)
 	wantListH := NewWantListHandler(wantListRepo, searchSvc, settingRepo)
 	backlogH := NewBacklogHandler(backlogRepo, backlogSvc)
-	folderSvc := service.NewSeriesFolderService(librarySvc, seriesRepo, issueRepo)
 	calendarH := NewCalendarHandler(issueRepo, seriesRepo, wantListRepo, metaSvc, sched, searchSvc, settingRepo, folderSvc)
 	organizeH := NewOrganizeHandler(organizeSvc, librarySvc)
 	readerH := NewReaderHandler(readerSvc, fileRepo, issueRepo)
@@ -116,6 +116,7 @@ func NewRouter(
 				r.Get("/admin/backups/{name}/download", backupH.Download)
 				r.Post("/admin/reattach-orphans", libraryH.ReattachOrphans)
 				r.Post("/admin/backfill-publishers", libraryH.BackfillPublishers)
+				r.Post("/admin/backfill-series-folders", libraryH.BackfillSeriesFolders)
 				r.Post("/admin/shutdown", func(w http.ResponseWriter, r *http.Request) {
 					w.Header().Set("Content-Type", "application/json")
 					json.NewEncoder(w).Encode(map[string]string{"message": "server is shutting down"})
