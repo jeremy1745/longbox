@@ -190,6 +190,10 @@ func (h *CalendarHandler) WantIssue(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "WANT_FAILED", err.Error())
 			return
 		}
+		if item == nil {
+			writeError(w, http.StatusInternalServerError, "WANT_FAILED", "want list item not found after create")
+			return
+		}
 		triggerAutoSearch(h.searchSvc, h.settingRepo, body.LocalIssueID, fmt.Sprintf("calendar-want issue %d", body.LocalIssueID))
 		writeJSON(w, http.StatusCreated, item)
 		return
@@ -202,6 +206,10 @@ func (h *CalendarHandler) WantIssue(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "WANT_FAILED", err.Error())
 			return
 		}
+		if item == nil {
+			writeError(w, http.StatusInternalServerError, "WANT_FAILED", "want list item not found after create")
+			return
+		}
 		triggerAutoSearch(h.searchSvc, h.settingRepo, item.IssueID, fmt.Sprintf("calendar-want cv-issue %d", body.ComicVineID))
 		writeJSON(w, http.StatusCreated, item)
 		return
@@ -212,6 +220,10 @@ func (h *CalendarHandler) WantIssue(w http.ResponseWriter, r *http.Request) {
 		item, err := h.metaSvc.WantIssueBySeriesAndNumber(body.SeriesCVID, body.IssueNumber, h.wantListRepo)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "WANT_FAILED", err.Error())
+			return
+		}
+		if item == nil {
+			writeError(w, http.StatusInternalServerError, "WANT_FAILED", "want list item not found after create")
 			return
 		}
 		triggerAutoSearch(h.searchSvc, h.settingRepo, item.IssueID, fmt.Sprintf("calendar-want series %d #%s", body.SeriesCVID, body.IssueNumber))

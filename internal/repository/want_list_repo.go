@@ -16,7 +16,15 @@ func NewWantListRepo(read, write *sql.DB) *WantListRepo {
 	return &WantListRepo{read: read, write: write}
 }
 
-// Create adds an issue to the want list. Uses INSERT OR IGNORE since issue_id is UNIQUE.
+// Create adds an issue to the want list. Uses INSERT OR IGNORE since issue_id
+// is UNIQUE; if a row already exists the existing one is returned.
+//
+// Branches on RowsAffected, NOT LastInsertId. sqlite3_last_insert_rowid is
+// NOT reset by an ignored insert — it keeps the rowid from the prior
+// successful insert on the write connection (e.g., an issues row created
+// moments earlier by the metadata service). Using LastInsertId here makes
+// the "already exists" branch fetch the wrong rowid and return (nil, nil),
+// which crashed every duplicate /api/v1/calendar/want call.
 func (r *WantListRepo) Create(issueID int64, priority int, notes string) (*model.WantListItem, error) {
 	res, err := r.write.Exec(`
 		INSERT OR IGNORE INTO want_list (issue_id, priority, notes)
@@ -24,13 +32,17 @@ func (r *WantListRepo) Create(issueID int64, priority int, notes string) (*model
 	if err != nil {
 		return nil, fmt.Errorf("inserting want list item: %w", err)
 	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("getting rows affected: %w", err)
+	}
+	if n == 0 {
+		// Already existed — fetch by the unique key, not by a poisoned rowid.
+		return r.GetByIssueID(issueID)
+	}
 	id, err := res.LastInsertId()
 	if err != nil {
 		return nil, fmt.Errorf("getting last insert id: %w", err)
-	}
-	if id == 0 {
-		// Already existed — fetch existing
-		return r.GetByIssueID(issueID)
 	}
 	return r.GetByID(id)
 }
