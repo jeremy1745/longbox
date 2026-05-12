@@ -101,9 +101,11 @@ func NewRouter(
 			r.Get("/auth/me", authH.Me)
 			r.Put("/auth/users/{id}/password", authH.ChangePassword)
 
-			// Admin-only routes
+			// Admin-only routes — AdminOnlyWithAuth bypasses when auth is
+			// globally disabled so single-user deployments can call admin
+			// endpoints (incl. /admin/shutdown for deploys) without a session.
 			r.Group(func(r chi.Router) {
-				r.Use(AdminOnly)
+				r.Use(AdminOnlyWithAuth(authSvc))
 				r.Get("/auth/users", authH.ListUsers)
 				r.Post("/auth/users", authH.CreateUser)
 				r.Delete("/auth/users/{id}", authH.DeleteUser)
