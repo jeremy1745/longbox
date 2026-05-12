@@ -156,6 +156,62 @@ func (c *Client) GetSeries(id int) (*Series, error) {
 	return &s, nil
 }
 
+// GetIssuesInDateRange returns issues whose store_date falls within
+// [startDate, endDate] inclusive. Used by the calendar flow as a Metron-
+// native release source alongside walksoftly. Walks paginated results.
+func (c *Client) GetIssuesInDateRange(startDate, endDate string) ([]CalendarIssue, error) {
+	if !c.HasCredentials() {
+		return nil, fmt.Errorf("metron credentials not configured")
+	}
+	var all []CalendarIssue
+	page := 1
+	for {
+		q := url.Values{}
+		q.Set("store_date_range_after", startDate)
+		q.Set("store_date_range_before", endDate)
+		q.Set("page", fmt.Sprintf("%d", page))
+		q.Set("page_size", "100")
+		var p paginated[calendarIssueListItem]
+		if err := c.get("/issue/", q, &p); err != nil {
+			return nil, fmt.Errorf("metron calendar page %d: %w", page, err)
+		}
+		for _, r := range p.Results {
+			all = append(all, CalendarIssue{
+				ID:         r.ID,
+				SeriesName: r.Series.Name,
+				SeriesYear: r.Series.YearBegan,
+				Number:     r.Number,
+				StoreDate:  r.StoreDate,
+				CoverDate:  r.CoverDate,
+				ImageURL:   r.Image,
+			})
+		}
+		if p.Next == nil || *p.Next == "" {
+			break
+		}
+		page++
+		if page > 20 { // safety stop
+			break
+		}
+	}
+	return all, nil
+}
+
+// calendarIssueListItem mirrors the Metron /issue/ list response shape
+// when filtering by store_date — series block is inlined as name +
+// year_began (no series id, no cv_id).
+type calendarIssueListItem struct {
+	ID     int    `json:"id"`
+	Series struct {
+		Name      string `json:"name"`
+		YearBegan int    `json:"year_began"`
+	} `json:"series"`
+	Number    string `json:"number"`
+	StoreDate string `json:"store_date"`
+	CoverDate string `json:"cover_date"`
+	Image     string `json:"image"`
+}
+
 // ListIssues fetches every issue under a series. Walks the paginated
 // /issue/?series_id=<id> endpoint until exhausted.
 func (c *Client) ListIssues(seriesID int) ([]Issue, error) {

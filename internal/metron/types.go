@@ -44,15 +44,29 @@ type Series struct {
 
 // Issue is the detailed issue payload returned by /issue/{id}/.
 type Issue struct {
-	ID         int       `json:"id"`
-	SeriesID   int       `json:"series,omitempty"`
-	Number     string    `json:"number"`
-	Name       string    `json:"name,omitempty"`
-	StoreDate  string    `json:"store_date,omitempty"`
-	CoverDate  string    `json:"cover_date,omitempty"`
-	ImageURL   string    `json:"image,omitempty"`
-	Description string   `json:"desc,omitempty"`
-	ModifiedAt time.Time `json:"modified,omitempty"`
+	ID          int       `json:"id"`
+	SeriesID    int       `json:"series,omitempty"`
+	Number      string    `json:"number"`
+	Name        string    `json:"name,omitempty"`
+	StoreDate   string    `json:"store_date,omitempty"`
+	CoverDate   string    `json:"cover_date,omitempty"`
+	ImageURL    string    `json:"image,omitempty"`
+	Description string    `json:"desc,omitempty"`
+	ModifiedAt  time.Time `json:"modified,omitempty"`
+}
+
+// CalendarIssue is the per-release row used by the weekly-release flow.
+// It carries the inline series block that Metron's list endpoint embeds —
+// the series ID is NOT included by Metron in the list response, only its
+// name + year_began, which is what the calendar merger keys on.
+type CalendarIssue struct {
+	ID          int    `json:"id"`
+	SeriesName  string `json:"-"`
+	SeriesYear  int    `json:"-"`
+	Number      string `json:"number"`
+	StoreDate   string `json:"store_date"`
+	CoverDate   string `json:"cover_date"`
+	ImageURL    string `json:"image"`
 }
 
 // paginated wraps Metron's standard DRF response envelope.

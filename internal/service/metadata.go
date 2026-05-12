@@ -1045,7 +1045,9 @@ type PullListIssue struct {
 	ComicVineURL string `json:"comicvine_url,omitempty"`
 	SeriesName   string `json:"series_name"`
 	SeriesCVID   int    `json:"series_cv_id,omitempty"`
-	IssueNumber  string `json:"issue_number"`
+	// Metron data — set when the release was also (or only) sourced from Metron.
+	MetronIssueID int `json:"metron_issue_id,omitempty"`
+	IssueNumber   string `json:"issue_number"`
 	Title        string `json:"title,omitempty"`
 	Description  string `json:"description,omitempty"`
 	StoreDate    string `json:"store_date"`
@@ -1070,6 +1072,8 @@ type ReleaseDebugInfo struct {
 	WalksoftlyCount int    `json:"walksoftly_count"`
 	WalksoftlyError string `json:"walksoftly_error,omitempty"`
 	CVFallbackCount int    `json:"cv_fallback_count,omitempty"`
+	MetronCount     int    `json:"metron_count,omitempty"`
+	MetronError     string `json:"metron_error,omitempty"`
 	LocalCount      int    `json:"local_count"`
 	TotalResults    int    `json:"total_results"`
 	TrackedCount    int    `json:"tracked_count"`
@@ -1129,6 +1133,25 @@ func (s *MetadataService) GetWeeklyReleases(startDate, endDate string) ([]PullLi
 		}
 	}
 
+	// Merge in Metron's release calendar for the same date range. Two
+	// effects: (1) annotates an existing PullListIssue with the
+	// MetronIssueID + replaces the cover_url with Metron's higher-res
+	// image when the same release is found in both feeds, (2) adds rows
+	// for releases Metron lists that walksoftly + CV missed.
+	//
+	// Best-effort: if Metron is unconfigured or errors out, the calendar
+	// still works on walksoftly + CV alone.
+	if s.HasMetron() {
+		metronReleases, mErr := s.metron.GetIssuesInDateRange(startDate, endDate)
+		if mErr != nil {
+			slog.Warn("metron calendar fetch failed; continuing without it", "error", mErr)
+			debug.MetronError = mErr.Error()
+		} else {
+			debug.MetronCount = len(metronReleases)
+			results = s.mergeMetronReleases(results, metronReleases)
+		}
+	}
+
 	// Supplement with local-only issues not in primary results.
 	// The seen-set tracks BOTH issue CV IDs and (series CV ID, issue number)
 	// keys; without the second key, a local issue whose series matches a
@@ -1149,6 +1172,51 @@ func (s *MetadataService) GetWeeklyReleases(startDate, endDate string) ([]PullLi
 
 	debug.TotalResults = len(results)
 	return results, debug, nil
+}
+
+// mergeMetronReleases folds Metron's date-range release rows into a
+// PullListIssue list that's already been built from walksoftly + CV.
+//
+// Match key is (normalized series name, normalized issue number). On
+// match: write MetronIssueID, overwrite CoverURL with Metron's image
+// (per "always prefer Metron covers"). On miss: append a new row sourced
+// only from Metron — Tracked/Wanted/HasFile are computed via the same
+// name-based fallback used elsewhere for series with no CV linkage.
+func (s *MetadataService) mergeMetronReleases(existing []PullListIssue, metronRows []metron.CalendarIssue) []PullListIssue {
+	if len(metronRows) == 0 {
+		return existing
+	}
+	index := make(map[string]int, len(existing)) // key → index in existing
+	for i, r := range existing {
+		index[releaseKey(r.SeriesName, r.IssueNumber)] = i
+	}
+	for _, mr := range metronRows {
+		key := releaseKey(mr.SeriesName, mr.Number)
+		if idx, ok := index[key]; ok {
+			existing[idx].MetronIssueID = mr.ID
+			if strings.TrimSpace(mr.ImageURL) != "" {
+				existing[idx].CoverURL = mr.ImageURL
+			}
+			continue
+		}
+		item := PullListIssue{
+			SeriesName:    mr.SeriesName,
+			IssueNumber:   mr.Number,
+			MetronIssueID: mr.ID,
+			StoreDate:     mr.StoreDate,
+			CoverDate:     mr.CoverDate,
+			CoverURL:      mr.ImageURL,
+		}
+		existing = append(existing, item)
+		index[key] = len(existing) - 1
+	}
+	return existing
+}
+
+// releaseKey normalizes a (series, issue) pair into a stable comparison
+// key used by mergeMetronReleases and the local-supplement dedupe.
+func releaseKey(seriesName, issueNumber string) string {
+	return normalizeSearchKey(seriesName) + "|" + normalizeIssueNumberKey(issueNumber)
 }
 
 // buildLocalIssueLookup loads local issues by store_date range and returns
