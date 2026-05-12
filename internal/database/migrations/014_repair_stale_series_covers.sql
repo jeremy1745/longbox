@@ -43,11 +43,19 @@ UPDATE series
 
 -- 3. Forward-fix: trigger NULLs any series.cover_file_id when its
 --    referenced comic_file is deleted, so this can't reproduce.
+--
+-- The StatementBegin/End markers are mandatory: goose splits SQL on `;`
+-- by default and the trigger body contains an inner semicolon (`UPDATE
+-- ... ;`) that goose would otherwise treat as a statement boundary,
+-- causing the migration to error and the server to crash-loop on
+-- startup. (Asking how I know.)
+-- +goose StatementBegin
 CREATE TRIGGER IF NOT EXISTS comic_files_clear_series_cover
 AFTER DELETE ON comic_files
 BEGIN
     UPDATE series SET cover_file_id = NULL WHERE cover_file_id = OLD.id;
 END;
+-- +goose StatementEnd
 
 -- +goose Down
 DROP TRIGGER IF EXISTS comic_files_clear_series_cover;
