@@ -110,7 +110,7 @@ func main() {
 	organizeSvc := service.NewFileOrganizerService(fileRepo, issueRepo, seriesRepo, settingRepo, cfg.Backlog.AnnualSubfolder)
 	metaWriterSvc := service.NewMetadataWriterService(fileRepo, issueRepo, seriesRepo)
 	mylarSvc := service.NewMylarMetadataService(seriesRepo, fileRepo, issueRepo, cvClient)
-	backupSvc := service.NewBackupService(cfg.DatabasePath(), cfg.DataDir)
+	backupSvc := service.NewBackupService(db.Write, cfg.DatabasePath(), cfg.DataDir)
 
 	// Run startup backup if enabled
 	backupOnStart, _ := settingRepo.Get("backup_on_start")

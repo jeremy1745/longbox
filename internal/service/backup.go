@@ -1,8 +1,8 @@
 package service
 
 import (
+	"database/sql"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -20,13 +20,20 @@ type BackupInfo struct {
 
 // BackupService manages SQLite database backups.
 type BackupService struct {
+	db        *sql.DB // write connection — VACUUM INTO requires a writer
 	dbPath    string
 	backupDir string
 }
 
 // NewBackupService creates a new backup service.
-func NewBackupService(dbPath, dataDir string) *BackupService {
+//
+// `db` must be the write connection — backups use `VACUUM INTO` which needs
+// a writer to checkpoint the WAL into the snapshot. A naked file copy of
+// the .db file is silently wrong while WAL is in flight, because recent
+// writes only live in the .db-wal sidecar until the next checkpoint.
+func NewBackupService(db *sql.DB, dbPath, dataDir string) *BackupService {
 	return &BackupService{
+		db:        db,
 		dbPath:    dbPath,
 		backupDir: filepath.Join(dataDir, "backups"),
 	}
@@ -37,7 +44,10 @@ func (s *BackupService) BackupDir() string {
 	return s.backupDir
 }
 
-// CreateBackup copies the database file to the backups directory.
+// CreateBackup writes a consistent snapshot of the database to the backups
+// directory using SQLite's VACUUM INTO. Unlike a raw file copy, this captures
+// pending WAL writes and produces a self-contained .db file with no -wal
+// sidecar required for restore.
 func (s *BackupService) CreateBackup() (*BackupInfo, error) {
 	if err := os.MkdirAll(s.backupDir, 0700); err != nil {
 		return nil, fmt.Errorf("creating backup directory: %w", err)
@@ -47,34 +57,34 @@ func (s *BackupService) CreateBackup() (*BackupInfo, error) {
 	backupName := fmt.Sprintf("longbox-%s.db", timestamp)
 	backupPath := filepath.Join(s.backupDir, backupName)
 
-	src, err := os.Open(s.dbPath)
+	// VACUUM INTO bails if the target exists, so make sure we won't collide
+	// with a previous failed run.
+	if _, err := os.Stat(backupPath); err == nil {
+		if err := os.Remove(backupPath); err != nil {
+			return nil, fmt.Errorf("removing stale backup: %w", err)
+		}
+	}
+
+	// Path literal: VACUUM INTO does not accept bind parameters in SQLite.
+	// The backup directory is server-controlled (filepath.Join under
+	// dataDir), so injection isn't a vector — but we escape single quotes
+	// defensively in case dataDir ever contains one.
+	escaped := strings.ReplaceAll(backupPath, "'", "''")
+	if _, err := s.db.Exec(fmt.Sprintf("VACUUM INTO '%s'", escaped)); err != nil {
+		_ = os.Remove(backupPath)
+		return nil, fmt.Errorf("vacuum into backup: %w", err)
+	}
+
+	info, err := os.Stat(backupPath)
 	if err != nil {
-		return nil, fmt.Errorf("opening database: %w", err)
-	}
-	defer src.Close()
-
-	dst, err := os.Create(backupPath)
-	if err != nil {
-		return nil, fmt.Errorf("creating backup file: %w", err)
-	}
-	defer dst.Close()
-
-	size, err := io.Copy(dst, src)
-	if err != nil {
-		os.Remove(backupPath)
-		return nil, fmt.Errorf("copying database: %w", err)
+		return nil, fmt.Errorf("statting backup file: %w", err)
 	}
 
-	if err := dst.Close(); err != nil {
-		os.Remove(backupPath)
-		return nil, fmt.Errorf("closing backup: %w", err)
-	}
-
-	slog.Info("database backup created", "name", backupName, "size", size)
+	slog.Info("database backup created", "name", backupName, "size", info.Size())
 
 	return &BackupInfo{
 		Name:      backupName,
-		Size:      size,
+		Size:      info.Size(),
 		CreatedAt: time.Now().UTC(),
 	}, nil
 }
