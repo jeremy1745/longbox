@@ -33,6 +33,14 @@
 	let testResult = $state<APIKeyTestResult | null>(null);
 	let saveMessage = $state<string | null>(null);
 
+	// Metron credentials state
+	let metronUsernameInput = $state('');
+	let metronTokenInput = $state('');
+	let metronSaving = $state(false);
+	let metronTesting = $state(false);
+	let metronSaveMessage = $state<string | null>(null);
+	let metronTestResult = $state<{ valid: boolean; message: string; burst_remaining?: number; daily_remaining?: number } | null>(null);
+
 	// File organization state
 	let templateInput = $state('');
 	let templateLoading = $state(true);
@@ -336,6 +344,42 @@
 			};
 		} finally {
 			testing = false;
+		}
+	}
+
+	async function saveMetronCreds() {
+		// Both fields blank = clear; require at least one if not clearing.
+		metronSaving = true;
+		metronSaveMessage = null;
+		metronTestResult = null;
+		try {
+			await ApiClient.put<any>('/settings/metron', {
+				username: metronUsernameInput.trim(),
+				api_token: metronTokenInput.trim()
+			});
+			metronUsernameInput = '';
+			metronTokenInput = '';
+			metronSaveMessage = 'Metron credentials saved.';
+			await loadSettings();
+		} catch (e) {
+			metronSaveMessage = e instanceof Error ? e.message : 'Failed to save Metron credentials';
+		} finally {
+			metronSaving = false;
+		}
+	}
+
+	async function testMetronCreds() {
+		metronTesting = true;
+		metronTestResult = null;
+		try {
+			metronTestResult = await ApiClient.post('/settings/metron/test');
+		} catch (e) {
+			metronTestResult = {
+				valid: false,
+				message: e instanceof Error ? e.message : 'Test failed'
+			};
+		} finally {
+			metronTesting = false;
 		}
 	}
 
@@ -992,6 +1036,135 @@
 							{#if testResult.valid && testResult.hourly_remaining !== undefined}
 								<p class="text-xs text-gray-400 mt-1">
 									{testResult.hourly_remaining} hourly requests remaining
+								</p>
+							{/if}
+						</div>
+					{/if}
+				</div>
+			{/if}
+		</div>
+
+		<!-- Metron API Credentials Section -->
+		<div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+			<h2 class="text-xl font-semibold mb-4">Metron API</h2>
+			<p class="text-sm text-gray-400 mb-6">
+				Optional second metadata source. Metron's covers are higher-res and consistently sized;
+				its weekly calendar is merged with ComicVine + walksoftly for richer pull-list data.
+				<a href="https://metron.cloud/" target="_blank" rel="noopener"
+					class="text-amber-400 hover:text-amber-300">Create an account</a> and grab your
+				personal API token from your profile page.
+				Limits: 20 requests / minute · 5,000 / day.
+			</p>
+
+			<!-- Current status -->
+			<div class="mb-6 space-y-2">
+				<div class="flex items-center gap-3">
+					<span class="text-sm text-gray-400">Status:</span>
+					{#if settings?.metron_token_set}
+						<span class="inline-flex items-center gap-1.5 text-sm text-green-400">
+							<span class="w-2 h-2 bg-green-400 rounded-full"></span>
+							Connected
+						</span>
+					{:else}
+						<span class="inline-flex items-center gap-1.5 text-sm text-yellow-400">
+							<span class="w-2 h-2 bg-yellow-400 rounded-full"></span>
+							Not configured
+						</span>
+					{/if}
+				</div>
+
+				{#if settings?.metron_token_set}
+					<div class="flex items-center gap-3">
+						<span class="text-sm text-gray-400">Username:</span>
+						<code class="text-sm text-gray-300 bg-gray-700 px-2 py-0.5 rounded">
+							{settings.metron_username}
+						</code>
+					</div>
+					<div class="flex items-center gap-3">
+						<span class="text-sm text-gray-400">Token:</span>
+						<code class="text-sm text-gray-300 bg-gray-700 px-2 py-0.5 rounded">
+							{settings.metron_token_masked}
+						</code>
+					</div>
+					<div class="flex items-center gap-3">
+						<span class="text-sm text-gray-400">Quota remaining:</span>
+						<span class="text-sm text-gray-300">
+							{settings.metron_burst_remaining}/min ·
+							{settings.metron_sustained_remaining}/day
+						</span>
+					</div>
+				{/if}
+			</div>
+
+			<!-- Username + token input -->
+			<div class="space-y-3">
+				<div>
+					<label for="metron-user" class="block text-sm font-medium text-gray-300 mb-1">
+						{settings?.metron_token_set ? 'Update Username' : 'Username'}
+					</label>
+					<input
+						id="metron-user"
+						type="text"
+						bind:value={metronUsernameInput}
+						placeholder="Your metron.cloud username"
+						class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg
+							text-gray-100 placeholder-gray-500
+							focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+					/>
+				</div>
+				<div>
+					<label for="metron-token" class="block text-sm font-medium text-gray-300 mb-1">
+						{settings?.metron_token_set ? 'Update API Token' : 'API Token'}
+					</label>
+					<div class="flex gap-3">
+						<input
+							id="metron-token"
+							type="password"
+							bind:value={metronTokenInput}
+							placeholder="Personal API token from your Metron profile"
+							class="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg
+								text-gray-100 placeholder-gray-500
+								focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+							onkeydown={(e) => e.key === 'Enter' && saveMetronCreds()}
+						/>
+						<button
+							onclick={saveMetronCreds}
+							disabled={metronSaving || (!metronUsernameInput.trim() && !metronTokenInput.trim())}
+							class="px-4 py-2 bg-amber-500 hover:bg-amber-600 disabled:bg-gray-600
+								disabled:cursor-not-allowed text-gray-900 font-semibold rounded-lg transition-colors"
+						>
+							{metronSaving ? 'Saving...' : 'Save'}
+						</button>
+					</div>
+				</div>
+			</div>
+
+			{#if metronSaveMessage}
+				<p class="mt-3 text-sm {metronSaveMessage.toLowerCase().includes('failed') ? 'text-red-400' : 'text-green-400'}">
+					{metronSaveMessage}
+				</p>
+			{/if}
+
+			<!-- Test button -->
+			{#if settings?.metron_token_set}
+				<div class="mt-4 pt-4 border-t border-gray-700">
+					<button
+						onclick={testMetronCreds}
+						disabled={metronTesting}
+						class="px-4 py-2 bg-gray-700 hover:bg-gray-600 disabled:bg-gray-600
+							disabled:cursor-not-allowed text-gray-200 font-medium rounded-lg transition-colors text-sm"
+					>
+						{metronTesting ? 'Testing...' : 'Test Connection'}
+					</button>
+
+					{#if metronTestResult}
+						<div class="mt-3 p-3 rounded-lg {metronTestResult.valid ? 'bg-green-900/30 border border-green-700' : 'bg-red-900/30 border border-red-700'}">
+							<p class="text-sm {metronTestResult.valid ? 'text-green-400' : 'text-red-400'}">
+								{metronTestResult.message}
+							</p>
+							{#if metronTestResult.valid && metronTestResult.burst_remaining !== undefined}
+								<p class="text-xs text-gray-400 mt-1">
+									{metronTestResult.burst_remaining}/min · {metronTestResult.daily_remaining}/day remaining
 								</p>
 							{/if}
 						</div>
