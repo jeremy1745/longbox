@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jeremy/longbox/internal/comicvine"
@@ -29,7 +30,11 @@ type MetadataService struct {
 
 	// In-memory cache: ComicVine volume ID → publisher name.
 	// Avoids re-fetching publisher data on every pull list page load.
-	publisherCache map[int]string
+	// Calendar/pull-list reads can come in concurrently (e.g., SSR prefetch
+	// + browser request), so the cache needs a lock — naked map writes
+	// from multiple goroutines abort the Go runtime.
+	publisherCacheMu sync.RWMutex
+	publisherCache   map[int]string
 }
 
 func NewMetadataService(
@@ -610,6 +615,7 @@ func (s *MetadataService) GetWeeklyReleases(startDate, endDate string) ([]PullLi
 
 	// Build local data lookups (needed regardless of source)
 	localByCV, localIssues := s.buildLocalIssueLookup(startDate, endDate)
+	trackedSeriesByTitle := s.buildTrackedSeriesByTitle()
 	debug.LocalCount = len(localIssues)
 
 	trackedSeriesByCV := s.buildTrackedSeriesLookup()
@@ -636,7 +642,7 @@ func (s *MetadataService) GetWeeklyReleases(startDate, endDate string) ([]PullLi
 		} else {
 			debug.WalksoftlyCount = len(wsReleases)
 			debug.Source = "walksoftly"
-			results = s.buildResultsFromWalksoftly(wsReleases, localByCV, trackedSeriesByCV, localSeriesByCV, wantedIssueIDs, trackedIssuesByKey)
+			results = s.buildResultsFromWalksoftly(wsReleases, localByCV, trackedSeriesByCV, trackedSeriesByTitle, localSeriesByCV, wantedIssueIDs, trackedIssuesByKey)
 		}
 	}
 
@@ -700,6 +706,58 @@ func (s *MetadataService) buildTrackedSeriesLookup() map[int64]*model.Series {
 	return trackedSeriesByCV
 }
 
+// buildTrackedSeriesByTitle returns a fallback map of tracked series keyed by
+// normalized title for cases where the walksoftly release lacks a series CV
+// ID OR the local series row has no comicvine_id linkage. Defense-in-depth:
+// without this fallback, a tracked-but-unlinked series shows up in the
+// calendar with no "Tracked" badge.
+//
+// Key is normSeriesTitle(Title). Only one entry per key is kept — if two
+// tracked series collide on the normalized title (e.g. multiple volumes
+// of the same name), the entry is dropped from the fallback map so we
+// don't pick the wrong volume.
+func (s *MetadataService) buildTrackedSeriesByTitle() map[string]*model.Series {
+	byTitle := make(map[string]*model.Series)
+	collisions := make(map[string]bool)
+	tracked, err := s.seriesRepo.ListTracked()
+	if err != nil {
+		return byTitle
+	}
+	for i := range tracked {
+		key := normSeriesTitle(tracked[i].Title)
+		if key == "" {
+			continue
+		}
+		if _, exists := byTitle[key]; exists {
+			collisions[key] = true
+			continue
+		}
+		byTitle[key] = &tracked[i]
+	}
+	for k := range collisions {
+		delete(byTitle, k)
+	}
+	return byTitle
+}
+
+// normSeriesTitle lowercases and strips everything except [a-z0-9] so that
+// punctuation differences ("Doctor Strange" vs "Dr. Strange") and casing
+// don't break series matching. Same shape as the word-boundary helper in
+// the search service.
+func normSeriesTitle(title string) string {
+	out := make([]byte, 0, len(title))
+	for i := 0; i < len(title); i++ {
+		c := title[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+			out = append(out, c)
+		}
+	}
+	return string(out)
+}
+
 // buildLocalSeriesLookup returns a map of all local series by ComicVine ID.
 func (s *MetadataService) buildLocalSeriesLookup() map[int64]*model.Series {
 	localSeriesByCV := make(map[int64]*model.Series)
@@ -754,6 +812,7 @@ func (s *MetadataService) buildResultsFromWalksoftly(
 	releases []walksoftly.Release,
 	localByCV map[int64]*model.Issue,
 	trackedSeriesByCV map[int64]*model.Series,
+	trackedSeriesByTitle map[string]*model.Series,
 	localSeriesByCV map[int64]*model.Series,
 	wantedIssueIDs map[int64]bool,
 	trackedIssuesByKey map[string]*model.Issue,
@@ -834,7 +893,10 @@ func (s *MetadataService) buildResultsFromWalksoftly(
 			}
 		}
 
-		// Cross-reference with tracked series
+		// Cross-reference with tracked series — first by CV volume ID, then
+		// fall back to normalized series title for tracked series without
+		// CV linkage (rare but possible when the user tracks a series
+		// without a successful ComicVine match).
 		if seriesCVID > 0 {
 			if ts, ok := trackedSeriesByCV[seriesCVID]; ok {
 				item.Tracked = true
@@ -846,6 +908,14 @@ func (s *MetadataService) buildResultsFromWalksoftly(
 			if item.CoverURL == "" {
 				if ls, ok := localSeriesByCV[seriesCVID]; ok {
 					_ = ls // local series doesn't have cover URL on the series level
+				}
+			}
+		}
+		if !item.Tracked {
+			if ts, ok := trackedSeriesByTitle[normSeriesTitle(rel.Series)]; ok {
+				item.Tracked = true
+				if item.LocalSeriesID == nil {
+					item.LocalSeriesID = &ts.ID
 				}
 			}
 		}
@@ -872,14 +942,17 @@ func (s *MetadataService) buildResultsFromComicVine(
 
 	// Build publisher lookup from local data + cache
 	publisherByVolumeID := make(map[int]string)
+	s.publisherCacheMu.Lock()
 	for cvID, ls := range localSeriesByCV {
 		if ls.PublisherName != "" {
 			publisherByVolumeID[int(cvID)] = ls.PublisherName
 			s.publisherCache[int(cvID)] = ls.PublisherName
 		}
 	}
+	s.publisherCacheMu.Unlock()
 
 	var uncachedVolumeIDs []int
+	s.publisherCacheMu.RLock()
 	for _, cvIssue := range cvIssues {
 		if cvIssue.Volume == nil || cvIssue.Volume.ID == 0 {
 			continue
@@ -894,6 +967,7 @@ func (s *MetadataService) buildResultsFromComicVine(
 		}
 		uncachedVolumeIDs = append(uncachedVolumeIDs, vid)
 	}
+	s.publisherCacheMu.RUnlock()
 
 	// Deduplicate and fetch
 	uncachedSet := make(map[int]bool)
@@ -907,12 +981,14 @@ func (s *MetadataService) buildResultsFromComicVine(
 	if len(uniqueUncached) > 0 {
 		volumes, err := s.cv.GetVolumesByIDs(uniqueUncached)
 		if err == nil {
+			s.publisherCacheMu.Lock()
 			for _, v := range volumes {
 				if v.Publisher != nil && v.Publisher.Name != "" {
 					publisherByVolumeID[v.ID] = v.Publisher.Name
 					s.publisherCache[v.ID] = v.Publisher.Name
 				}
 			}
+			s.publisherCacheMu.Unlock()
 		}
 	}
 
@@ -1128,8 +1204,14 @@ func (s *MetadataService) TrackFromComicVine(cvVolumeID int, wantListRepo *repos
 		}
 	}
 
-	// Reload the series to get updated computed fields
-	series, _ = s.seriesRepo.GetByID(series.ID)
+	// Reload the series to get updated computed fields. Tolerate a reload
+	// miss — if GetByID errors or returns nil, fall back to the in-memory
+	// series we already have rather than panicking on the slog deref.
+	if reloaded, err := s.seriesRepo.GetByID(series.ID); err != nil {
+		slog.Warn("failed to reload series after tracking", "series_id", series.ID, "error", err)
+	} else if reloaded != nil {
+		series = reloaded
+	}
 
 	slog.Info("tracked series from ComicVine",
 		"series_id", series.ID,
