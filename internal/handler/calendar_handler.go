@@ -1,9 +1,12 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/jeremy/longbox/internal/model"
 	"github.com/jeremy/longbox/internal/repository"
@@ -19,6 +22,7 @@ type CalendarHandler struct {
 	sched        *scheduler.Scheduler
 	searchSvc    *service.SearchService
 	settingRepo  *repository.SettingRepo
+	folderSvc    *service.SeriesFolderService
 }
 
 func NewCalendarHandler(
@@ -29,6 +33,7 @@ func NewCalendarHandler(
 	sched *scheduler.Scheduler,
 	searchSvc *service.SearchService,
 	settingRepo *repository.SettingRepo,
+	folderSvc *service.SeriesFolderService,
 ) *CalendarHandler {
 	return &CalendarHandler{
 		issueRepo:    issueRepo,
@@ -38,7 +43,27 @@ func NewCalendarHandler(
 		sched:        sched,
 		searchSvc:    searchSvc,
 		settingRepo:  settingRepo,
+		folderSvc:    folderSvc,
 	}
+}
+
+// ensureSeriesFolderAsync fires off a background goroutine that creates the
+// series's library folder and downloads its poster. Called after every
+// successful /calendar/want so the user sees their tracked series appear
+// on disk immediately — without blocking the HTTP response on the cover
+// download. Errors are logged at warn but never bubble up to the user;
+// the click already succeeded by the time this runs.
+func (h *CalendarHandler) ensureSeriesFolderAsync(seriesID int64) {
+	if h.folderSvc == nil || seriesID <= 0 {
+		return
+	}
+	go func(sid int64) {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		if err := h.folderSvc.EnsureFolderAndPoster(ctx, sid); err != nil {
+			slog.Warn("ensure series folder", "series_id", sid, "error", err)
+		}
+	}(seriesID)
 }
 
 // Upcoming returns issues with store_date in the given date range from the LOCAL database.
@@ -159,6 +184,10 @@ func (h *CalendarHandler) TrackSeries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if series != nil {
+		h.ensureSeriesFolderAsync(series.ID)
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"series":          series,
 		"tracked":         true,
@@ -195,6 +224,7 @@ func (h *CalendarHandler) WantIssue(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		triggerAutoSearch(h.searchSvc, h.settingRepo, body.LocalIssueID, fmt.Sprintf("calendar-want issue %d", body.LocalIssueID))
+		h.ensureSeriesFolderAsync(item.SeriesID)
 		writeJSON(w, http.StatusCreated, item)
 		return
 	}
@@ -211,6 +241,7 @@ func (h *CalendarHandler) WantIssue(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		triggerAutoSearch(h.searchSvc, h.settingRepo, item.IssueID, fmt.Sprintf("calendar-want cv-issue %d", body.ComicVineID))
+		h.ensureSeriesFolderAsync(item.SeriesID)
 		writeJSON(w, http.StatusCreated, item)
 		return
 	}
@@ -227,6 +258,7 @@ func (h *CalendarHandler) WantIssue(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		triggerAutoSearch(h.searchSvc, h.settingRepo, item.IssueID, fmt.Sprintf("calendar-want series %d #%s", body.SeriesCVID, body.IssueNumber))
+		h.ensureSeriesFolderAsync(item.SeriesID)
 		writeJSON(w, http.StatusCreated, item)
 		return
 	}
