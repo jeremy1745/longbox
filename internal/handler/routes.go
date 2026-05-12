@@ -172,6 +172,7 @@ func NewRouter(
 			r.Get("/metadata/story-arcs/search", storyArcH.Search)
 			r.Post("/series/{id}/match", metaH.MatchSeries)
 			r.Post("/series/{id}/enrich-metron", metaH.EnrichFromMetron)
+			r.Post("/series/{id}/merge-into/{target_id}", metaH.MergeSeries)
 			r.Post("/series/{id}/refresh", metaH.RefreshSeries)
 
 			// Story Arcs

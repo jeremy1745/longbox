@@ -168,6 +168,134 @@ func (s *MetadataService) TestMetronConnection() error {
 	return s.metron.TestConnection()
 }
 
+// MatchSeriesToMetron sets the Metron ID on a local series row and pulls
+// in any metadata Metron has that the local row is missing (description,
+// publisher, year, then the issue-level cover refresh via the same
+// enrich code path used elsewhere).
+//
+// Does NOT check for cv_id-style conflicts — the handler is expected to
+// pre-flight via FindByMetronID and prompt the user before calling this.
+// If the metron_id UNIQUE constraint trips, the underlying error bubbles
+// up cleanly.
+func (s *MetadataService) MatchSeriesToMetron(ctx context.Context, seriesID int64, metronID int) error {
+	if !s.HasMetron() {
+		return fmt.Errorf("metron credentials not configured")
+	}
+	ser, err := s.seriesRepo.GetByID(seriesID)
+	if err != nil {
+		return fmt.Errorf("getting series: %w", err)
+	}
+	if ser == nil {
+		return fmt.Errorf("series %d not found", seriesID)
+	}
+	if ser.MetadataLocked {
+		return fmt.Errorf("series metadata is locked")
+	}
+
+	det, err := s.metron.GetSeries(metronID)
+	if err != nil {
+		return fmt.Errorf("fetching metron series %d: %w", metronID, err)
+	}
+	if det == nil {
+		return fmt.Errorf("metron series %d not found", metronID)
+	}
+
+	// Publisher.
+	if det.PublisherName != "" {
+		pub, _ := s.publisherRepo.FindOrCreateByName(det.PublisherName, nil)
+		if pub != nil {
+			pid := pub.ID
+			ser.PublisherID = &pid
+		}
+	}
+	ser.Title = det.Name
+	ser.SortTitle = scanner.MakeSortTitle(det.Name)
+	if det.YearStarted > 0 {
+		y := det.YearStarted
+		ser.Year = &y
+	}
+	if ser.Description == "" && det.Description != "" {
+		ser.Description = det.Description
+	}
+	mid := int64(metronID)
+	ser.MetronID = &mid
+	if err := s.seriesRepo.UpdateFromMetadata(ser); err != nil {
+		return fmt.Errorf("updating series: %w", err)
+	}
+	if err := s.seriesRepo.SetMetronID(seriesID, mid, det.ModifiedAt.Format(time.RFC3339)); err != nil {
+		slog.Warn("match-metron: set metron_id", "series_id", seriesID, "error", err)
+	}
+	// Pull issue covers + metron_id linkage.
+	if _, err := s.EnrichSeriesFromMetron(ctx, seriesID); err != nil {
+		slog.Warn("match-metron: post-link enrich", "series_id", seriesID, "error", err)
+	}
+	slog.Info("matched series to metron", "series_id", seriesID, "metron_id", metronID, "title", det.Name)
+	return nil
+}
+
+// FindSeriesByExternalID returns any local series that already carries
+// the given external ID (ComicVine or Metron). Used by the match handler
+// to surface merge conflicts before applying a match that would trip a
+// UNIQUE constraint.
+//
+// Returns (nil, nil) when no series owns the ID.
+func (s *MetadataService) FindSeriesByExternalID(source string, externalID int64) (*model.Series, error) {
+	switch source {
+	case "comicvine":
+		return s.seriesRepo.FindByComicVineID(externalID)
+	case "metron":
+		return s.seriesRepo.FindByMetronID(externalID)
+	}
+	return nil, fmt.Errorf("unknown metadata source %q", source)
+}
+
+// MergeSeriesInto repoints every reference under sourceID to targetID
+// (issues, comic_files, want_list, story_arc_issues, backlog_items,
+// download_history, child annuals) and deletes the source series row.
+//
+// The DB work runs in a single SQLite transaction inside SeriesRepo.
+// After it commits, files-on-disk are left where they sit — the next
+// reorganize pass will move them into the canonical target folder.
+func (s *MetadataService) MergeSeriesInto(sourceID, targetID int64) (*MergeStats, error) {
+	source, err := s.seriesRepo.GetByID(sourceID)
+	if err != nil {
+		return nil, fmt.Errorf("source: %w", err)
+	}
+	if source == nil {
+		return nil, fmt.Errorf("source series %d not found", sourceID)
+	}
+	target, err := s.seriesRepo.GetByID(targetID)
+	if err != nil {
+		return nil, fmt.Errorf("target: %w", err)
+	}
+	if target == nil {
+		return nil, fmt.Errorf("target series %d not found", targetID)
+	}
+	stats, err := s.seriesRepo.MergeInto(sourceID, targetID)
+	if err != nil {
+		return nil, err
+	}
+	slog.Info("merged series",
+		"source_id", sourceID, "source_title", source.Title,
+		"target_id", targetID, "target_title", target.Title,
+		"issues_relocated", stats.IssuesRelocated,
+		"issues_consolidated", stats.IssuesConsolidated,
+		"files_repointed", stats.FilesRepointed,
+	)
+	return &MergeStats{
+		IssuesRelocated:    stats.IssuesRelocated,
+		IssuesConsolidated: stats.IssuesConsolidated,
+		FilesRepointed:     stats.FilesRepointed,
+		WantListMerged:     stats.WantListMerged,
+		StoryArcsMerged:    stats.StoryArcsMerged,
+		BacklogRepointed:   stats.BacklogRepointed,
+	}, nil
+}
+
+// MergeStats is re-exported here so callers don't need to know about the
+// repository package.
+type MergeStats = repository.MergeStats
+
 // EnrichResult is what EnrichSeriesFromMetron returns.
 type EnrichResult struct {
 	SeriesID         int64  `json:"series_id"`

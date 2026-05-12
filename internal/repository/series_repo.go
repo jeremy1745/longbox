@@ -224,6 +224,22 @@ func (r *SeriesRepo) UpdateFromMetadata(s *model.Series) error {
 	return err
 }
 
+// FindByMetronID finds a series by Metron ID. Mirrors FindByComicVineID.
+// Returns (nil, nil) when no series carries the given Metron ID.
+func (r *SeriesRepo) FindByMetronID(metronID int64) (*model.Series, error) {
+	row := r.read.QueryRow(`
+		SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id, s.metron_id, s.metron_modified_at,
+			COALESCE(s.description,''), s.status, s.total_issues, s.cover_file_id, s.tracked,
+			s.metadata_locked, s.last_cv_sync, s.parent_series_id, s.created_at, s.updated_at,
+			COALESCE((SELECT COUNT(*) FROM issues WHERE series_id = s.id), 0) as issue_count,
+			COALESCE((SELECT COUNT(*) FROM comic_files cf JOIN issues i ON cf.issue_id = i.id WHERE i.series_id = s.id), 0) as file_count,
+			COALESCE(p.name, '') as publisher_name
+		FROM series s
+		LEFT JOIN publishers p ON s.publisher_id = p.id
+		WHERE s.metron_id = ?`, metronID)
+	return scanSeries(row)
+}
+
 // FindByComicVineID finds a series by ComicVine ID.
 func (r *SeriesRepo) FindByComicVineID(cvID int64) (*model.Series, error) {
 	row := r.read.QueryRow(`
@@ -237,6 +253,190 @@ func (r *SeriesRepo) FindByComicVineID(cvID int64) (*model.Series, error) {
 		LEFT JOIN publishers p ON s.publisher_id = p.id
 		WHERE s.comicvine_id = ?`, cvID)
 	return scanSeries(row)
+}
+
+// MergeStats summarizes what MergeInto did.
+type MergeStats struct {
+	IssuesRelocated   int `json:"issues_relocated"`   // source issues that had no target collision, re-parented to target
+	IssuesConsolidated int `json:"issues_consolidated"` // source issues that collided with a target issue and were merged in
+	FilesRepointed    int `json:"files_repointed"`
+	WantListMerged    int `json:"want_list_merged"`
+	StoryArcsMerged   int `json:"story_arcs_merged"`
+	BacklogRepointed  int `json:"backlog_repointed"`
+}
+
+// MergeInto re-parents every child of `sourceSeriesID` under `targetSeriesID`
+// and deletes the source row. Run inside a single SQLite write transaction
+// so a failure mid-way rolls back without partial damage.
+//
+// Per-issue policy:
+//   * Source issue whose (normalized) issue_number is NOT present in the
+//     target → its series_id is flipped to target. comic_files /
+//     want_list / story_arc / backlog FKs come along naturally.
+//   * Source issue whose number IS present in target → re-point all FK
+//     references from the source issue to the matching target issue,
+//     handling the UNIQUE / PRIMARY KEY collisions on want_list and
+//     story_arc_issues by dropping the source row when the target
+//     already owns the link. The source issue is then deleted.
+//
+// Finally, the source series row is deleted. The CASCADE on issues
+// would clean up anything we missed, but we never leave that to happen
+// implicitly — every issue is dealt with before the parent series goes.
+func (r *SeriesRepo) MergeInto(sourceSeriesID, targetSeriesID int64) (*MergeStats, error) {
+	if sourceSeriesID == targetSeriesID {
+		return nil, fmt.Errorf("source and target series must differ")
+	}
+	tx, err := r.write.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("beginning merge tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	stats := &MergeStats{}
+
+	// Build a (norm_number → target issue id) map up front.
+	rows, err := tx.Query(`SELECT id, issue_number FROM issues WHERE series_id = ?`, targetSeriesID)
+	if err != nil {
+		return nil, fmt.Errorf("listing target issues: %w", err)
+	}
+	type targetIssue struct {
+		id     int64
+		number string
+	}
+	targetByNum := make(map[string]targetIssue)
+	for rows.Next() {
+		var ti targetIssue
+		if err := rows.Scan(&ti.id, &ti.number); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scanning target issue: %w", err)
+		}
+		targetByNum[mergeNormalizeIssueNumber(ti.number)] = ti
+	}
+	rows.Close()
+
+	// Walk source issues.
+	srcRows, err := tx.Query(`SELECT id, issue_number FROM issues WHERE series_id = ?`, sourceSeriesID)
+	if err != nil {
+		return nil, fmt.Errorf("listing source issues: %w", err)
+	}
+	type srcIssue struct {
+		id     int64
+		number string
+	}
+	var sources []srcIssue
+	for srcRows.Next() {
+		var s srcIssue
+		if err := srcRows.Scan(&s.id, &s.number); err != nil {
+			srcRows.Close()
+			return nil, fmt.Errorf("scanning source issue: %w", err)
+		}
+		sources = append(sources, s)
+	}
+	srcRows.Close()
+
+	for _, src := range sources {
+		key := mergeNormalizeIssueNumber(src.number)
+		tgt, exists := targetByNum[key]
+		if !exists {
+			// Relocate the whole issue under target.
+			if _, err := tx.Exec(`UPDATE issues SET series_id = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?`, targetSeriesID, src.id); err != nil {
+				return nil, fmt.Errorf("relocating issue %d: %w", src.id, err)
+			}
+			targetByNum[key] = targetIssue{id: src.id, number: src.number}
+			stats.IssuesRelocated++
+			continue
+		}
+
+		// Consolidate: re-point all references from src.id → tgt.id.
+		if r, err := tx.Exec(`UPDATE comic_files SET issue_id = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE issue_id = ?`, tgt.id, src.id); err == nil {
+			if n, _ := r.RowsAffected(); n > 0 {
+				stats.FilesRepointed += int(n)
+			}
+		} else {
+			return nil, fmt.Errorf("repointing comic_files src=%d tgt=%d: %w", src.id, tgt.id, err)
+		}
+
+		// want_list (UNIQUE on issue_id) — drop conflicting source rows first.
+		if _, err := tx.Exec(`
+			DELETE FROM want_list WHERE issue_id = ?
+			  AND EXISTS (SELECT 1 FROM want_list w2 WHERE w2.issue_id = ?)`, src.id, tgt.id); err != nil {
+			return nil, fmt.Errorf("pre-merge want_list dedupe: %w", err)
+		}
+		if r, err := tx.Exec(`UPDATE want_list SET issue_id = ? WHERE issue_id = ?`, tgt.id, src.id); err == nil {
+			if n, _ := r.RowsAffected(); n > 0 {
+				stats.WantListMerged += int(n)
+			}
+		} else {
+			return nil, fmt.Errorf("repointing want_list: %w", err)
+		}
+
+		// story_arc_issues (PK(story_arc_id, issue_id)) — drop where tgt already linked.
+		if _, err := tx.Exec(`
+			DELETE FROM story_arc_issues
+			WHERE issue_id = ?
+			  AND EXISTS (SELECT 1 FROM story_arc_issues s2
+			              WHERE s2.story_arc_id = story_arc_issues.story_arc_id
+			                AND s2.issue_id = ?)`, src.id, tgt.id); err != nil {
+			return nil, fmt.Errorf("pre-merge story_arc_issues dedupe: %w", err)
+		}
+		if r, err := tx.Exec(`UPDATE story_arc_issues SET issue_id = ? WHERE issue_id = ?`, tgt.id, src.id); err == nil {
+			if n, _ := r.RowsAffected(); n > 0 {
+				stats.StoryArcsMerged += int(n)
+			}
+		} else {
+			return nil, fmt.Errorf("repointing story_arc_issues: %w", err)
+		}
+
+		// backlog_items (no UNIQUE) — straight UPDATE.
+		if r, err := tx.Exec(`UPDATE backlog_items SET issue_id = ? WHERE issue_id = ?`, tgt.id, src.id); err == nil {
+			if n, _ := r.RowsAffected(); n > 0 {
+				stats.BacklogRepointed += int(n)
+			}
+		} else {
+			return nil, fmt.Errorf("repointing backlog_items: %w", err)
+		}
+
+		// download_history (no UNIQUE either).
+		if _, err := tx.Exec(`UPDATE download_history SET issue_id = ? WHERE issue_id = ?`, tgt.id, src.id); err != nil {
+			return nil, fmt.Errorf("repointing download_history: %w", err)
+		}
+
+		// Source issue can go now that nothing references it.
+		if _, err := tx.Exec(`DELETE FROM issues WHERE id = ?`, src.id); err != nil {
+			return nil, fmt.Errorf("deleting source issue %d: %w", src.id, err)
+		}
+		stats.IssuesConsolidated++
+	}
+
+	// Re-parent annual-series rows.
+	if _, err := tx.Exec(`UPDATE series SET parent_series_id = ? WHERE parent_series_id = ?`, targetSeriesID, sourceSeriesID); err != nil {
+		return nil, fmt.Errorf("re-parenting annuals: %w", err)
+	}
+
+	// Delete the source series row. (CASCADE would only fire on issues
+	// not yet handled — there should be none.)
+	if _, err := tx.Exec(`DELETE FROM series WHERE id = ?`, sourceSeriesID); err != nil {
+		return nil, fmt.Errorf("deleting source series: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing merge: %w", err)
+	}
+	return stats, nil
+}
+
+// mergeNormalizeIssueNumber strips leading zeros so "001" and "1" collide.
+// Mirrors the helper used by the calendar / reattach paths.
+func mergeNormalizeIssueNumber(n string) string {
+	n = strings.TrimSpace(n)
+	if n == "" {
+		return ""
+	}
+	bare := strings.TrimLeft(n, "0")
+	if bare == "" {
+		bare = "0"
+	}
+	return strings.ToLower(bare)
 }
 
 // SetMetronID stores Metron's series ID + its modified-at timestamp on a

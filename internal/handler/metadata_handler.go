@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jeremy/longbox/internal/model"
 	"github.com/jeremy/longbox/internal/service"
 )
 
@@ -68,9 +69,23 @@ func (h *MetadataHandler) GetVolume(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, volume)
 }
 
-// MatchSeries matches a local series to a ComicVine volume.
+// MatchSeries matches a local series to a ComicVine volume OR a Metron series.
 // POST /api/v1/series/{id}/match
-// Body: {"comicvine_id": 12345}
+// Body: {"comicvine_id": 12345}  OR  {"metron_id": 8477}  OR both
+//
+// Pre-flight conflict check: if ANOTHER local series already carries the
+// requested external ID, returns 409 Conflict with a body the UI can
+// use to prompt for a merge:
+//
+//	{
+//	  "code": "MERGE_REQUIRED",
+//	  "conflict_with": { "series_id": 28, "title": "Absolute Batman", "year": 2024 },
+//	  "source": "comicvine" | "metron",
+//	  "external_id": 160294
+//	}
+//
+// The client then POSTs /series/{id}/merge-into/{conflict_series_id} to
+// accept the merge.
 func (h *MetadataHandler) MatchSeries(w http.ResponseWriter, r *http.Request) {
 	idStr := chi.URLParam(r, "id")
 	seriesID, err := strconv.ParseInt(idStr, 10, 64)
@@ -81,22 +96,108 @@ func (h *MetadataHandler) MatchSeries(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		ComicVineID int `json:"comicvine_id"`
+		MetronID    int `json:"metron_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
 		return
 	}
-	if req.ComicVineID <= 0 {
-		writeError(w, http.StatusBadRequest, "MISSING_CVID", "comicvine_id is required")
+	if req.ComicVineID <= 0 && req.MetronID <= 0 {
+		writeError(w, http.StatusBadRequest, "MISSING_ID", "comicvine_id or metron_id is required")
 		return
 	}
 
-	if err := h.metaSvc.MatchSeriesToVolume(seriesID, req.ComicVineID); err != nil {
-		writeError(w, http.StatusInternalServerError, "MATCH_FAILED", err.Error())
-		return
+	// Conflict pre-flight: check each requested external ID against the
+	// other tracked series. The UI gets one conflict per request; if both
+	// IDs collide with different series, the first hit wins (rare in
+	// practice).
+	if req.ComicVineID > 0 {
+		if existing, err := h.metaSvc.FindSeriesByExternalID("comicvine", int64(req.ComicVineID)); err == nil && existing != nil && existing.ID != seriesID {
+			respondMergeConflict(w, "comicvine", int64(req.ComicVineID), existing)
+			return
+		}
+	}
+	if req.MetronID > 0 {
+		if existing, err := h.metaSvc.FindSeriesByExternalID("metron", int64(req.MetronID)); err == nil && existing != nil && existing.ID != seriesID {
+			respondMergeConflict(w, "metron", int64(req.MetronID), existing)
+			return
+		}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "matched"})
+	// Apply.
+	if req.ComicVineID > 0 {
+		if err := h.metaSvc.MatchSeriesToVolume(seriesID, req.ComicVineID); err != nil {
+			writeError(w, http.StatusInternalServerError, "MATCH_FAILED", err.Error())
+			return
+		}
+	}
+	if req.MetronID > 0 {
+		if err := h.metaSvc.MatchSeriesToMetron(r.Context(), seriesID, req.MetronID); err != nil {
+			writeError(w, http.StatusInternalServerError, "MATCH_FAILED", err.Error())
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":       "matched",
+		"comicvine_id": req.ComicVineID,
+		"metron_id":    req.MetronID,
+	})
+}
+
+// respondMergeConflict writes a 409 Conflict with the existing series
+// info attached, so the UI can prompt the user to merge.
+func respondMergeConflict(w http.ResponseWriter, source string, externalID int64, existing *model.Series) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	body := map[string]any{
+		"code":    "MERGE_REQUIRED",
+		"message": "another local series already carries this " + source + " id",
+		"source":  source,
+		"external_id": externalID,
+		"conflict_with": map[string]any{
+			"series_id": existing.ID,
+			"title":     existing.Title,
+			"year":      existing.Year,
+			"tracked":   existing.Tracked,
+		},
+	}
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+// MergeSeries collapses one local series into another, repointing every
+// child reference and deleting the source row. Caller is expected to have
+// confirmed the merge after receiving a 409 MERGE_REQUIRED on /match.
+//
+// POST /api/v1/series/{id}/merge-into/{target_id}
+func (h *MetadataHandler) MergeSeries(w http.ResponseWriter, r *http.Request) {
+	sourceID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid source series ID")
+		return
+	}
+	targetID, err := strconv.ParseInt(chi.URLParam(r, "target_id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "invalid target series ID")
+		return
+	}
+	stats, err := h.metaSvc.MergeSeriesInto(sourceID, targetID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "MERGE_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":              "merged",
+		"source_series_id":    sourceID,
+		"target_series_id":    targetID,
+		"issues_relocated":    stats.IssuesRelocated,
+		"issues_consolidated": stats.IssuesConsolidated,
+		"files_repointed":     stats.FilesRepointed,
+		"want_list_merged":    stats.WantListMerged,
+		"story_arcs_merged":   stats.StoryArcsMerged,
+		"backlog_repointed":   stats.BacklogRepointed,
+		"note":                "Files on disk will be moved to the target folder on the next reorganize pass.",
+	})
 }
 
 // EnrichFromMetron resolves the Metron record for a local series via
