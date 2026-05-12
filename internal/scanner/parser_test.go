@@ -30,6 +30,15 @@ func TestParseFilename(t *testing.T) {
 		{"X-Men (1991) #4.cbr", "X-Men", "4", 1991},
 		{"Spider-Man 2099 (2014) #005.cbz", "Spider-Man 2099", "5", 2014},
 		{"Batman #0.5.cbz", "Batman", "0.5", 0},
+
+		// Mylar "(of N)" mini-series counter — previously fell through to
+		// the catch-all fallback and the entire filename became the series.
+		{"20th Century Men 01 (of 06) (2022) (Digital) (Mephisto-Empire).cbz", "20th Century Men", "1", 2022},
+		// "(0f 06)" typo seen in real release names — same fix.
+		{"20th Century Men 01 (0f 06) (2022).cbz", "20th Century Men", "1", 2022},
+
+		// "Series NN - Subtitle (Year)" — previously fell through too.
+		{"Aama 03 - The Desert of Mirrors (2015) (Digital) (Dipole-Empire).cbz", "Aama", "3", 2015},
 	}
 
 	for _, tt := range tests {
@@ -46,6 +55,63 @@ func TestParseFilename(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestParseFilename_RejectsUnparseableFilenames verifies that filenames the
+// patterns can't decompose return an empty parse, instead of recording the
+// whole filename as a Series. Without this, every scanned issue produced a
+// junk series row matching its full filename.
+func TestParseFilename_RejectsUnparseableFilenames(t *testing.T) {
+	unparseable := []string{
+		// Issue numbers still in the captured series — would be garbage.
+		"A Vicious Circle 002 (of 03) (2023) (Digital-Empire)",
+		"Detective Comics 973 (F) (2018) (Webrip)",
+	}
+	for _, name := range unparseable {
+		t.Run(name, func(t *testing.T) {
+			r := ParseFilename(name)
+			// We don't require Series to be empty for *all* of these — the
+			// new patterns may catch some. But if Series is set, it must
+			// not echo back issue-shaped tokens like "(of N)" or a 4-digit
+			// parenthetical year, which were the smoking gun for the
+			// 14-row scanner garbage in production.
+			if r.Series != "" {
+				if (containsAny(r.Series, "(of ", "(0f ")) || hasParenYear(r.Series) {
+					t.Errorf("series %q still carries issue-shaped tokens", r.Series)
+				}
+			}
+		})
+	}
+}
+
+func containsAny(s string, needles ...string) bool {
+	for _, n := range needles {
+		for i := 0; i+len(n) <= len(s); i++ {
+			if s[i:i+len(n)] == n {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasParenYear(s string) bool {
+	// crude check for "(YYYY)" anywhere in s
+	for i := 0; i+6 <= len(s); i++ {
+		if s[i] == '(' && s[i+5] == ')' {
+			ok := true
+			for j := 1; j <= 4; j++ {
+				if s[i+j] < '0' || s[i+j] > '9' {
+					ok = false
+					break
+				}
+			}
+			if ok {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func TestMakeSortTitle(t *testing.T) {

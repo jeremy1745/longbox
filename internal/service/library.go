@@ -193,12 +193,23 @@ func (s *LibraryService) processFile(r scanner.Result) (*processResult, error) {
 	// Parse filename for metadata
 	parsed := scanner.ParseFilename(r.Name)
 
-	// Try to read ComicInfo.xml for richer metadata
+	// Try to read ComicInfo.xml for richer metadata.
+	// Both archive.Open and archive.ReadComicInfo failures are logged at
+	// debug — a missing/corrupt ComicInfo isn't fatal, but silently dropping
+	// the error meant unusual archives fell back to filename-only parsing
+	// with no signal to the user about which files needed attention.
 	var comicInfo *archive.ComicInfo
 	if r.Format == "cbz" || r.Format == "cbr" || r.Format == "cb7" {
 		a, err := archive.Open(r.Path)
-		if err == nil {
-			comicInfo, _ = archive.ReadComicInfo(a)
+		if err != nil {
+			slog.Debug("opening archive for ComicInfo read", "path", r.Path, "error", err)
+		} else {
+			ci, ciErr := archive.ReadComicInfo(a)
+			if ciErr != nil {
+				slog.Debug("reading ComicInfo.xml", "path", r.Path, "error", ciErr)
+			} else {
+				comicInfo = ci
+			}
 			a.Close()
 		}
 	}
@@ -226,6 +237,32 @@ func (s *LibraryService) processFile(r scanner.Result) (*processResult, error) {
 
 	if year == nil && parsed.Year > 0 {
 		year = &parsed.Year
+	}
+
+	// If neither the filename parser nor ComicInfo gave us a series name,
+	// record the file as an orphan (issue_id=NULL) rather than minting a
+	// Series row from the bare filename. Previously the parser fallback
+	// would echo the whole filename back as the "series", which is how the
+	// 14 garbage rows like "20th Century Men 01 (of 06) (2022) (Digital)"
+	// ended up in the DB.
+	if strings.TrimSpace(seriesName) == "" {
+		slog.Debug("file has no parseable series — recording as orphan", "path", r.Path)
+		cf := &model.ComicFile{
+			FilePath:     r.Path,
+			FileName:     r.Name,
+			FileSize:     r.Size,
+			FileFormat:   r.Format,
+			ParsedSeries: parsed.Series,
+			ParsedNumber: parsed.Number,
+			HasComicInfo: comicInfo != nil,
+		}
+		if parsed.Year > 0 {
+			cf.ParsedYear = &parsed.Year
+		}
+		if err := s.fileRepo.Create(cf); err != nil {
+			return nil, fmt.Errorf("creating orphan file record: %w", err)
+		}
+		return res, nil
 	}
 
 	// Find or create series
@@ -304,6 +341,10 @@ func (s *LibraryService) processFile(r scanner.Result) (*processResult, error) {
 }
 
 func (s *LibraryService) findOrCreateSeries(title string, year *int) (*model.Series, error) {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return nil, fmt.Errorf("cannot create series with empty title")
+	}
 	existing, err := s.seriesRepo.FindByTitleAndYear(title, year)
 	if err != nil {
 		return nil, err

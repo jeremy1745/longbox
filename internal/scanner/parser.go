@@ -23,11 +23,21 @@ var patterns = []*regexp.Regexp{
 	// "Batman #045 (2016).cbz"
 	regexp.MustCompile(`(?i)^(?P<series>.+?)\s*#(?P<number>[\d.]+(?:\s*-\s*[\d.]+)?)\s*\((?P<year>\d{4})\)`),
 
+	// "20th Century Men 01 (of 06) (2022)" / "(0f 06)" typo variant —
+	// Mylar's mini-series counter. Without this, the series capture
+	// swallows the issue number on the next two patterns.
+	regexp.MustCompile(`(?i)^(?P<series>.+?)\s+(?P<number>\d{1,4}(?:\.\d+)?)\s*\(\s*(?:of|0f)\s+\d+\s*\)\s*\((?P<year>\d{4})\)`),
+
 	// "Amazing Spider-Man v2 012 (2000).cbr"
 	regexp.MustCompile(`(?i)^(?P<series>.+?)\s+v(?P<volume>\d+)\s+(?P<number>[\d.]+)\s*\((?P<year>\d{4})\)`),
 
 	// "Batman 045 (2016).cbz"
 	regexp.MustCompile(`(?i)^(?P<series>.+?)\s+(?P<number>\d{2,4}(?:\.\d+)?)\s*\((?P<year>\d{4})\)`),
+
+	// "Aama 03 - The Desert of Mirrors (2015) (Digital)" — issue number
+	// followed by a subtitle and trailing year. Lazy series capture pins
+	// to the first numeric token.
+	regexp.MustCompile(`(?i)^(?P<series>.+?)\s+(?P<number>\d{1,3}(?:\.\d+)?)\s+-\s+.+?\((?P<year>\d{4})\)`),
 
 	// "Batman (2016) 045.cbz"
 	regexp.MustCompile(`(?i)^(?P<series>.+?)\s*\((?P<year>\d{4})\)\s+(?P<number>\d{2,4}(?:\.\d+)?)`),
@@ -45,15 +55,31 @@ var patterns = []*regexp.Regexp{
 	// "Batman 045.cbz"
 	regexp.MustCompile(`(?i)^(?P<series>.+?)\s+(?P<number>\d{2,4}(?:\.\d+)?)\s*$`),
 
-	// Fallback: everything before the extension is the series
+	// Fallback: everything before the extension is the series.
+	// Guard rail in ParseFilename rejects this match if the resulting
+	// series still contains issue-shaped tokens (e.g. " 03 ", "(of 06)")
+	// so we don't keep creating filename-as-series garbage rows.
 	regexp.MustCompile(`(?i)^(?P<series>.+)$`),
 }
 
+// fallbackRejectPattern matches structural signals that a fallback "series"
+// is actually a full issue filename — issue numbers, "(of N)" miniseries
+// counters, parenthesized years, scene-style suffixes. If the fallback
+// candidate hits this, ParseFilename treats it as unparseable.
+var fallbackRejectPattern = regexp.MustCompile(`(?i)(?:\s\d{1,4}(?:\s|$)|\(of\s+\d+\)|\(\d{4}\)|\(digital|\(webrip|\(empire|-empire|-dcp\b)`)
+
 // ParseFilename extracts series name, issue number, year, and volume from a comic filename.
+//
+// If every pattern misses except the catch-all fallback, the fallback result
+// is rejected when it still contains issue-shaped tokens — without that
+// guard, filenames like "20th Century Men 01 (of 06) (2022) (Digital)" become
+// brand-new Series rows because the entire filename gets stored as the
+// series title.
 func ParseFilename(filename string) ParsedFilename {
 	// Strip the extension
 	name := stripExtension(filename)
 
+	lastPat := patterns[len(patterns)-1]
 	for _, pat := range patterns {
 		match := pat.FindStringSubmatch(name)
 		if match == nil {
@@ -86,13 +112,20 @@ func ParseFilename(filename string) ParsedFilename {
 			}
 		}
 
-		// Only accept if we got at least a series name
-		if result.Series != "" {
-			return result
+		// Only accept if we got at least a series name.
+		if result.Series == "" {
+			continue
 		}
+		// Guard the catch-all fallback: if the captured "series" still
+		// carries issue-shaped tokens, treat as unparseable instead of
+		// minting a filename-as-series.
+		if pat == lastPat && fallbackRejectPattern.MatchString(result.Series) {
+			return ParsedFilename{}
+		}
+		return result
 	}
 
-	return ParsedFilename{Series: stripExtension(filename)}
+	return ParsedFilename{}
 }
 
 // stripExtension removes the file extension.
