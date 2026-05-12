@@ -48,6 +48,35 @@ func (r *SeriesRepo) GetByID(id int64) (*model.Series, error) {
 	return scanSeries(row)
 }
 
+// ListByTitle returns every series whose title matches (case-insensitive),
+// regardless of year. Used by the reattach pass to resolve "Daredevil"
+// to the right volume when the strict (title, year) lookup misses
+// because the orphan's parsed year doesn't match any local series year.
+func (r *SeriesRepo) ListByTitle(title string) ([]model.Series, error) {
+	rows, err := r.read.Query(`
+		SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id,
+			COALESCE(s.description,''), s.status, s.total_issues, s.cover_file_id, s.tracked,
+			s.metadata_locked, s.last_cv_sync, s.parent_series_id, s.created_at, s.updated_at,
+			0 as issue_count, 0 as file_count, COALESCE(p.name, '') as publisher_name
+		FROM series s
+		LEFT JOIN publishers p ON s.publisher_id = p.id
+		WHERE LOWER(s.title) = LOWER(?)
+		ORDER BY s.id`, title)
+	if err != nil {
+		return nil, fmt.Errorf("listing series by title: %w", err)
+	}
+	defer rows.Close()
+	var out []model.Series
+	for rows.Next() {
+		s, err := scanSeriesRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *s)
+	}
+	return out, nil
+}
+
 // FindByTitleAndYear finds a series by title and optional year.
 func (r *SeriesRepo) FindByTitleAndYear(title string, year *int) (*model.Series, error) {
 	var row *sql.Row

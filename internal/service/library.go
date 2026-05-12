@@ -73,6 +73,58 @@ type ReattachResult struct {
 	Errors               int `json:"errors"`
 }
 
+// pickClosestSeries chooses one series row from same-title candidates for
+// the reattach pass. Rules:
+//
+//   - 0 candidates: return nil.
+//   - 1 candidate: return it.
+//   - N candidates and parsedYear > 0: pick the candidate whose year is
+//     closest to parsedYear; ties broken by tracked, then CV-linked,
+//     then lowest id.
+//   - N candidates and parsedYear == 0: pick by tracked → CV-linked →
+//     lowest id. (When we don't know which volume, "the tracked one"
+//     is the user's de-facto choice.)
+//
+// Conservative on attribution risk: with no year hint and several
+// volumes (e.g. nine "Transformers" volumes), the first tracked volume
+// gets the file. If that's wrong, the file shows up under the wrong
+// volume in the UI rather than as a silent orphan — easier to fix.
+func pickClosestSeries(cands []model.Series, parsedYear int) *model.Series {
+	if len(cands) == 0 {
+		return nil
+	}
+	if len(cands) == 1 {
+		return &cands[0]
+	}
+	best := -1
+	bestScore := 0 // higher = better
+	for i := range cands {
+		score := 0
+		if cands[i].Tracked {
+			score += 10000
+		}
+		if cands[i].ComicVineID != nil {
+			score += 1000
+		}
+		if parsedYear > 0 && cands[i].Year != nil {
+			diff := *cands[i].Year - parsedYear
+			if diff < 0 {
+				diff = -diff
+			}
+			// Closer year → higher score. Max plausible diff is ~30y, so
+			// a 100-point ceiling keeps year-proximity beneath tracked/CV.
+			score += 100 - diff
+		}
+		// id tiebreaker: lower id wins (older = more likely canonical)
+		score -= int(cands[i].ID) // small, just for stability when above ties
+		if best < 0 || score > bestScore {
+			best = i
+			bestScore = score
+		}
+	}
+	return &cands[best]
+}
+
 // ReattachOrphanFiles walks every comic_files row whose issue_id is NULL
 // and tries to link it to an existing series + issue using the current
 // parser (which is now stricter than the one that ran when most of these
@@ -140,15 +192,18 @@ func (s *LibraryService) ReattachOrphanFiles(ctx context.Context, progress ScanP
 			result.Errors++
 			continue
 		}
-		if series == nil && yearPtr != nil {
-			// Retry without the year — covers cases where the local
-			// series row was created without a year value.
-			series, err = s.seriesRepo.FindByTitleAndYear(seriesName, nil)
+		if series == nil {
+			// Strict (title, year) miss. Fall back to title-only and let
+			// pickClosestSeries pick the right volume by year proximity.
+			// pickClosestSeries returns nil if N==0 or the result is too
+			// ambiguous to attribute safely.
+			candidates, err := s.seriesRepo.ListByTitle(seriesName)
 			if err != nil {
-				slog.Warn("reattach: lookup series (no-year)", "file_id", cf.ID, "error", err)
+				slog.Warn("reattach: list by title", "file_id", cf.ID, "error", err)
 				result.Errors++
 				continue
 			}
+			series = pickClosestSeries(candidates, year)
 		}
 		if series == nil {
 			result.SkippedNoSeriesMatch++
