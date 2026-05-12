@@ -309,12 +309,19 @@ func (s *FileOrganizerService) lookupParent(id int64, cache map[int64]*model.Ser
 	return parent
 }
 
-// cleanEmptyDirs removes empty directories from bottom up, stopping at libraryDir.
+// cleanEmptyDirs removes empty directories from bottom up, stopping at
+// libraryDir.
+//
+// Containment is checked by appending a path separator to stopAt before the
+// prefix test. Without the separator, "E:\Comics" would prefix-match
+// "E:\Comics2\..." and the walk-up could escape the library and start
+// deleting siblings.
 func cleanEmptyDirs(dir, stopAt string) {
 	stopAt = filepath.Clean(stopAt)
+	stopAtWithSep := stopAt + string(filepath.Separator)
 	for {
 		dir = filepath.Clean(dir)
-		if dir == stopAt || !strings.HasPrefix(dir, stopAt) {
+		if dir == stopAt || !strings.HasPrefix(dir, stopAtWithSep) {
 			return
 		}
 		entries, err := os.ReadDir(dir)

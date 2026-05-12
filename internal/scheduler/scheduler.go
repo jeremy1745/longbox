@@ -52,20 +52,26 @@ func NewScheduler(jobRepo *repository.JobRepo, eventBus *EventBus) *Scheduler {
 }
 
 // RegisterHandler registers a handler function for a job type.
+// Takes s.mu to keep the handlers map race-free even if a future caller
+// registers concurrently with Submit (today RegisterHandler is only invoked
+// at startup, but it's exported, so the lock is cheap insurance).
 func (s *Scheduler) RegisterHandler(jobType model.JobType, fn JobFunc) {
+	s.mu.Lock()
 	s.handlers[jobType] = fn
+	s.mu.Unlock()
 }
 
 // Submit creates a new job and queues it for execution.
 // Returns the job immediately in pending state.
 func (s *Scheduler) Submit(jobType model.JobType) (*model.Job, error) {
+	s.mu.Lock()
 	handler, ok := s.handlers[jobType]
 	if !ok {
+		s.mu.Unlock()
 		return nil, fmt.Errorf("no handler registered for job type %q", jobType)
 	}
 
 	// Check if a job of this type is already running or queued
-	s.mu.Lock()
 	for id := range s.running {
 		job, err := s.jobRepo.GetByID(id)
 		if err == nil && job != nil && job.Type == jobType {
@@ -84,10 +90,20 @@ func (s *Scheduler) Submit(jobType model.JobType) (*model.Job, error) {
 	// Broadcast job created event
 	s.eventBus.Publish(Event{Type: "job:created", Data: job})
 
-	// Queue for execution
-	s.queue <- queuedJob{id: job.ID, jobType: jobType, handler: handler}
-
-	return job, nil
+	// Non-blocking queue send. A blocking send on a saturated queue would
+	// wedge whoever called Submit (HTTP handler, cron tick) indefinitely.
+	// If the queue is full we mark the job failed so the user sees the
+	// reason rather than a hanging request.
+	select {
+	case s.queue <- queuedJob{id: job.ID, jobType: jobType, handler: handler}:
+		return job, nil
+	default:
+		if err := s.jobRepo.MarkFailed(job.ID, "scheduler queue full"); err != nil {
+			slog.Warn("failed to mark queue-full job failed", "job_id", job.ID, "error", err)
+		}
+		s.broadcastJobUpdate(job.ID)
+		return nil, fmt.Errorf("scheduler queue full (capacity %d)", cap(s.queue))
+	}
 }
 
 // processQueue runs jobs one at a time from the queue.

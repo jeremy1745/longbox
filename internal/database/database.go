@@ -29,8 +29,12 @@ func Open(dbPath string) (*DB, error) {
 	}
 	writeDB.SetMaxOpenConns(1)
 
-	// Read connection: pool for concurrent reads
-	readDSN := fmt.Sprintf("file:%s?mode=ro&_pragma=journal_mode(wal)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)", dbPath)
+	// Read connection: pool for concurrent reads.
+	// journal_mode is intentionally NOT set here — it cannot be changed on a
+	// read-only handle and SQLite silently ignores the pragma, masking the
+	// fact that the actual journal mode is whatever the writer established
+	// on the file. foreign_keys is a session pragma so it stays.
+	readDSN := fmt.Sprintf("file:%s?mode=ro&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)", dbPath)
 	readDB, err := sql.Open("sqlite", readDSN)
 	if err != nil {
 		writeDB.Close()
