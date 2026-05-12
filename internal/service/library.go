@@ -63,6 +63,132 @@ type ScanResult struct {
 // ScanProgressFunc reports scan progress. Can be nil.
 type ScanProgressFunc func(processed, total int, message string)
 
+// ReattachResult summarizes a reattach-orphans pass.
+type ReattachResult struct {
+	Total                int `json:"total"`
+	Attached             int `json:"attached"`
+	SkippedNoSeriesParse int `json:"skipped_no_series_parse"`
+	SkippedNoSeriesMatch int `json:"skipped_no_series_match"`
+	SkippedNoIssueNumber int `json:"skipped_no_issue_number"`
+	Errors               int `json:"errors"`
+}
+
+// ReattachOrphanFiles walks every comic_files row whose issue_id is NULL
+// and tries to link it to an existing series + issue using the current
+// parser (which is now stricter than the one that ran when most of these
+// rows were first created). For each row:
+//
+//   1. Re-parse the filename. If empty, fall back to the parent-folder
+//      name (filename "Daredevil 007.cbr" inside "E:\Comics\Daredevil
+//      (2020)" still attaches correctly via the folder).
+//   2. Look up an existing series by (title, year), or by title alone if
+//      the year-strict lookup misses.
+//   3. Find-or-create the matching issue.
+//   4. Set comic_files.issue_id and refresh parsed_series / parsed_number /
+//      parsed_year so they reflect the new parse.
+//
+// Never creates a series row — only reuses existing ones. Files that
+// can't be matched stay as orphans and the caller sees the skip count.
+func (s *LibraryService) ReattachOrphanFiles(ctx context.Context, progress ScanProgressFunc) (*ReattachResult, error) {
+	orphans, err := s.fileRepo.ListOrphans()
+	if err != nil {
+		return nil, fmt.Errorf("listing orphan files: %w", err)
+	}
+
+	result := &ReattachResult{Total: len(orphans)}
+	for i, cf := range orphans {
+		select {
+		case <-ctx.Done():
+			return result, ctx.Err()
+		default:
+		}
+
+		if progress != nil {
+			progress(i, len(orphans), cf.FileName)
+		}
+
+		// Parse the filename first; fall back to the parent folder when
+		// the parser can't extract a series.
+		parsed := scanner.ParseFilename(cf.FileName)
+		seriesName := strings.TrimSpace(parsed.Series)
+		issueNumber := parsed.Number
+		year := parsed.Year
+		if seriesName == "" {
+			parent := filepath.Base(filepath.Dir(cf.FilePath))
+			folderParsed := scanner.ParseFilename(parent + ".cbz") // synthetic ext so stripExtension is happy
+			if folderParsed.Series != "" {
+				seriesName = strings.TrimSpace(folderParsed.Series)
+				if year == 0 {
+					year = folderParsed.Year
+				}
+			}
+		}
+
+		if seriesName == "" {
+			result.SkippedNoSeriesParse++
+			continue
+		}
+
+		var yearPtr *int
+		if year > 0 {
+			y := year
+			yearPtr = &y
+		}
+		series, err := s.seriesRepo.FindByTitleAndYear(seriesName, yearPtr)
+		if err != nil {
+			slog.Warn("reattach: lookup series", "file_id", cf.ID, "error", err)
+			result.Errors++
+			continue
+		}
+		if series == nil && yearPtr != nil {
+			// Retry without the year — covers cases where the local
+			// series row was created without a year value.
+			series, err = s.seriesRepo.FindByTitleAndYear(seriesName, nil)
+			if err != nil {
+				slog.Warn("reattach: lookup series (no-year)", "file_id", cf.ID, "error", err)
+				result.Errors++
+				continue
+			}
+		}
+		if series == nil {
+			result.SkippedNoSeriesMatch++
+			continue
+		}
+
+		if strings.TrimSpace(issueNumber) == "" {
+			result.SkippedNoIssueNumber++
+			continue
+		}
+
+		issue, _, err := s.findOrCreateIssue(series.ID, issueNumber, "", "")
+		if err != nil {
+			slog.Warn("reattach: find-or-create issue", "file_id", cf.ID, "series_id", series.ID, "issue_number", issueNumber, "error", err)
+			result.Errors++
+			continue
+		}
+
+		if err := s.fileRepo.UpdateParsedAndIssue(cf.ID, issue.ID, parsed.Series, parsed.Number, yearPtr); err != nil {
+			slog.Warn("reattach: update file", "file_id", cf.ID, "error", err)
+			result.Errors++
+			continue
+		}
+		result.Attached++
+	}
+
+	if progress != nil {
+		progress(len(orphans), len(orphans), "Reattach complete")
+	}
+	slog.Info("reattach orphans complete",
+		"total", result.Total,
+		"attached", result.Attached,
+		"skipped_no_parse", result.SkippedNoSeriesParse,
+		"skipped_no_series", result.SkippedNoSeriesMatch,
+		"skipped_no_issue", result.SkippedNoIssueNumber,
+		"errors", result.Errors,
+	)
+	return result, nil
+}
+
 // Scan performs a full library scan (blocking, no progress reporting).
 func (s *LibraryService) Scan() (*ScanResult, error) {
 	return s.ScanWithProgress(context.Background(), nil)

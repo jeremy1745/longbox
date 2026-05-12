@@ -42,6 +42,29 @@ func (h *LibraryHandler) Scan(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, job)
 }
 
+// ReattachOrphans walks every comic_files row with issue_id NULL, re-parses
+// the filename / parent folder with the current parser, and links the row
+// to an existing series + issue when one can be resolved. Synchronous —
+// expected to finish in well under the request timeout for typical libraries
+// (197 orphans on the live data, no file I/O per row).
+//
+// POST /api/v1/admin/reattach-orphans
+func (h *LibraryHandler) ReattachOrphans(w http.ResponseWriter, r *http.Request) {
+	result, err := h.librarySvc.ReattachOrphanFiles(r.Context(), nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "REATTACH_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+	slog.Info("reattach-orphans handler complete",
+		"total", result.Total, "attached", result.Attached,
+		"no_parse", result.SkippedNoSeriesParse,
+		"no_series", result.SkippedNoSeriesMatch,
+		"no_issue", result.SkippedNoIssueNumber,
+		"errors", result.Errors,
+	)
+}
+
 func (h *LibraryHandler) Stats(w http.ResponseWriter, r *http.Request) {
 	_, totalFiles, err := h.fileRepo.List(1, 1)
 	if err != nil {
