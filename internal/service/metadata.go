@@ -808,6 +808,23 @@ func (s *MetadataService) buildWantedIssueLookup() map[int64]bool {
 
 // buildResultsFromWalksoftly converts walksoftly releases to PullListIssues,
 // cross-referenced with local data.
+//
+// Walksoftly's feed returns the same release multiple times when its source
+// data lists the publisher under different names ("Image" vs "Image Comics",
+// "Marvel" vs "Marvel Comics", "Boom! Studios" vs "BOOM! Studios"), or when
+// a release is mirrored under both a canonical and a regional publisher
+// imprint. Without dedup the pull-list UI shows each affected series two or
+// three times — once per publisher spelling — and the per-week
+// Tracked/Wanted/Owned counts are inflated.
+//
+// Dedupe key, in order of preference:
+//  1. Issue-level ComicVine ID, if present
+//  2. (series CV ID, issue number) for future issues without an issue CV ID
+//  3. (normalized series name, issue number) as a last resort
+//
+// When a duplicate is seen we keep the first item but upgrade its Publisher
+// to whichever spelling is longer (more specific), so "Image Comics" wins
+// over "Image" and "Dynamite Entertainment" wins over "Dynamite".
 func (s *MetadataService) buildResultsFromWalksoftly(
 	releases []walksoftly.Release,
 	localByCV map[int64]*model.Issue,
@@ -818,6 +835,7 @@ func (s *MetadataService) buildResultsFromWalksoftly(
 	trackedIssuesByKey map[string]*model.Issue,
 ) []PullListIssue {
 	var results []PullListIssue
+	dedupe := make(map[string]int) // canonical key → index into results
 
 	for _, rel := range releases {
 		item := PullListIssue{
@@ -920,6 +938,29 @@ func (s *MetadataService) buildResultsFromWalksoftly(
 			}
 		}
 
+		// Dedupe key: prefer issue CV ID, then series CV ID + number, then
+		// normalized series + number. Without this, the same release shows
+		// up multiple times under publisher-name variants.
+		var key string
+		switch {
+		case item.ComicVineID > 0:
+			key = fmt.Sprintf("cv:%d", item.ComicVineID)
+		case item.SeriesCVID > 0 && item.IssueNumber != "":
+			key = fmt.Sprintf("scv:%d:%s", item.SeriesCVID, item.IssueNumber)
+		default:
+			key = fmt.Sprintf("ns:%s:%s", normSeriesTitle(item.SeriesName), item.IssueNumber)
+		}
+
+		if existing, ok := dedupe[key]; ok {
+			// Same release came in under a different publisher spelling.
+			// Prefer the longer (more specific) name — "Marvel Comics" over
+			// "Marvel", "Dynamite Entertainment" over "Dynamite".
+			if len(item.Publisher) > len(results[existing].Publisher) {
+				results[existing].Publisher = item.Publisher
+			}
+			continue
+		}
+		dedupe[key] = len(results)
 		results = append(results, item)
 	}
 
