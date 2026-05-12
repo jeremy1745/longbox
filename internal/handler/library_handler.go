@@ -42,6 +42,28 @@ func (h *LibraryHandler) Scan(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, job)
 }
 
+// BackfillPublishers walks every series whose publisher_id is NULL, reads
+// ComicInfo.xml from any linked archive, and sets publisher_id (and year,
+// if also NULL). Synchronous — runs in tens of seconds on a 1000-series
+// library because it only opens one archive per series.
+//
+// POST /api/v1/admin/backfill-publishers
+func (h *LibraryHandler) BackfillPublishers(w http.ResponseWriter, r *http.Request) {
+	result, err := h.librarySvc.BackfillSeriesPublishers(r.Context(), nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "BACKFILL_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+	slog.Info("backfill-publishers handler complete",
+		"total", result.Total, "updated", result.Updated,
+		"no_files", result.SkippedNoFiles,
+		"no_comicinfo", result.SkippedNoComicInfo,
+		"no_pub_tag", result.SkippedNoPublisherTag,
+		"errors", result.Errors,
+	)
+}
+
 // ReattachOrphans walks every comic_files row with issue_id NULL, re-parses
 // the filename / parent folder with the current parser, and links the row
 // to an existing series + issue when one can be resolved. Synchronous —

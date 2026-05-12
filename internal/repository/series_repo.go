@@ -167,6 +167,48 @@ func (r *SeriesRepo) List(page, perPage int, sortBy, order string, trackedOnly .
 }
 
 // UpdateFromMetadata updates a series with ComicVine metadata.
+// ListWithoutPublisher returns every series whose publisher_id is NULL.
+// Used by the publisher-backfill pass to know what to touch.
+func (r *SeriesRepo) ListWithoutPublisher() ([]model.Series, error) {
+	rows, err := r.read.Query(`
+		SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id,
+			COALESCE(s.description,''), s.status, s.total_issues, s.cover_file_id, s.tracked,
+			s.metadata_locked, s.last_cv_sync, s.parent_series_id, s.created_at, s.updated_at,
+			0 as issue_count, 0 as file_count, '' as publisher_name
+		FROM series s
+		WHERE s.publisher_id IS NULL
+		ORDER BY s.id`)
+	if err != nil {
+		return nil, fmt.Errorf("listing series without publisher: %w", err)
+	}
+	defer rows.Close()
+	var out []model.Series
+	for rows.Next() {
+		s, err := scanSeriesRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *s)
+	}
+	return out, nil
+}
+
+// BackfillPublisherAndYear sets publisher_id and/or year on a series ONLY
+// where those columns are currently NULL — never overwrites a value that
+// metadata sync or the user already filled in.
+func (r *SeriesRepo) BackfillPublisherAndYear(id int64, publisherID int64, year *int) error {
+	_, err := r.write.Exec(`
+		UPDATE series
+		SET publisher_id = COALESCE(publisher_id, ?),
+		    year         = COALESCE(year, ?),
+		    updated_at   = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+		WHERE id = ?`, publisherID, year, id)
+	if err != nil {
+		return fmt.Errorf("backfilling series publisher/year: %w", err)
+	}
+	return nil
+}
+
 func (r *SeriesRepo) UpdateFromMetadata(s *model.Series) error {
 	_, err := r.write.Exec(`
 		UPDATE series SET title = ?, sort_title = ?, year = ?, publisher_id = ?,

@@ -17,11 +17,12 @@ import (
 )
 
 type LibraryService struct {
-	libraryDir string
-	fileRepo   *repository.FileRepo
-	seriesRepo *repository.SeriesRepo
-	issueRepo  *repository.IssueRepo
-	coverSvc   *CoverService
+	libraryDir    string
+	fileRepo      *repository.FileRepo
+	seriesRepo    *repository.SeriesRepo
+	issueRepo     *repository.IssueRepo
+	publisherRepo *repository.PublisherRepo
+	coverSvc      *CoverService
 }
 
 func NewLibraryService(
@@ -29,10 +30,12 @@ func NewLibraryService(
 	fileRepo *repository.FileRepo,
 	seriesRepo *repository.SeriesRepo,
 	issueRepo *repository.IssueRepo,
+	publisherRepo *repository.PublisherRepo,
 	coverSvc *CoverService,
 ) *LibraryService {
 	return &LibraryService{
-		libraryDir: libraryDir,
+		libraryDir:    libraryDir,
+		publisherRepo: publisherRepo,
 		fileRepo:   fileRepo,
 		seriesRepo: seriesRepo,
 		issueRepo:  issueRepo,
@@ -71,6 +74,131 @@ type ReattachResult struct {
 	SkippedNoSeriesMatch int `json:"skipped_no_series_match"`
 	SkippedNoIssueNumber int `json:"skipped_no_issue_number"`
 	Errors               int `json:"errors"`
+}
+
+// BackfillResult summarizes a publisher-backfill pass.
+type BackfillResult struct {
+	Total                 int `json:"total"`
+	Updated               int `json:"updated"`
+	SkippedNoFiles        int `json:"skipped_no_files"`
+	SkippedNoComicInfo    int `json:"skipped_no_comicinfo"`
+	SkippedNoPublisherTag int `json:"skipped_no_publisher_tag"`
+	Errors                int `json:"errors"`
+}
+
+// BackfillSeriesPublishers walks every series whose publisher_id is NULL,
+// reads ComicInfo.xml from any linked archive, and sets publisher_id (and
+// year, if the row's year is also NULL). Never overwrites existing values
+// — only fills in nulls.
+//
+// Why this exists: the scanner reads ComicInfo for Series/Number/Year but
+// not Publisher, so series rows created from on-disk files have NULL
+// publisher_id forever — they all bucket into "Unknown Publisher" in the
+// browse view. The forward-fix in processFile reads Publisher for newly
+// scanned files; this method catches up rows that pre-date that fix.
+func (s *LibraryService) BackfillSeriesPublishers(ctx context.Context, progress ScanProgressFunc) (*BackfillResult, error) {
+	if s.publisherRepo == nil {
+		return nil, fmt.Errorf("publisher repo not wired into library service")
+	}
+	candidates, err := s.seriesRepo.ListWithoutPublisher()
+	if err != nil {
+		return nil, fmt.Errorf("listing publisher-less series: %w", err)
+	}
+	result := &BackfillResult{Total: len(candidates)}
+
+	for i, ser := range candidates {
+		select {
+		case <-ctx.Done():
+			return result, ctx.Err()
+		default:
+		}
+		if progress != nil {
+			progress(i, len(candidates), ser.Title)
+		}
+
+		files, err := s.fileRepo.ListBySeries(ser.ID)
+		if err != nil {
+			slog.Warn("backfill: list files", "series_id", ser.ID, "error", err)
+			result.Errors++
+			continue
+		}
+		if len(files) == 0 {
+			result.SkippedNoFiles++
+			continue
+		}
+
+		// Try each linked file until one yields a non-empty Publisher.
+		var pubName string
+		var ciYear int
+		var sawComicInfo bool
+		for _, cf := range files {
+			if !cf.HasComicInfo {
+				continue
+			}
+			sawComicInfo = true
+			a, openErr := archive.Open(cf.FilePath)
+			if openErr != nil {
+				slog.Debug("backfill: open archive", "path", cf.FilePath, "error", openErr)
+				continue
+			}
+			ci, ciErr := archive.ReadComicInfo(a)
+			a.Close()
+			if ciErr != nil || ci == nil {
+				continue
+			}
+			if pubName == "" && strings.TrimSpace(ci.Publisher) != "" {
+				pubName = strings.TrimSpace(ci.Publisher)
+			}
+			if ciYear == 0 && ci.Year > 0 {
+				ciYear = ci.Year
+			}
+			if pubName != "" {
+				break
+			}
+		}
+
+		if !sawComicInfo {
+			result.SkippedNoComicInfo++
+			continue
+		}
+		if pubName == "" {
+			result.SkippedNoPublisherTag++
+			continue
+		}
+
+		pub, err := s.publisherRepo.FindOrCreateByName(pubName, nil)
+		if err != nil || pub == nil {
+			slog.Warn("backfill: publisher find/create", "name", pubName, "error", err)
+			result.Errors++
+			continue
+		}
+
+		var yearPtr *int
+		if ciYear >= 1900 && ciYear <= 2100 {
+			y := ciYear
+			yearPtr = &y
+		}
+
+		if err := s.seriesRepo.BackfillPublisherAndYear(ser.ID, pub.ID, yearPtr); err != nil {
+			slog.Warn("backfill: update series", "series_id", ser.ID, "error", err)
+			result.Errors++
+			continue
+		}
+		result.Updated++
+	}
+
+	if progress != nil {
+		progress(len(candidates), len(candidates), "Publisher backfill complete")
+	}
+	slog.Info("backfill series publishers complete",
+		"total", result.Total,
+		"updated", result.Updated,
+		"no_files", result.SkippedNoFiles,
+		"no_comicinfo", result.SkippedNoComicInfo,
+		"no_publisher_tag", result.SkippedNoPublisherTag,
+		"errors", result.Errors,
+	)
+	return result, nil
 }
 
 // pickClosestSeries chooses one series row from same-title candidates for
@@ -453,6 +581,27 @@ func (s *LibraryService) processFile(r scanner.Result) (*processResult, error) {
 	}
 	if series.CreatedAt.IsZero() == false && series.ID > 0 {
 		res.seriesCreated = true
+	}
+
+	// Backfill publisher_id (and year, if also missing) from ComicInfo
+	// on the SERIES level. The scanner historically ignored the Publisher
+	// tag, leaving every scanner-created series in the catch-all "Unknown
+	// Publisher" bucket. Only writes when the columns are currently NULL,
+	// so existing metadata is never clobbered.
+	if comicInfo != nil && s.publisherRepo != nil && (series.PublisherID == nil || series.Year == nil) {
+		pubName := strings.TrimSpace(comicInfo.Publisher)
+		if pubName != "" && series.PublisherID == nil {
+			if pub, perr := s.publisherRepo.FindOrCreateByName(pubName, nil); perr == nil && pub != nil {
+				var yptr *int
+				if comicInfo.Year >= 1900 && comicInfo.Year <= 2100 {
+					y := comicInfo.Year
+					yptr = &y
+				}
+				if uerr := s.seriesRepo.BackfillPublisherAndYear(series.ID, pub.ID, yptr); uerr != nil {
+					slog.Debug("processFile: backfill publisher", "series_id", series.ID, "error", uerr)
+				}
+			}
+		}
 	}
 
 	// Find or create issue

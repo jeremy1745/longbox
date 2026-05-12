@@ -114,6 +114,7 @@ func NewRouter(
 				r.Delete("/admin/backups/{name}", backupH.Delete)
 				r.Get("/admin/backups/{name}/download", backupH.Download)
 				r.Post("/admin/reattach-orphans", libraryH.ReattachOrphans)
+				r.Post("/admin/backfill-publishers", libraryH.BackfillPublishers)
 				r.Post("/admin/shutdown", func(w http.ResponseWriter, r *http.Request) {
 					w.Header().Set("Content-Type", "application/json")
 					json.NewEncoder(w).Encode(map[string]string{"message": "server is shutting down"})
