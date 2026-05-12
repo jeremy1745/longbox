@@ -195,7 +195,9 @@ export interface LibraryStats {
 // --- ComicVine / Metadata types ---
 
 export interface MetadataSearchResult {
-	comicvine_id: number;
+	comicvine_id?: number;
+	metron_id?: number;
+	sources?: Array<'comicvine' | 'metron'>;
 	name: string;
 	start_year: string;
 	issue_count: number;
