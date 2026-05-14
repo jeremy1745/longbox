@@ -193,6 +193,11 @@ func TestGrabRelease_Success(t *testing.T) {
 		t.Errorf("X-Api-Key: got %q, want %q", got, testAPIKey)
 	}
 
+	// Check Content-Type header.
+	if got := capturedReq.Header.Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type: got %q, want %q", got, "application/json")
+	}
+
 	// Check JSON body fields.
 	var body map[string]any
 	if err := json.Unmarshal(capturedBody, &body); err != nil {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -21,7 +22,7 @@ type Client struct {
 	baseURL  string // e.g. "http://192.168.1.x:9696" — no trailing slash, no /api path
 	apiKey   string
 	category string // Newznab category id, default "7030" (Books > Comics)
-	http     *http.Client
+	httpClient *http.Client
 	limiter  *rateLimiter
 }
 
@@ -50,7 +51,7 @@ func NewClient(baseURL, apiKey, category string) *Client {
 		baseURL:  baseURL,
 		apiKey:   apiKey,
 		category: category,
-		http: &http.Client{
+		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
 		limiter: newRateLimiter(),
@@ -68,11 +69,11 @@ func (c *Client) SearchIssue(ctx context.Context, series, issueNumber string, ye
 		return nil, err
 	}
 
-	reqURL := fmt.Sprintf("%s/api/v1/search?query=%s&type=search&categories=%s",
-		c.baseURL,
-		urlEncode(query),
-		urlEncode(c.category),
-	)
+	params := url.Values{}
+	params.Set("query", query)
+	params.Set("type", "search")
+	params.Set("categories", c.category)
+	reqURL := fmt.Sprintf("%s/api/v1/search?%s", c.baseURL, params.Encode())
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
@@ -81,7 +82,7 @@ func (c *Client) SearchIssue(ctx context.Context, series, issueNumber string, ye
 	req.Header.Set("X-Api-Key", c.apiKey)
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := c.http.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("prowlarr: search request failed: %w", err)
 	}
@@ -129,8 +130,9 @@ func (c *Client) GrabRelease(ctx context.Context, guid string, indexerID int) er
 	}
 	req.Header.Set("X-Api-Key", c.apiKey)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
 
-	resp, err := c.http.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("prowlarr: grab request failed: %w", err)
 	}
@@ -161,7 +163,7 @@ func (c *Client) TestConnection(ctx context.Context) error {
 	req.Header.Set("X-Api-Key", c.apiKey)
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := c.http.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("prowlarr: status request failed: %w", err)
 	}
@@ -172,24 +174,4 @@ func (c *Client) TestConnection(ctx context.Context) error {
 		return fmt.Errorf("prowlarr: status HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(snippet)))
 	}
 	return nil
-}
-
-// urlEncode percent-encodes a string for use in a query parameter value.
-func urlEncode(s string) string {
-	// net/url.QueryEscape encodes spaces as "+"; use PathEscape for %20.
-	// Either works for Prowlarr but %20 is more universally correct.
-	var b strings.Builder
-	for _, r := range s {
-		switch {
-		case r >= 'A' && r <= 'Z',
-			r >= 'a' && r <= 'z',
-			r >= '0' && r <= '9',
-			r == '-', r == '_', r == '.', r == '~':
-			b.WriteRune(r)
-		default:
-			encoded := fmt.Sprintf("%%%02X", r)
-			b.WriteString(encoded)
-		}
-	}
-	return b.String()
 }
