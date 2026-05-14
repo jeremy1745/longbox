@@ -8,6 +8,11 @@ type WantListItem struct {
 	Notes       string `json:"notes,omitempty"`
 	AddedAt     string `json:"added_at"`
 
+	// Procurement tracking fields (added in migration 015).
+	ProcurementStatus      string  `json:"procurement_status"`
+	ProcurementSubmittedAt *string `json:"procurement_submitted_at,omitempty"`
+	ProcurementLastError   *string `json:"procurement_last_error,omitempty"`
+
 	// Joined fields from issues + series
 	IssueNumber string `json:"issue_number"`
 	SeriesID    int64  `json:"series_id"`

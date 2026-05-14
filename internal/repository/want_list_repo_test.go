@@ -39,7 +39,10 @@ func setupWantListTestDB(t *testing.T) *sql.DB {
 			priority INTEGER NOT NULL DEFAULT 0,
 			notes TEXT,
 			added_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-			last_searched_at TEXT
+			last_searched_at TEXT,
+			procurement_status TEXT NOT NULL DEFAULT 'none' CHECK (procurement_status IN ('none','pending','submitted','acquired','failed')),
+			procurement_submitted_at TEXT,
+			procurement_last_error TEXT
 		);`
 	if _, err := db.Exec(schema); err != nil {
 		t.Fatalf("schema: %v", err)
@@ -110,5 +113,98 @@ func TestCreate_DuplicateAfterPoisonedRowid(t *testing.T) {
 	}
 	if item.IssueID != 101 {
 		t.Errorf("expected IssueID=101, got %d", item.IssueID)
+	}
+}
+
+// TestProcurementStatus exercises the full procurement lifecycle:
+// default → pending → submitted → failed, plus ListByProcurementStatus.
+func TestProcurementStatus(t *testing.T) {
+	db := setupWantListTestDB(t)
+	defer db.Close()
+	repo := NewWantListRepo(db, db)
+
+	item, err := repo.Create(101, 5, "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if item == nil {
+		t.Fatal("Create returned nil")
+	}
+
+	// Default status must be 'none'.
+	if item.ProcurementStatus != "none" {
+		t.Errorf("expected default ProcurementStatus='none', got %q", item.ProcurementStatus)
+	}
+	if item.ProcurementSubmittedAt != nil {
+		t.Errorf("expected ProcurementSubmittedAt nil, got %v", item.ProcurementSubmittedAt)
+	}
+	if item.ProcurementLastError != nil {
+		t.Errorf("expected ProcurementLastError nil, got %v", item.ProcurementLastError)
+	}
+
+	// Transition to 'pending' (no error).
+	if err := repo.SetProcurementStatus(101, "pending", ""); err != nil {
+		t.Fatalf("SetProcurementStatus pending: %v", err)
+	}
+	reloaded, err := repo.GetByIssueID(101)
+	if err != nil || reloaded == nil {
+		t.Fatalf("GetByIssueID after pending: %v", err)
+	}
+	if reloaded.ProcurementStatus != "pending" {
+		t.Errorf("expected ProcurementStatus='pending', got %q", reloaded.ProcurementStatus)
+	}
+	if reloaded.ProcurementLastError != nil {
+		t.Errorf("expected ProcurementLastError nil after pending, got %v", reloaded.ProcurementLastError)
+	}
+
+	// Transition to 'submitted' — should set procurement_submitted_at.
+	if err := repo.SetProcurementStatus(101, "submitted", ""); err != nil {
+		t.Fatalf("SetProcurementStatus submitted: %v", err)
+	}
+	reloaded, err = repo.GetByIssueID(101)
+	if err != nil || reloaded == nil {
+		t.Fatalf("GetByIssueID after submitted: %v", err)
+	}
+	if reloaded.ProcurementStatus != "submitted" {
+		t.Errorf("expected ProcurementStatus='submitted', got %q", reloaded.ProcurementStatus)
+	}
+	if reloaded.ProcurementSubmittedAt == nil || *reloaded.ProcurementSubmittedAt == "" {
+		t.Error("expected ProcurementSubmittedAt to be set after 'submitted' transition")
+	}
+
+	// Transition to 'failed' with an error message.
+	if err := repo.SetProcurementStatus(101, "failed", "prowlarr unreachable"); err != nil {
+		t.Fatalf("SetProcurementStatus failed: %v", err)
+	}
+	reloaded, err = repo.GetByIssueID(101)
+	if err != nil || reloaded == nil {
+		t.Fatalf("GetByIssueID after failed: %v", err)
+	}
+	if reloaded.ProcurementStatus != "failed" {
+		t.Errorf("expected ProcurementStatus='failed', got %q", reloaded.ProcurementStatus)
+	}
+	if reloaded.ProcurementLastError == nil || *reloaded.ProcurementLastError != "prowlarr unreachable" {
+		t.Errorf("expected ProcurementLastError='prowlarr unreachable', got %v", reloaded.ProcurementLastError)
+	}
+
+	// ListByProcurementStatus("failed") must include this row.
+	failed, err := repo.ListByProcurementStatus("failed")
+	if err != nil {
+		t.Fatalf("ListByProcurementStatus: %v", err)
+	}
+	if len(failed) != 1 {
+		t.Fatalf("expected 1 failed item, got %d", len(failed))
+	}
+	if failed[0].IssueID != 101 {
+		t.Errorf("expected IssueID=101 in failed list, got %d", failed[0].IssueID)
+	}
+
+	// ListByProcurementStatus("none") must return 0 items since issue 101 is now 'failed'.
+	noneItems, err := repo.ListByProcurementStatus("none")
+	if err != nil {
+		t.Fatalf("ListByProcurementStatus none: %v", err)
+	}
+	if len(noneItems) != 0 {
+		t.Errorf("expected 0 'none' items (issue 101 is 'failed'), got %d", len(noneItems))
 	}
 }

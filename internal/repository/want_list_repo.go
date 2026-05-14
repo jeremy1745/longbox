@@ -84,6 +84,7 @@ func (r *WantListRepo) Update(id int64, priority int, notes string) error {
 func (r *WantListRepo) GetByID(id int64) (*model.WantListItem, error) {
 	row := r.read.QueryRow(`
 		SELECT w.id, w.issue_id, w.priority, COALESCE(w.notes,''), w.added_at,
+			w.procurement_status, w.procurement_submitted_at, w.procurement_last_error,
 			i.issue_number, i.series_id, COALESCE(s.title,'') as series_title,
 			COALESCE(i.cover_url,'') as cover_url,
 			COALESCE(i.store_date,'') as store_date,
@@ -99,6 +100,7 @@ func (r *WantListRepo) GetByID(id int64) (*model.WantListItem, error) {
 func (r *WantListRepo) GetByIssueID(issueID int64) (*model.WantListItem, error) {
 	row := r.read.QueryRow(`
 		SELECT w.id, w.issue_id, w.priority, COALESCE(w.notes,''), w.added_at,
+			w.procurement_status, w.procurement_submitted_at, w.procurement_last_error,
 			i.issue_number, i.series_id, COALESCE(s.title,'') as series_title,
 			COALESCE(i.cover_url,'') as cover_url,
 			COALESCE(i.store_date,'') as store_date,
@@ -157,6 +159,7 @@ func (r *WantListRepo) List(page, perPage int, sortBy, order string) ([]model.Wa
 
 	query := fmt.Sprintf(`
 		SELECT w.id, w.issue_id, w.priority, COALESCE(w.notes,''), w.added_at,
+			w.procurement_status, w.procurement_submitted_at, w.procurement_last_error,
 			i.issue_number, i.series_id, COALESCE(s.title,'') as series_title,
 			COALESCE(i.cover_url,'') as cover_url,
 			COALESCE(i.store_date,'') as store_date,
@@ -240,6 +243,7 @@ func (r *WantListRepo) RemoveForSeries(seriesID int64) (int, error) {
 func (r *WantListRepo) ListBySeriesID(seriesID int64) ([]model.WantListItem, error) {
 	rows, err := r.read.Query(`
 		SELECT w.id, w.issue_id, w.priority, COALESCE(w.notes,''), w.added_at,
+			w.procurement_status, w.procurement_submitted_at, w.procurement_last_error,
 			i.issue_number, i.series_id, COALESCE(s.title,'') as series_title,
 			COALESCE(i.cover_url,'') as cover_url,
 			COALESCE(i.store_date,'') as store_date,
@@ -293,6 +297,7 @@ func (r *WantListRepo) ListWantedIssueIDs() (map[int64]bool, error) {
 func (r *WantListRepo) ListSearchable(cooldownHours int) ([]model.WantListItem, error) {
 	rows, err := r.read.Query(`
 		SELECT w.id, w.issue_id, w.priority, COALESCE(w.notes,''), w.added_at,
+			w.procurement_status, w.procurement_submitted_at, w.procurement_last_error,
 			i.issue_number, i.series_id, COALESCE(s.title,'') as series_title,
 			COALESCE(i.cover_url,'') as cover_url,
 			COALESCE(i.store_date,'') as store_date,
@@ -338,10 +343,73 @@ func (r *WantListRepo) MarkSearched(issueID int64) error {
 	return nil
 }
 
+// SetProcurementStatus updates the procurement_status for the want list item
+// identified by issueID. When status is "submitted", procurement_submitted_at
+// is also set to the current UTC time. procurement_last_error is set to errMsg
+// or NULL when errMsg is empty.
+func (r *WantListRepo) SetProcurementStatus(issueID int64, status string, errMsg string) error {
+	var lastErr interface{}
+	if errMsg != "" {
+		lastErr = errMsg
+	}
+	if status == "submitted" {
+		_, err := r.write.Exec(`
+			UPDATE want_list
+			SET procurement_status = ?,
+			    procurement_submitted_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+			    procurement_last_error = ?
+			WHERE issue_id = ?`, status, lastErr, issueID)
+		if err != nil {
+			return fmt.Errorf("setting procurement status: %w", err)
+		}
+		return nil
+	}
+	_, err := r.write.Exec(`
+		UPDATE want_list
+		SET procurement_status = ?,
+		    procurement_last_error = ?
+		WHERE issue_id = ?`, status, lastErr, issueID)
+	if err != nil {
+		return fmt.Errorf("setting procurement status: %w", err)
+	}
+	return nil
+}
+
+// ListByProcurementStatus returns want list items with the given procurement_status.
+func (r *WantListRepo) ListByProcurementStatus(status string) ([]model.WantListItem, error) {
+	rows, err := r.read.Query(`
+		SELECT w.id, w.issue_id, w.priority, COALESCE(w.notes,''), w.added_at,
+			w.procurement_status, w.procurement_submitted_at, w.procurement_last_error,
+			i.issue_number, i.series_id, COALESCE(s.title,'') as series_title,
+			COALESCE(i.cover_url,'') as cover_url,
+			COALESCE(i.store_date,'') as store_date,
+			COALESCE(i.cover_date,'') as cover_date
+		FROM want_list w
+		JOIN issues i ON w.issue_id = i.id
+		JOIN series s ON i.series_id = s.id
+		WHERE w.procurement_status = ?
+		ORDER BY w.priority DESC, w.added_at ASC`, status)
+	if err != nil {
+		return nil, fmt.Errorf("listing by procurement status: %w", err)
+	}
+	defer rows.Close()
+
+	var items []model.WantListItem
+	for rows.Next() {
+		item, err := scanWantListItemRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, *item)
+	}
+	return items, nil
+}
+
 func scanWantListItem(row *sql.Row) (*model.WantListItem, error) {
 	item := &model.WantListItem{}
 	err := row.Scan(
 		&item.ID, &item.IssueID, &item.Priority, &item.Notes, &item.AddedAt,
+		&item.ProcurementStatus, &item.ProcurementSubmittedAt, &item.ProcurementLastError,
 		&item.IssueNumber, &item.SeriesID, &item.SeriesTitle,
 		&item.CoverURL, &item.StoreDate, &item.CoverDate,
 	)
@@ -358,6 +426,7 @@ func scanWantListItemRow(rows *sql.Rows) (*model.WantListItem, error) {
 	item := &model.WantListItem{}
 	err := rows.Scan(
 		&item.ID, &item.IssueID, &item.Priority, &item.Notes, &item.AddedAt,
+		&item.ProcurementStatus, &item.ProcurementSubmittedAt, &item.ProcurementLastError,
 		&item.IssueNumber, &item.SeriesID, &item.SeriesTitle,
 		&item.CoverURL, &item.StoreDate, &item.CoverDate,
 	)
