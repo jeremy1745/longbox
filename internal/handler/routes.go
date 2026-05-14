@@ -12,6 +12,7 @@ import (
 	"github.com/jeremy/longbox/internal/scanner"
 	"github.com/jeremy/longbox/internal/scheduler"
 	"github.com/jeremy/longbox/internal/service"
+	"github.com/jeremy/longbox/internal/prowlarr"
 )
 
 // ShutdownRequester is implemented by the server to allow API-triggered shutdown.
@@ -50,6 +51,8 @@ func NewRouter(
 	authSvc *service.AuthService,
 	shutdownReq ShutdownRequester,
 	frontendFS fs.FS,
+	prowlarrClient *prowlarr.Client,
+	acqSvc *service.AcquisitionService,
 ) http.Handler {
 	r := chi.NewRouter()
 
@@ -67,7 +70,8 @@ func NewRouter(
 	seriesH := NewSeriesHandler(seriesRepo, issueRepo, wantListRepo, librarySvc)
 	issueH := NewIssueHandler(issueRepo, librarySvc, organizeSvc)
 	metaH := NewMetadataHandler(metaSvc)
-	settingsH := NewSettingsHandler(metaSvc, librarySvc, watcher, sched, settingRepo)
+	settingsH := NewSettingsHandler(metaSvc, librarySvc, watcher, sched, settingRepo, prowlarrClient)
+	acquisitionH := NewAcquisitionHandler(acqSvc, wantListRepo)
 	jobH := NewJobHandler(jobRepo, sched, eventBus)
 	wantListH := NewWantListHandler(wantListRepo, searchSvc, settingRepo)
 	backlogH := NewBacklogHandler(backlogRepo, backlogSvc)
@@ -216,6 +220,8 @@ func NewRouter(
 			r.Post("/settings/comicvine-api-key/test", settingsH.TestAPIKey)
 			r.Put("/settings/metron", settingsH.UpdateMetronCredentials)
 			r.Post("/settings/metron/test", settingsH.TestMetron)
+			r.Put("/settings/prowlarr", settingsH.UpdateProwlarrSettings)
+			r.Post("/settings/prowlarr/test", settingsH.TestProwlarr)
 			r.Put("/settings/library-dir", settingsH.UpdateLibraryDir)
 			r.Put("/settings/pull-list-schedule", settingsH.UpdatePullListSchedule)
 			r.Put("/settings/auto-search", settingsH.UpdateAutoSearch)
@@ -249,6 +255,11 @@ func NewRouter(
 			r.Post("/calendar/refresh", calendarH.RefreshTracked)
 			r.Post("/calendar/track", calendarH.TrackSeries)
 			r.Post("/calendar/want", calendarH.WantIssue)
+			r.Post("/pull-list/want-track", acquisitionH.WantTrack)
+
+			// Wantlist (acquisition flow)
+			r.Get("/wantlist", acquisitionH.ListWantlist)
+			r.Post("/wantlist/{id}/retry", acquisitionH.RetryProcurement)
 
 			// File Organization
 			r.Get("/library/organize/template", organizeH.GetTemplate)

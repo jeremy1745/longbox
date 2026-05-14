@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -18,12 +19,22 @@ import (
 	"github.com/jeremy/longbox/internal/slack"
 )
 
+// prowlarrConfigurator is the narrow interface the settings handler needs from
+// *prowlarr.Client. Defined here to avoid a circular import with the prowlarr
+// package and to allow easy testing.
+type prowlarrConfigurator interface {
+	SetConfig(baseURL, apiKey, category string)
+	Configured() bool
+	TestConnection(ctx context.Context) error
+}
+
 type SettingsHandler struct {
-	metaSvc     *service.MetadataService
-	librarySvc  *service.LibraryService
-	watcher     *scanner.Watcher
-	scheduler   *scheduler.Scheduler
-	settingRepo *repository.SettingRepo
+	metaSvc        *service.MetadataService
+	librarySvc     *service.LibraryService
+	watcher        *scanner.Watcher
+	scheduler      *scheduler.Scheduler
+	settingRepo    *repository.SettingRepo
+	prowlarrClient prowlarrConfigurator
 }
 
 func NewSettingsHandler(
@@ -32,13 +43,15 @@ func NewSettingsHandler(
 	watcher *scanner.Watcher,
 	sched *scheduler.Scheduler,
 	settingRepo *repository.SettingRepo,
+	prowlarrClient prowlarrConfigurator,
 ) *SettingsHandler {
 	return &SettingsHandler{
-		metaSvc:     metaSvc,
-		librarySvc:  librarySvc,
-		watcher:     watcher,
-		scheduler:   sched,
-		settingRepo: settingRepo,
+		metaSvc:        metaSvc,
+		librarySvc:     librarySvc,
+		watcher:        watcher,
+		scheduler:      sched,
+		settingRepo:    settingRepo,
+		prowlarrClient: prowlarrClient,
 	}
 }
 
@@ -46,6 +59,12 @@ func NewSettingsHandler(
 // GET /api/v1/settings
 func (h *SettingsHandler) GetSettings(w http.ResponseWriter, r *http.Request) {
 	settings := h.metaSvc.GetSettings()
+
+	// Prowlarr status — surface URL and configured bool; never expose the key.
+	prowlarrURL, _ := h.settingRepo.Get("prowlarr_url")
+	settings["prowlarr_url"] = prowlarrURL
+	settings["prowlarr_configured"] = h.prowlarrClient != nil && h.prowlarrClient.Configured()
+
 	writeJSON(w, http.StatusOK, settings)
 }
 
@@ -610,6 +629,72 @@ func (h *SettingsHandler) UpdateSlackSettings(w http.ResponseWriter, r *http.Req
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{"status": "updated"})
+}
+
+// UpdateProwlarrSettings saves Prowlarr connection settings and hot-reloads the live client.
+// PUT /api/v1/settings/prowlarr
+// Body: {"url": string, "api_key": string, "category": string}
+func (h *SettingsHandler) UpdateProwlarrSettings(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		URL      string `json:"url"`
+		APIKey   string `json:"api_key"`
+		Category string `json:"category"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+
+	if err := h.settingRepo.Set("prowlarr_url", req.URL); err != nil {
+		writeError(w, http.StatusInternalServerError, "SAVE_FAILED", err.Error())
+		return
+	}
+	if err := h.settingRepo.Set("prowlarr_api_key", req.APIKey); err != nil {
+		writeError(w, http.StatusInternalServerError, "SAVE_FAILED", err.Error())
+		return
+	}
+	category := req.Category
+	if category == "" {
+		category = "7030"
+	}
+	if err := h.settingRepo.Set("prowlarr_category", category); err != nil {
+		writeError(w, http.StatusInternalServerError, "SAVE_FAILED", err.Error())
+		return
+	}
+
+	// Hot-reload the live Prowlarr client so the new settings take effect immediately.
+	if h.prowlarrClient != nil {
+		h.prowlarrClient.SetConfig(req.URL, req.APIKey, category)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":              "updated",
+		"prowlarr_url":        req.URL,
+		"prowlarr_configured": h.prowlarrClient != nil && h.prowlarrClient.Configured(),
+	})
+}
+
+// TestProwlarr checks whether the configured Prowlarr instance is reachable.
+// POST /api/v1/settings/prowlarr/test
+func (h *SettingsHandler) TestProwlarr(w http.ResponseWriter, r *http.Request) {
+	if h.prowlarrClient == nil || !h.prowlarrClient.Configured() {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"valid":   false,
+			"message": "No Prowlarr URL/API key configured",
+		})
+		return
+	}
+	if err := h.prowlarrClient.TestConnection(r.Context()); err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"valid":   false,
+			"message": err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"valid":   true,
+		"message": "Prowlarr connection OK",
+	})
 }
 
 // TestSlack sends a test message to the configured Slack channel.

@@ -294,3 +294,88 @@ func TestNewClient_CustomCategory(t *testing.T) {
 		t.Errorf("custom category not set: got %q", c.category)
 	}
 }
+
+// --- SetConfig / Configured tests ---
+
+func TestSetConfig_UpdatesFields(t *testing.T) {
+	c := NewClient("", "", "")
+
+	if c.Configured() {
+		t.Error("Configured() should be false before SetConfig")
+	}
+
+	c.SetConfig("http://192.168.1.10:9696/", "new-api-key", "7000")
+
+	if !c.Configured() {
+		t.Error("Configured() should be true after SetConfig with URL+key")
+	}
+	// Trailing slash must be trimmed.
+	c.mu.RLock()
+	gotURL := c.baseURL
+	gotKey := c.apiKey
+	gotCat := c.category
+	c.mu.RUnlock()
+
+	if gotURL != "http://192.168.1.10:9696" {
+		t.Errorf("baseURL: got %q, want %q", gotURL, "http://192.168.1.10:9696")
+	}
+	if gotKey != "new-api-key" {
+		t.Errorf("apiKey: got %q, want %q", gotKey, "new-api-key")
+	}
+	if gotCat != "7000" {
+		t.Errorf("category: got %q, want %q", gotCat, "7000")
+	}
+}
+
+func TestSetConfig_DefaultCategory(t *testing.T) {
+	c := NewClient("http://host:9696", "key", "7000")
+	// Passing empty category should reset to default.
+	c.SetConfig("http://host:9696", "key", "")
+	c.mu.RLock()
+	cat := c.category
+	c.mu.RUnlock()
+	if cat != defaultCategory {
+		t.Errorf("SetConfig with empty category: got %q, want %q", cat, defaultCategory)
+	}
+}
+
+func TestConfigured_FalseWhenMissingKey(t *testing.T) {
+	c := NewClient("http://host:9696", "", "")
+	if c.Configured() {
+		t.Error("Configured() should be false when apiKey is empty")
+	}
+}
+
+func TestConfigured_FalseWhenMissingURL(t *testing.T) {
+	c := NewClient("", "some-key", "")
+	if c.Configured() {
+		t.Error("Configured() should be false when baseURL is empty")
+	}
+}
+
+// TestSetConfig_RaceDetector exercises concurrent SetConfig + SearchIssue to
+// verify there are no data races. Run with: go test -race ./internal/prowlarr/
+func TestSetConfig_RaceDetector(t *testing.T) {
+	// Use a server that always returns an empty result set.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("[]"))
+	}))
+	defer ts.Close()
+
+	c := newTestClient(ts.URL)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 10; i++ {
+			c.SetConfig(ts.URL, "key-updated", "")
+		}
+	}()
+
+	for i := 0; i < 10; i++ {
+		// Ignore errors — we're just exercising the race detector.
+		_, _ = c.SearchIssue(context.Background(), "Spider-Man", "#1", 2024)
+	}
+	<-done
+}

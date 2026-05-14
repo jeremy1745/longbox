@@ -17,6 +17,7 @@ import (
 	"github.com/jeremy/longbox/internal/database"
 	"github.com/jeremy/longbox/internal/handler"
 	"github.com/jeremy/longbox/internal/model"
+	"github.com/jeremy/longbox/internal/prowlarr"
 	"github.com/jeremy/longbox/internal/repository"
 	"github.com/jeremy/longbox/internal/scanner"
 	"github.com/jeremy/longbox/internal/scheduler"
@@ -112,6 +113,17 @@ func main() {
 		librarySvc.SetLibraryDir(dbLibDir)
 		slog.Info("loaded library directory from settings", "dir", dbLibDir)
 	}
+
+	// Prowlarr client — constructed from config, then overridden with any
+	// persisted DB settings (same pattern as Metron credentials above).
+	prowlarrClient := prowlarr.NewClient(cfg.ProwlarrURL, cfg.ProwlarrAPIKey, cfg.ProwlarrCategory)
+	if dbURL, err := settingRepo.Get("prowlarr_url"); err == nil && dbURL != "" {
+		dbKey, _ := settingRepo.Get("prowlarr_api_key")
+		dbCat, _ := settingRepo.Get("prowlarr_category")
+		prowlarrClient.SetConfig(dbURL, dbKey, dbCat)
+		slog.Info("loaded Prowlarr settings from settings DB", "url", dbURL)
+	}
+
 	readerSvc := service.NewReaderService()
 	organizeSvc := service.NewFileOrganizerService(fileRepo, issueRepo, seriesRepo, settingRepo, cfg.Backlog.AnnualSubfolder)
 	metaWriterSvc := service.NewMetadataWriterService(fileRepo, issueRepo, seriesRepo)
@@ -155,6 +167,28 @@ func main() {
 	// Import service for post-processing completed downloads
 	importSvc := service.NewImportService(librarySvc, organizeSvc, wantListRepo, dlHistoryRepo, fileRepo, issueRepo, seriesRepo, settingRepo, cfg.LibraryDir)
 	searchSvc.SetOnDownloadCompleted(importSvc.ImportCompletedDownload)
+
+	// Acquisition flow services (Phase 3–6).
+	// SeriesFolderService is wired here; it was previously orphaned (D1).
+	libraryScanSvc := service.NewLibraryScanService(seriesRepo)
+	seriesFolderSvc := service.NewSeriesFolderService(librarySvc, seriesRepo, issueRepo)
+	// libraryDir for AcquisitionService: use librarySvc.GetLibraryDir() so that
+	// a runtime-changed library dir (via PUT /settings/library-dir) is consistent
+	// between SeriesFolderService (which calls GetLibraryDir() on every use) and
+	// AcquisitionService (which snapshots the value at construction time). This is
+	// the best we can do without making AcquisitionService call through librarySvc;
+	// if the dir changes at runtime, a server restart will re-sync the snapshot.
+	acqSvc := service.NewAcquisitionService(
+		metaSvc,
+		seriesFolderSvc,
+		libraryScanSvc,
+		prowlarrClient,
+		seriesRepo,
+		issueRepo,
+		fileRepo,
+		wantListRepo,
+		librarySvc.GetLibraryDir(),
+	)
 
 	// Notification service (Slack webhooks)
 	notifSvc := service.NewNotificationService(settingRepo, eventBus, dlHistoryRepo)
@@ -335,6 +369,8 @@ func main() {
 		authSvc,
 		srv,
 		frontendFS,
+		prowlarrClient,
+		acqSvc,
 	)
 
 	// Start server

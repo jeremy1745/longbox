@@ -26,6 +26,9 @@ type Config struct {
 	ComicVineAPIKey     string        `yaml:"comicvine_api_key"`
 	MetronUsername      string        `yaml:"metron_username"`
 	MetronAPIToken      string        `yaml:"metron_api_token"`
+	ProwlarrURL         string        `yaml:"prowlarr_url"`
+	ProwlarrAPIKey      string        `yaml:"prowlarr_api_key"`
+	ProwlarrCategory    string        `yaml:"prowlarr_category"`
 	SessionLifetimeDays int           `yaml:"session_lifetime_days"`
 	Backlog             BacklogConfig `yaml:"backlog"`
 }
@@ -33,10 +36,11 @@ type Config struct {
 func defaults() Config {
 	home, _ := os.UserHomeDir()
 	return Config{
-		Port:       22526,
-		LibraryDir: filepath.Join(home, "Comics"),
-		DataDir:    filepath.Join(home, ".longbox"),
-		LogLevel:   "info",
+		Port:             22526,
+		LibraryDir:       filepath.Join(home, "Comics"),
+		DataDir:          filepath.Join(home, ".longbox"),
+		LogLevel:         "info",
+		ProwlarrCategory: "7030",
 		Backlog: BacklogConfig{
 			MaxConcurrentDownloads: 25,
 			MaxRetries:             3,
@@ -81,6 +85,15 @@ func Load(path string) (*Config, error) {
 	}
 	if v := os.Getenv("LONGBOX_METRON_API_TOKEN"); v != "" {
 		cfg.MetronAPIToken = v
+	}
+	if v := os.Getenv("LONGBOX_PROWLARR_URL"); v != "" {
+		cfg.ProwlarrURL = v
+	}
+	if v := os.Getenv("LONGBOX_PROWLARR_API_KEY"); v != "" {
+		cfg.ProwlarrAPIKey = v
+	}
+	if v := os.Getenv("LONGBOX_PROWLARR_CATEGORY"); v != "" {
+		cfg.ProwlarrCategory = v
 	}
 	if v := os.Getenv("LONGBOX_SESSION_LIFETIME_DAYS"); v != "" {
 		fmt.Sscanf(v, "%d", &cfg.SessionLifetimeDays)

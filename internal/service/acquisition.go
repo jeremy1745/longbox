@@ -540,6 +540,64 @@ func (s *AcquisitionService) markProcurementFailed(issue *model.Issue, reason st
 		fmt.Sprintf("issue %s: %s", issue.IssueNumber, reason))
 }
 
+// RetryIssue re-dispatches a single want-list item through the Prowlarr
+// search→grab→SetProcurementStatus flow. It is a targeted retry for the
+// POST /wantlist/{id}/retry handler and mirrors the per-issue logic in
+// queueMissingIssues. Returns the updated WantListItem on success, or an
+// error if the issue/series cannot be loaded or Prowlarr isn't configured.
+func (s *AcquisitionService) RetryIssue(ctx context.Context, issueID int64) (*model.WantListItem, error) {
+	if s.prowlarrClient == nil {
+		return nil, fmt.Errorf("prowlarr is not configured")
+	}
+
+	issue, err := s.issueRepo.GetByID(issueID)
+	if err != nil {
+		return nil, fmt.Errorf("retry: loading issue %d: %w", issueID, err)
+	}
+	if issue == nil {
+		return nil, fmt.Errorf("retry: issue %d not found", issueID)
+	}
+
+	series, err := s.seriesRepo.GetByID(issue.SeriesID)
+	if err != nil {
+		return nil, fmt.Errorf("retry: loading series %d: %w", issue.SeriesID, err)
+	}
+	if series == nil {
+		return nil, fmt.Errorf("retry: series %d not found", issue.SeriesID)
+	}
+
+	year := 0
+	if series.Year != nil {
+		year = *series.Year
+	}
+
+	releases, err := s.prowlarrClient.SearchIssue(ctx, series.Title, issue.IssueNumber, year)
+	if err != nil {
+		_ = s.wantListRepo.SetProcurementStatus(issueID, "failed", fmt.Sprintf("prowlarr search failed: %v", err))
+		return nil, fmt.Errorf("retry: prowlarr search: %w", err)
+	}
+	if len(releases) == 0 {
+		_ = s.wantListRepo.SetProcurementStatus(issueID, "failed", "no results")
+		return nil, fmt.Errorf("retry: prowlarr search returned no results")
+	}
+
+	best := releases[0]
+	if err := s.prowlarrClient.GrabRelease(ctx, best.GUID, best.IndexerID); err != nil {
+		_ = s.wantListRepo.SetProcurementStatus(issueID, "failed", fmt.Sprintf("prowlarr grab failed: %v", err))
+		return nil, fmt.Errorf("retry: prowlarr grab: %w", err)
+	}
+
+	if err := s.wantListRepo.SetProcurementStatus(issueID, "submitted", ""); err != nil {
+		slog.Warn("retry: grab succeeded but could not mark submitted", "issue_id", issueID, "error", err)
+	}
+
+	item, err := s.wantListRepo.GetByIssueID(issueID)
+	if err != nil {
+		return nil, fmt.Errorf("retry: reloading want list item: %w", err)
+	}
+	return item, nil
+}
+
 // Compile-time assertions that the concrete production types satisfy the
 // narrow interfaces this orchestrator depends on. These do not run any code;
 // they just fail the build if a signature drifts.

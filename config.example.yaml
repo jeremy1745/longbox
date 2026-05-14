@@ -8,6 +8,15 @@ log_level: info
 # Get your free API key at: https://comicvine.gamespot.com/api/
 # comicvine_api_key: your-api-key-here
 
+# Metron credentials (optional - can also be set via the web UI settings page)
+# metron_username: your-username
+# metron_api_token: your-api-token
+
+# Prowlarr integration (optional - can also be set via the web UI settings page)
+# prowlarr_url: http://192.168.1.x:9696
+# prowlarr_api_key: your-prowlarr-api-key
+# prowlarr_category: "7030"  # Newznab Books > Comics (default)
+
 backlog:
   max_concurrent_downloads: 25
   max_retries: 3
