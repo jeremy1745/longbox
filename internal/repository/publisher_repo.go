@@ -3,6 +3,7 @@ package repository
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 )
 
 type Publisher struct {
@@ -20,8 +21,42 @@ func NewPublisherRepo(read, write *sql.DB) *PublisherRepo {
 	return &PublisherRepo{read: read, write: write}
 }
 
+// publisherAliases maps abbreviated / scene-style publisher names to their
+// canonical industry-standard form. Keyed by lowercase name. Applied by
+// FindOrCreateByName before any lookup or insert, so future ComicInfo-fed
+// publisher writes can't reintroduce the duplicates that migration 013
+// just cleaned up.
+//
+// Keep imprint specifiers ("Image - Skybound", "Image - Top Cow") distinct
+// — they're meaningful at the catalog level.
+var publisherAliases = map[string]string{
+	"dc":         "DC Comics",
+	"marvel":     "Marvel Comics",
+	"image":      "Image Comics",
+	"dark horse": "Dark Horse Comics",
+	"idw":        "IDW Publishing",
+	"titan":      "Titan Comics",
+}
+
+// normalizePublisher returns the canonical spelling for an input name.
+// Trims surrounding whitespace and consults publisherAliases; if no alias
+// matches, returns the trimmed original.
+func normalizePublisher(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	if canonical, ok := publisherAliases[strings.ToLower(name)]; ok {
+		return canonical
+	}
+	return name
+}
+
 // FindOrCreateByName finds a publisher by name, or creates one if it doesn't exist.
+// Applies normalizePublisher first so scene-style aliases ("DC" → "DC Comics",
+// "Marvel" → "Marvel Comics", etc.) coalesce to a single canonical row.
 func (r *PublisherRepo) FindOrCreateByName(name string, cvID *int64) (*Publisher, error) {
+	name = normalizePublisher(name)
 	if name == "" {
 		return nil, nil
 	}

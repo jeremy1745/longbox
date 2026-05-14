@@ -54,20 +54,29 @@ func NewScheduler(jobRepo *repository.JobRepo, eventBus *EventBus) *Scheduler {
 }
 
 // RegisterHandler registers a handler function for a job type.
+// Takes s.mu to keep the handlers map race-free even if a future caller
+// registers concurrently with Submit (today RegisterHandler is only invoked
+// at startup, but it's exported, so the lock is cheap insurance).
 func (s *Scheduler) RegisterHandler(jobType model.JobType, fn JobFunc) {
+	s.mu.Lock()
 	s.handlers[jobType] = fn
+	s.mu.Unlock()
 }
 
 // Submit creates a new job and queues it for execution.
 // Returns the job immediately in pending state.
 func (s *Scheduler) Submit(jobType model.JobType) (*model.Job, error) {
+	s.mu.Lock()
 	handler, ok := s.handlers[jobType]
 	if !ok {
+		s.mu.Unlock()
 		return nil, fmt.Errorf("no handler registered for job type %q", jobType)
 	}
 
-	// Check if a job of this type is already running or queued.
-	s.mu.Lock()
+	// Check if a job of this type is already queued or running. The
+	// pendingByType guard rejects a duplicate before it reaches the queue;
+	// the s.running scan catches one that's already executing. (s.mu is
+	// already held from the top of Submit.)
 	if pendingID, ok := s.pendingByType[jobType]; ok {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("a %s job is already queued (job #%d)", jobType, pendingID)
@@ -90,13 +99,28 @@ func (s *Scheduler) Submit(jobType model.JobType) (*model.Job, error) {
 	// Broadcast job created event
 	s.eventBus.Publish(Event{Type: "job:created", Data: job})
 
-	// Queue for execution
+	// Record the job under its type so a duplicate Submit is rejected by
+	// the pendingByType guard above, then queue it. Non-blocking send: a
+	// blocking send on a saturated queue would wedge the caller (HTTP
+	// handler, cron tick) indefinitely — instead mark the job failed and
+	// surface the reason. On queue-full, drop the pendingByType entry we
+	// just set so the type isn't permanently blocked.
 	s.mu.Lock()
 	s.pendingByType[jobType] = job.ID
 	s.mu.Unlock()
-	s.queue <- queuedJob{id: job.ID, jobType: jobType, handler: handler}
-
-	return job, nil
+	select {
+	case s.queue <- queuedJob{id: job.ID, jobType: jobType, handler: handler}:
+		return job, nil
+	default:
+		s.mu.Lock()
+		delete(s.pendingByType, jobType)
+		s.mu.Unlock()
+		if err := s.jobRepo.MarkFailed(job.ID, "scheduler queue full"); err != nil {
+			slog.Warn("failed to mark queue-full job failed", "job_id", job.ID, "error", err)
+		}
+		s.broadcastJobUpdate(job.ID)
+		return nil, fmt.Errorf("scheduler queue full (capacity %d)", cap(s.queue))
+	}
 }
 
 // processQueue runs jobs one at a time from the queue.

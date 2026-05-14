@@ -93,8 +93,14 @@ func (h *SeriesHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	if perPage < 1 {
 		perPage = 50
-	} else if perPage > 500 {
-		perPage = 500
+	} else if perPage > 10000 {
+		// The library page's browse view requests per_page=10000 in a single
+		// shot so it can group client-side. The previous 500 cap silently
+		// truncated the series list — on a 1651-row library that meant 1151
+		// series simply didn't render in browse mode. 10000 is enough for any
+		// reasonable single-user library; payload at this size stays under
+		// 200 KB and the SQLite list query runs in tens of milliseconds.
+		perPage = 10000
 	}
 
 	series, total, err := h.seriesRepo.List(page, perPage, sortBy, order, trackedOnly)

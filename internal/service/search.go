@@ -657,19 +657,31 @@ var disallowedReleaseExtensions = []string{
 	".tar", ".gz", ".bz2", ".xz",
 }
 
+// hardRejectPattern matches the signatures of non-comic releases that
+// overlap comic series titles on substring search: TV episode notation
+// (s01e02, 2025x11), video quality tags (720p, web-dl, bluray), and adult
+// keywords/sites. These are the actual bad grabs that polluted the library
+// — e.g. "LoveHerBoobs-Karina.King-...-XXX" matched a "Quick Escape" search.
+var hardRejectPattern = regexp.MustCompile(`(?i)(?:^|[\W_])(s\d{2}e\d{2}|s\d{4}e\d{2}|\d{1,2}x\d{2}|480p|720p|1080p|2160p|web-dl|bluray|bdrip|brrip|hdtv|hdrip|xxx|porn|hentai|brazzers|manyvids|onlyfans|loveherboobs|latinacasting|ultimatesurrender|enjoyx)(?:[\W_]|$)`)
+
 // isComicRelease reports whether the given release title is a plausible
-// comic-format archive. The check is conservative — it accepts anything
-// that doesn't contain a known non-comic extension AND prefers titles
-// that explicitly contain `.cbr` / `.cbz` / `.cb7`. Most scene-style
-// comic releases omit the extension entirely (e.g. "Alice.Never.After.001.
-// (2022).(Empire)"), so we don't require .cbz/.cbr presence — only
-// rejecting on positive evidence of a non-comic format.
+// comic-format archive. It rejects on positive evidence of a non-comic
+// release — TV/video/adult signatures (hardRejectPattern) or a known
+// non-comic file extension. Titles explicitly carrying a comic extension
+// (.cbz / .cbr / .cb7) are hard-allowed. Most scene-style comic releases
+// omit the extension entirely (e.g. "Alice.Never.After.001.(2022).(Empire)"),
+// so absence of .cbz/.cbr is not itself disqualifying.
 func isComicRelease(title string) bool {
 	t := strings.ToLower(title)
 
 	// Hard-allow when the title explicitly carries a comic extension.
 	if strings.Contains(t, ".cbz") || strings.Contains(t, ".cbr") || strings.Contains(t, ".cb7") {
 		return true
+	}
+
+	// Reject TV episode / video-quality / adult signatures.
+	if hardRejectPattern.MatchString(title) {
+		return false
 	}
 
 	for _, ext := range disallowedReleaseExtensions {

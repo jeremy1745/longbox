@@ -137,6 +137,46 @@ func (r *FileRepo) ListAll() ([]model.ComicFile, error) {
 	return files, nil
 }
 
+// ListOrphans returns comic_files whose issue_id is NULL — files the
+// scanner couldn't attribute to a series at scan time. These are the
+// candidates for the reattach pass.
+func (r *FileRepo) ListOrphans() ([]model.ComicFile, error) {
+	rows, err := r.read.Query(`SELECT id, issue_id, file_path, file_name, file_size, file_hash,
+		file_format, page_count, has_comicinfo, cover_path, parsed_series, parsed_number,
+		parsed_year, match_confidence, created_at, updated_at
+		FROM comic_files WHERE issue_id IS NULL ORDER BY file_path ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("listing orphan files: %w", err)
+	}
+	defer rows.Close()
+
+	var files []model.ComicFile
+	for rows.Next() {
+		f, err := scanComicFileRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, *f)
+	}
+	return files, nil
+}
+
+// UpdateParsedAndIssue sets the issue link AND refreshes the parsed_series /
+// parsed_number / parsed_year columns in one statement. Used by the reattach
+// pass so the columns on disk reflect what the current parser actually saw,
+// not whatever an earlier scanner stored.
+func (r *FileRepo) UpdateParsedAndIssue(id, issueID int64, parsedSeries, parsedNumber string, parsedYear *int) error {
+	_, err := r.write.Exec(`
+		UPDATE comic_files
+		SET issue_id = ?, parsed_series = ?, parsed_number = ?, parsed_year = ?, match_confidence = 1.0,
+		    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+		WHERE id = ?`, issueID, parsedSeries, parsedNumber, parsedYear, id)
+	if err != nil {
+		return fmt.Errorf("attaching orphan file to issue: %w", err)
+	}
+	return nil
+}
+
 // GetByIssueID returns the comic file linked to the given issue, if any.
 func (r *FileRepo) GetByIssueID(issueID int64) (*model.ComicFile, error) {
 	row := r.read.QueryRow(`SELECT id, issue_id, file_path, file_name, file_size, file_hash,

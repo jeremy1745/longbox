@@ -114,8 +114,12 @@ func (cs *CronScheduler) checkPullListSchedule() {
 		targetHour = h
 	}
 
+	// Fire on the target weekday once we're at or past the target hour, so
+	// a tick that misses the exact hour boundary (system sleep, NTP jump)
+	// doesn't skip the run for the whole week. The last_run guard below
+	// stops double-firing within the same day.
 	now := time.Now()
-	if int(now.Weekday()) != targetDay || now.Hour() != targetHour {
+	if int(now.Weekday()) != targetDay || now.Hour() < targetHour {
 		return
 	}
 
