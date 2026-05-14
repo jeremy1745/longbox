@@ -397,6 +397,179 @@ func TestAcquisition_ProwlarrFailurePerIssue(t *testing.T) {
 	}
 }
 
+// TestAcquisition_ZeroPaddedIssueNumber verifies Fix C1: when the DB stores an
+// issue number as "001" (zero-padded) and the scanned file produces a key that
+// normalises to "1", the file IS moved and the issue IS relinked — the
+// normalised-map lookup in moveLocalFiles matches them correctly.
+func TestAcquisition_ZeroPaddedIssueNumber(t *testing.T) {
+	env := setupAcqTestEnv(t)
+	libraryDir := t.TempDir()
+
+	// Seed series with zero-padded issue numbers.
+	series, issues := env.seedSeriesWithIssues(t, "Zero Pad Comics", 2025, "001", "002")
+
+	// Loose file for issue "001" — the ComicInfo reports Number "1" (no pad),
+	// so the scan key normalises to "1". Previously this missed the DB row
+	// "001" because FindBySeriesAndNumber did an exact string match.
+	looseDir := filepath.Join(libraryDir, "incoming")
+	if err := os.MkdirAll(looseDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	loosePath := filepath.Join(looseDir, "Zero Pad Comics 001.cbz")
+	makeTestCBZ(t, loosePath, &testComicInfo{Series: "Zero Pad Comics", Number: "1"})
+
+	cf := &model.ComicFile{
+		FilePath:   loosePath,
+		FileName:   "Zero Pad Comics 001.cbz",
+		FileFormat: "cbz",
+	}
+	if err := env.fileRepo.Create(cf); err != nil {
+		t.Fatalf("creating comic_files row: %v", err)
+	}
+
+	seriesDir := filepath.Join(libraryDir, buildSeriesFolderName(series.Title, series.Year))
+	if err := os.MkdirAll(seriesDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	svc := NewAcquisitionService(
+		&fakeResolver{series: series}, &fakeFolderEnsurer{},
+		NewLibraryScanService(env.seriesRepo),
+		nil, // Prowlarr not needed for this test
+		env.seriesRepo, env.issueRepo, env.fileRepo, env.wantListRepo,
+		libraryDir,
+	)
+
+	cvID := int64(99)
+	result, err := svc.WantAndTrackSeries(context.Background(), WantTrackInput{ComicVineID: &cvID})
+	if err != nil {
+		t.Fatalf("WantAndTrackSeries: unexpected error: %v\nwarnings: %v", err, result.Warnings)
+	}
+
+	// File must have moved.
+	if result.FilesMoved != 1 {
+		t.Errorf("result.FilesMoved: got %d, want 1 (zero-padded issue not matched)\nwarnings: %v", result.FilesMoved, result.Warnings)
+	}
+	movedPath := filepath.Join(seriesDir, "Zero Pad Comics 001.cbz")
+	if !fileExists(movedPath) {
+		t.Errorf("file not at expected canonical path %q", movedPath)
+	}
+	if fileExists(loosePath) {
+		t.Errorf("file still at old loose path %q — move failed", loosePath)
+	}
+
+	// DB row must be relinked to the zero-padded issue.
+	relinked, err := env.fileRepo.GetByID(cf.ID)
+	if err != nil || relinked == nil {
+		t.Fatalf("reloading comic_files row: %v", err)
+	}
+	if relinked.FilePath != movedPath {
+		t.Errorf("comic_files.file_path: got %q, want %q", relinked.FilePath, movedPath)
+	}
+	if relinked.IssueID == nil || *relinked.IssueID != issues[0].ID {
+		t.Errorf("comic_files.issue_id: got %v, want %d (issue 001, id=%d)", relinked.IssueID, issues[0].ID, issues[0].ID)
+	}
+}
+
+// TestAcquisition_MetronHappyPath exercises the Metron resolution path:
+// MetronID → placeholder created → MatchSeriesToMetronVolume succeeds →
+// series resolved and tracked, issues wanted.
+func TestAcquisition_MetronHappyPath(t *testing.T) {
+	env := setupAcqTestEnv(t)
+	libraryDir := t.TempDir()
+
+	// Pre-seed the issues so step 2 finds them. We use the same env.issueRepo
+	// as the service, so ListBySeries will see them. The series row itself is
+	// created inside resolveSeries (as a placeholder), so we pre-create it
+	// here with a known ID to let seedSeriesWithIssues give us the issues.
+	// However, that's circular — instead we let the flow create the placeholder
+	// and we verify the post-condition independently.
+	//
+	// The fakeResolver.MatchSeriesToMetronVolume does nothing to the DB (it's
+	// a fake), so the placeholder row remains with title "metron-42". That's
+	// fine — we're testing the control flow, not real Metron metadata.
+	//
+	// Because the placeholder has no issues, ListBySeries will return an empty
+	// slice — steps 3/4/5 are no-ops but must not error. We verify:
+	//   - the flow returns a non-zero SeriesID
+	//   - the series exists in the DB and is marked tracked
+	//   - matchToMetronCalled == 1
+	//   - no error returned
+
+	resolver := &fakeResolver{} // err == nil → success
+	svc := NewAcquisitionService(
+		resolver, &fakeFolderEnsurer{},
+		NewLibraryScanService(env.seriesRepo),
+		nil,
+		env.seriesRepo, env.issueRepo, env.fileRepo, env.wantListRepo,
+		libraryDir,
+	)
+
+	metronID := int64(42)
+	result, err := svc.WantAndTrackSeries(context.Background(), WantTrackInput{MetronID: &metronID})
+	if err != nil {
+		t.Fatalf("WantAndTrackSeries (Metron happy path): unexpected error: %v\nwarnings: %v", err, result.Warnings)
+	}
+	if result.SeriesID == 0 {
+		t.Error("result.SeriesID should be non-zero after successful Metron resolution")
+	}
+	if resolver.matchToMetronCalled != 1 {
+		t.Errorf("MatchSeriesToMetronVolume call count: got %d, want 1", resolver.matchToMetronCalled)
+	}
+
+	// Series must exist in the DB and be tracked.
+	reloaded, err := env.seriesRepo.GetByID(result.SeriesID)
+	if err != nil || reloaded == nil {
+		t.Fatalf("reloading series after Metron resolve: err=%v series=%v", err, reloaded)
+	}
+	if !reloaded.Tracked {
+		t.Error("series should be marked tracked after Metron happy path")
+	}
+}
+
+// TestAcquisition_MetronMatchFailureNoLeak verifies Fix I1: when
+// MatchSeriesToMetronVolume fails, the placeholder series row is deleted so no
+// orphaned row is left in the DB. Both the error return and the absence of the
+// row are checked.
+func TestAcquisition_MetronMatchFailureNoLeak(t *testing.T) {
+	env := setupAcqTestEnv(t)
+
+	matchErr := errors.New("metron: volume not found")
+	resolver := &fakeResolver{err: matchErr}
+
+	svc := NewAcquisitionService(
+		resolver, &fakeFolderEnsurer{},
+		NewLibraryScanService(env.seriesRepo),
+		nil,
+		env.seriesRepo, env.issueRepo, env.fileRepo, env.wantListRepo,
+		t.TempDir(),
+	)
+
+	metronID := int64(99)
+	_, err := svc.WantAndTrackSeries(context.Background(), WantTrackInput{MetronID: &metronID})
+	if err == nil {
+		t.Fatal("expected an error when MatchSeriesToMetronVolume fails, got nil")
+	}
+	if !errors.Is(err, matchErr) {
+		t.Errorf("error should wrap the match error; got: %v", err)
+	}
+
+	// The placeholder row must be gone — verify by listing all series.
+	// We check that no series with the placeholder title pattern exists.
+	all, _, err2 := env.seriesRepo.List(1, 1000, "title", "asc")
+	if err2 != nil {
+		t.Fatalf("listing series after failed Metron match: %v", err2)
+	}
+	for _, s := range all {
+		if s.Title == "metron-99" {
+			t.Errorf("placeholder series %q (id=%d) was not deleted after match failure — leak!", s.Title, s.ID)
+		}
+	}
+	if resolver.matchToMetronCalled != 1 {
+		t.Errorf("MatchSeriesToMetronVolume call count: got %d, want 1", resolver.matchToMetronCalled)
+	}
+}
+
 // TestAcquisition_NoProwlarrSkipsQueue verifies that a nil prowlarr client
 // skips step 5 entirely with a single warning — and crucially does NOT mark
 // the missing issues 'failed' (they stay 'pending' from step 2).

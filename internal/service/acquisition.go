@@ -159,14 +159,18 @@ func (s *AcquisitionService) WantAndTrackSeries(ctx context.Context, in WantTrac
 
 	issues, err := s.issueRepo.ListBySeries(series.ID)
 	if err != nil {
-		result.Warnings = append(result.Warnings,
-			fmt.Sprintf("could not list issues for series: %v", err))
-		// Without the issue list there's nothing more to do — return what
-		// we have rather than erroring; the series is still resolved+tracked.
-		return result, nil
+		// ListBySeries failure guts steps 3/4/5 — nothing to want, nothing
+		// to scan against, nothing to queue. Callers seeing err==nil
+		// reasonably expect the flow to have run; return a real error.
+		return result, fmt.Errorf("listing series issues: %w", err)
 	}
 
 	for i := range issues {
+		// Check for context cancellation at the top of each iteration so a
+		// cancelled request stops promptly rather than walking all issues.
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
 		issueID := issues[i].ID
 		if _, err := s.wantListRepo.Create(issueID, 0, ""); err != nil {
 			result.Warnings = append(result.Warnings,
@@ -195,7 +199,7 @@ func (s *AcquisitionService) WantAndTrackSeries(ctx context.Context, in WantTrac
 	}
 
 	// ── Step 4: scan local library + move matching files in ───────────────
-	filesByIssueNumber := s.moveLocalFiles(s.libraryDir, seriesDir, series, &result)
+	filesByIssueNumber := s.moveLocalFiles(s.libraryDir, seriesDir, series, issues, &result)
 
 	// ── Step 5: queue still-missing issues via Prowlarr ───────────────────
 	s.queueMissingIssues(ctx, series, issues, filesByIssueNumber, &result)
@@ -256,9 +260,20 @@ func (s *AcquisitionService) resolveSeries(ctx context.Context, in WantTrackInpu
 		}
 		series, err := s.seriesRepo.GetByID(placeholder.ID)
 		if err != nil {
+			// Successful match but reload failed — delete the placeholder so
+			// no orphaned row is left behind. Same cleanup as match-failure.
+			if delErr := s.seriesRepo.Delete(placeholder.ID); delErr != nil {
+				slog.Warn("acquisition: could not delete placeholder series after failed reload",
+					"series_id", placeholder.ID, "error", delErr)
+			}
 			return nil, fmt.Errorf("resolving series from Metron: reloading series: %w", err)
 		}
 		if series == nil {
+			// Row vanished between match and reload — same cleanup.
+			if delErr := s.seriesRepo.Delete(placeholder.ID); delErr != nil {
+				slog.Warn("acquisition: could not delete placeholder series after nil reload",
+					"series_id", placeholder.ID, "error", delErr)
+			}
 			return nil, fmt.Errorf("resolving series from Metron: series %d vanished after match", placeholder.ID)
 		}
 		return series, nil
@@ -280,9 +295,15 @@ func (s *AcquisitionService) seriesFolderPath(series *model.Series) string {
 // of normalized issue numbers that ended up with a local file (so step 5 can
 // skip them). Every failure mode is recorded as a warning; nothing here is
 // fatal.
+//
+// issues is the full slice returned by ListBySeries in step 2. We resolve
+// scan keys → issue rows here, via a normalized-comparison map, rather than
+// going back to the DB with an exact string query — that would silently miss
+// zero-padded issue numbers (DB "001" vs scan key "1").
 func (s *AcquisitionService) moveLocalFiles(
 	libraryDir, seriesDir string,
 	series *model.Series,
+	issues []model.Issue,
 	result *WantTrackResult,
 ) map[string]bool {
 	filesByIssueNumber := make(map[string]bool)
@@ -300,16 +321,25 @@ func (s *AcquisitionService) moveLocalFiles(
 		return filesByIssueNumber
 	}
 
+	// Build a normalized-key lookup map once so relocateFile doesn't need a
+	// DB round-trip per file. Both the scan keys AND the DB values are
+	// normalised the same way, so "001" and "1" both map to "1".
+	issueByNorm := make(map[string]*model.Issue, len(issues))
+	for i := range issues {
+		key := normalizeIssueNumber(issues[i].IssueNumber)
+		issueByNorm[key] = &issues[i]
+	}
+
 	// Regular issues land in seriesDir; annuals under seriesDir/Annuals.
 	for issueNumber, srcPath := range scan.Matches {
 		dest := filepath.Join(seriesDir, filepath.Base(srcPath))
-		if s.relocateFile(issueNumber, srcPath, dest, series.ID, result) {
+		if s.relocateFile(issueNumber, srcPath, dest, issueByNorm, result) {
 			filesByIssueNumber[issueNumber] = true
 		}
 	}
 	for issueNumber, srcPath := range scan.Annuals {
 		dest := filepath.Join(seriesDir, "Annuals", filepath.Base(srcPath))
-		if s.relocateFile(issueNumber, srcPath, dest, series.ID, result) {
+		if s.relocateFile(issueNumber, srcPath, dest, issueByNorm, result) {
 			filesByIssueNumber[issueNumber] = true
 		}
 	}
@@ -327,25 +357,29 @@ func (s *AcquisitionService) moveLocalFiles(
 // move or because it was already there) so the caller can mark the issue as
 // having a local file. Mirrors FileOrganizerService.RenameForIssue's
 // rename → DB-update → rollback-on-DB-failure pattern.
+//
+// issueByNorm maps normalizeIssueNumber(issue.IssueNumber) → *model.Issue for
+// every issue in the series. Using a pre-built normalized map avoids a
+// FindBySeriesAndNumber DB round-trip that would silently miss zero-padded
+// issue numbers stored in the DB (e.g., DB "001" vs scan key "1").
 func (s *AcquisitionService) relocateFile(
 	issueNumber, srcPath, dest string,
-	seriesID int64,
+	issueByNorm map[string]*model.Issue,
 	result *WantTrackResult,
 ) bool {
-	issue, err := s.issueRepo.FindBySeriesAndNumber(seriesID, issueNumber)
-	if err != nil {
-		result.Warnings = append(result.Warnings,
-			fmt.Sprintf("issue %s: lookup failed, file %s not moved: %v", issueNumber, filepath.Base(srcPath), err))
-		return false
-	}
-	if issue == nil {
+	// issueNumber is already normalized by FindFilesForSeries; look it up
+	// directly in the pre-built normalized map.
+	issue, ok := issueByNorm[issueNumber]
+	if !ok {
 		result.Warnings = append(result.Warnings,
 			fmt.Sprintf("issue %s: no local issue row, file %s not moved", issueNumber, filepath.Base(srcPath)))
 		return false
 	}
 
 	// Already in its canonical slot — nothing to move, but the issue does
-	// have a local file.
+	// have a local file. Note: return true here WITHOUT incrementing
+	// result.FilesMoved — the bool signals "issue has a file" while
+	// FilesMoved counts actual disk moves performed by this run.
 	if filepath.Clean(srcPath) == filepath.Clean(dest) {
 		return true
 	}
@@ -445,6 +479,14 @@ func (s *AcquisitionService) queueMissingIssues(
 	}
 
 	for i := range issues {
+		// Check for context cancellation at the top of each iteration so a
+		// cancelled request stops promptly rather than walking all issues.
+		if err := ctx.Err(); err != nil {
+			result.Warnings = append(result.Warnings,
+				fmt.Sprintf("context cancelled during Prowlarr queue step: %v", err))
+			return
+		}
+
 		issue := &issues[i]
 
 		// Skip issues that got a local file in step 4.
