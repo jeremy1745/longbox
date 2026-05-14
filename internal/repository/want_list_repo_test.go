@@ -207,4 +207,25 @@ func TestProcurementStatus(t *testing.T) {
 	if len(noneItems) != 0 {
 		t.Errorf("expected 0 'none' items (issue 101 is 'failed'), got %d", len(noneItems))
 	}
+
+	// Transition to 'acquired' — terminal success state; submitted_at must be preserved.
+	if err := repo.SetProcurementStatus(101, "acquired", ""); err != nil {
+		t.Fatalf("SetProcurementStatus acquired: %v", err)
+	}
+	reloaded, err = repo.GetByIssueID(101)
+	if err != nil || reloaded == nil {
+		t.Fatalf("GetByIssueID after acquired: %v", err)
+	}
+	if reloaded.ProcurementStatus != "acquired" {
+		t.Errorf("expected ProcurementStatus='acquired', got %q", reloaded.ProcurementStatus)
+	}
+	// procurement_last_error should be cleared (empty errMsg → NULL).
+	if reloaded.ProcurementLastError != nil {
+		t.Errorf("expected ProcurementLastError nil after acquired, got %v", reloaded.ProcurementLastError)
+	}
+
+	// SetProcurementStatus on a non-existent issueID must return an error.
+	if err := repo.SetProcurementStatus(9999, "pending", ""); err == nil {
+		t.Error("expected error for unknown issueID, got nil")
+	}
 }

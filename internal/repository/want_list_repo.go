@@ -352,25 +352,20 @@ func (r *WantListRepo) SetProcurementStatus(issueID int64, status string, errMsg
 	if errMsg != "" {
 		lastErr = errMsg
 	}
-	if status == "submitted" {
-		_, err := r.write.Exec(`
-			UPDATE want_list
-			SET procurement_status = ?,
-			    procurement_submitted_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
-			    procurement_last_error = ?
-			WHERE issue_id = ?`, status, lastErr, issueID)
-		if err != nil {
-			return fmt.Errorf("setting procurement status: %w", err)
-		}
-		return nil
-	}
-	_, err := r.write.Exec(`
+	res, err := r.write.Exec(`
 		UPDATE want_list
 		SET procurement_status = ?,
+		    procurement_submitted_at = CASE WHEN ? = 'submitted'
+		        THEN strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+		        ELSE procurement_submitted_at END,
 		    procurement_last_error = ?
-		WHERE issue_id = ?`, status, lastErr, issueID)
+		WHERE issue_id = ?`, status, status, lastErr, issueID)
 	if err != nil {
 		return fmt.Errorf("setting procurement status: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("want list item for issue %d not found", issueID)
 	}
 	return nil
 }
@@ -401,6 +396,9 @@ func (r *WantListRepo) ListByProcurementStatus(status string) ([]model.WantListI
 			return nil, err
 		}
 		items = append(items, *item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating procurement status rows: %w", err)
 	}
 	return items, nil
 }
