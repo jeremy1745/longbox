@@ -3,11 +3,8 @@ package service
 import (
 	"archive/zip"
 	"encoding/xml"
-	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/jeremy/longbox/internal/model"
@@ -19,6 +16,7 @@ type testComicInfo struct {
 	Series string
 	Number string
 	Title  string
+	Format string
 }
 
 // makeTestCBZ writes a minimal CBZ file at path.
@@ -40,11 +38,13 @@ func makeTestCBZ(t *testing.T, path string, ci *testComicInfo) {
 			Series  string   `xml:"Series,omitempty"`
 			Number  string   `xml:"Number,omitempty"`
 			Title   string   `xml:"Title,omitempty"`
+			Format  string   `xml:"Format,omitempty"`
 		}
 		xmlData, err := xml.MarshalIndent(xmlComicInfo{
 			Series: ci.Series,
 			Number: ci.Number,
 			Title:  ci.Title,
+			Format: ci.Format,
 		}, "", "  ")
 		if err != nil {
 			t.Fatalf("marshal ComicInfo: %v", err)
@@ -92,11 +92,13 @@ func makeLargerTestCBZ(t *testing.T, path string, ci *testComicInfo, extraBytes 
 			Series  string   `xml:"Series,omitempty"`
 			Number  string   `xml:"Number,omitempty"`
 			Title   string   `xml:"Title,omitempty"`
+			Format  string   `xml:"Format,omitempty"`
 		}
 		xmlData, err := xml.MarshalIndent(xmlComicInfo{
 			Series: ci.Series,
 			Number: ci.Number,
 			Title:  ci.Title,
+			Format: ci.Format,
 		}, "", "  ")
 		if err != nil {
 			t.Fatalf("marshal ComicInfo: %v", err)
@@ -129,12 +131,6 @@ func makeLargerTestCBZ(t *testing.T, path string, ci *testComicInfo, extraBytes 
 		t.Fatalf("close zip writer: %v", err)
 	}
 }
-
-// --- nilSeriesRepo stub ---
-
-// nilSeriesRepo implements just enough of SeriesRepo's interface to return an
-// empty series list — used when we don't want any canonical folder skipping.
-type nilSeriesListFunc func() ([]model.Series, int, error)
 
 // --- Tests ---
 
@@ -405,87 +401,44 @@ func TestLibraryScan_CanonicalFoldersSkipped(t *testing.T) {
 	}
 }
 
+func TestLibraryScan_AnnualDetectionViaComicInfoFormat(t *testing.T) {
+	dir := t.TempDir()
+
+	// ComicInfo.Format == "Annual" is the only annual signal.
+	// Series/Title/Number are plain, filename has no "annual" in it.
+	cbzPath := filepath.Join(dir, "Batman 003.cbz")
+	makeTestCBZ(t, cbzPath, &testComicInfo{
+		Series: "Batman",
+		Number: "3",
+		Title:  "Batman",
+		Format: "Annual",
+	})
+
+	svc := &LibraryScanService{seriesRepo: nil}
+	series := &model.Series{Title: "Batman"}
+
+	result, err := svc.findFilesNoSkip(dir, series)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(result.Matches) != 0 {
+		t.Errorf("expected 0 regular matches (file should be annual), got %d: %v",
+			len(result.Matches), result.Matches)
+	}
+	if len(result.Annuals) != 1 {
+		t.Fatalf("expected 1 annual (detected via ComicInfo.Format), got %d: %v",
+			len(result.Annuals), result.Annuals)
+	}
+}
+
 // --- Internal helpers exposed for testing ---
 
-// findFilesNoSkip is a test helper that calls FindFilesForSeries with an empty
-// canonical folder skip set (no seriesRepo needed).
+// findFilesNoSkip is a test helper that calls findFilesWithSkipSet with an
+// empty canonical folder skip set (no seriesRepo needed).
 func (s *LibraryScanService) findFilesNoSkip(
 	libraryDir string,
 	series *model.Series,
 ) (FindFilesResult, error) {
 	return s.findFilesWithSkipSet(libraryDir, series, map[string]bool{})
-}
-
-// findFilesWithSkipSet is the actual walk logic factored out so tests can
-// inject a pre-built canonical folder set without a live DB.
-func (s *LibraryScanService) findFilesWithSkipSet(
-	libraryDir string,
-	series *model.Series,
-	canonicalFolders map[string]bool,
-) (FindFilesResult, error) {
-	result := FindFilesResult{
-		Matches: make(map[string]string),
-		Annuals: make(map[string]string),
-	}
-
-	targetKey := normalizeSeriesTitle(series.Title)
-
-	matchesCand := make(map[string]fileFingerprint)
-	annualsCand := make(map[string]fileFingerprint)
-
-	err := filepath.WalkDir(libraryDir, func(path string, d os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			slog.Warn("library scan: walk error", "path", path, "error", walkErr)
-			return nil
-		}
-
-		if d.IsDir() {
-			if path == libraryDir {
-				return nil
-			}
-			baseName := filepath.Base(path)
-			if canonicalFolders[baseName] {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		ext := strings.ToLower(filepath.Ext(path))
-		if ext != ".cbz" && ext != ".cbr" {
-			return nil
-		}
-
-		fp, ok := fingerprintFile(path)
-		if !ok {
-			return nil
-		}
-
-		if normalizeSeriesTitle(fp.series) != targetKey {
-			return nil
-		}
-
-		if fp.number == "" {
-			return nil
-		}
-
-		issueNum := normalizeIssueNumber(fp.number)
-
-		if fp.isAnnual {
-			resolveDuplicate(annualsCand, issueNum, fp, &result.RejectedDuplicates)
-		} else {
-			resolveDuplicate(matchesCand, issueNum, fp, &result.RejectedDuplicates)
-		}
-		return nil
-	})
-	if err != nil {
-		return result, fmt.Errorf("walking library dir %q: %w", libraryDir, err)
-	}
-
-	for num, fp := range matchesCand {
-		result.Matches[num] = fp.absPath
-	}
-	for num, fp := range annualsCand {
-		result.Annuals[num] = fp.absPath
-	}
-	return result, nil
 }

@@ -50,40 +50,49 @@ type fileFingerprint struct {
 }
 
 // FindFilesForSeries walks libraryDir for .cbz/.cbr files belonging to series,
-// returning a map of normalized issue number → absolute file path.
-//
-// knownIssueNumbers is informational — the scan doesn't restrict to those
-// numbers but callers may use the result to cross-reference.
+// returning a FindFilesResult with matched regular issues, annuals, and
+// rejected duplicates.
 func (s *LibraryScanService) FindFilesForSeries(
 	libraryDir string,
 	series *model.Series,
-	knownIssueNumbers []string,
 ) (FindFilesResult, error) {
-
-	result := FindFilesResult{
-		Matches: make(map[string]string),
-		Annuals: make(map[string]string),
-	}
 
 	// Build the set of canonical folder names for ALL series in the DB.
 	// We skip those subdirectories during the walk so we never confuse a
 	// Batman file sitting inside "Batman (2016)" with our target series.
 	canonicalFolders, err := s.canonicalFolderSet()
 	if err != nil {
-		return result, fmt.Errorf("building canonical folder set: %w", err)
+		return FindFilesResult{}, fmt.Errorf("building canonical folder set: %w", err)
+	}
+
+	return s.findFilesWithSkipSet(libraryDir, series, canonicalFolders)
+}
+
+// findFilesWithSkipSet performs the actual directory walk, skipping any
+// subdirectory whose base name appears in canonicalFolders.
+//
+// NOTE: filepath.WalkDir does not follow symlinks. Symlinked subdirectories on
+// the network share (SMB mount) are silently skipped. If that becomes a
+// problem, replace this with a manual recursive walk using os.ReadLink +
+// os.Stat to dereference symlinks before descending.
+func (s *LibraryScanService) findFilesWithSkipSet(
+	libraryDir string,
+	series *model.Series,
+	canonicalFolders map[string]bool,
+) (FindFilesResult, error) {
+	result := FindFilesResult{
+		Matches: make(map[string]string),
+		Annuals: make(map[string]string),
 	}
 
 	targetKey := normalizeSeriesTitle(series.Title)
 
-	// matchesMap / annualsMap hold the best candidate per issue number so
-	// we can do duplicate resolution inline.
-	//
 	// matchesCand[issueNum] = best fingerprint seen so far
 	// annualsCand[issueNum] = best annual fingerprint seen so far
 	matchesCand := make(map[string]fileFingerprint)
 	annualsCand := make(map[string]fileFingerprint)
 
-	err = filepath.WalkDir(libraryDir, func(path string, d os.DirEntry, walkErr error) error {
+	err := filepath.WalkDir(libraryDir, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			slog.Warn("library scan: walk error", "path", path, "error", walkErr)
 			return nil // continue walking, don't abort
@@ -186,10 +195,11 @@ func fingerprintFromComicInfo(path string, fileSize int64) (fileFingerprint, boo
 		return fileFingerprint{}, false
 	}
 
-	// Detect annuals: check ComicInfo fields (Series, Title, Number) and
-	// the filename itself. The ComicInfo spec's <Format> field is not
-	// included in the current ComicInfo struct so we check other signals.
-	isAnnual := containsAnnual(ci.Series) ||
+	// Detect annuals: check all ComicInfo text fields (including <Format>,
+	// which is "Annual" for annual issues per the ComicInfo v2 spec) and
+	// the filename itself.
+	isAnnual := containsAnnual(ci.Format) ||
+		containsAnnual(ci.Series) ||
 		containsAnnual(ci.Title) ||
 		containsAnnual(ci.Number) ||
 		containsAnnual(filepath.Base(path))
@@ -255,6 +265,8 @@ func resolveDuplicate(cand map[string]fileFingerprint, issueNum string, fp fileF
 }
 
 // pickWinner returns (winner, loser) from two fingerprints.
+// Tie-break order: (1) ComicInfo-populated wins over filename-only; (2) larger
+// file wins; (3) exact size tie → first seen in walk order (incumbent a).
 func pickWinner(a, b fileFingerprint) (fileFingerprint, fileFingerprint) {
 	// Prefer ComicInfo.xml.
 	if a.hasCI && !b.hasCI {
@@ -294,6 +306,10 @@ func (s *LibraryScanService) canonicalFolderSet() (map[string]bool, error) {
 // normalizeSeriesTitle produces an aggressive matching key: lowercase,
 // strip all non-alphanumeric. Survives punctuation/case/whitespace differences.
 // "30 Days of Night: Falling Sun" == "30 Days of Night Falling Sun".
+//
+// NOTE: this is algorithmically identical to repository.normalizeSeriesKey
+// (package-private there, so it cannot be imported). The two MUST be kept in
+// sync until they are consolidated into a shared package.
 func normalizeSeriesTitle(title string) string {
 	var b strings.Builder
 	b.Grow(len(title))

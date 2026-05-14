@@ -14,6 +14,7 @@ type ComicInfo struct {
 	Title       string   `xml:"Title,omitempty"`
 	Series      string   `xml:"Series,omitempty"`
 	Number      string   `xml:"Number,omitempty"`
+	Format      string   `xml:"Format,omitempty"`
 	Volume      int      `xml:"Volume,omitempty"`
 	Summary     string   `xml:"Summary,omitempty"`
 	Year        int      `xml:"Year,omitempty"`
