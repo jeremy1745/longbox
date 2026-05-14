@@ -18,6 +18,62 @@ func NewMetadataHandler(metaSvc *service.MetadataService) *MetadataHandler {
 	return &MetadataHandler{metaSvc: metaSvc}
 }
 
+// writeMatchConflict inspects err for any of the three match-conflict error
+// types and, if found, writes a unified 409 MERGE_REQUIRED response and
+// returns true. The payload is the same shape regardless of which conflict
+// fired (external-ID already taken, or title+year collision) because the
+// frontend resolves all of them the same way: merge requestedSeriesID into
+// conflictingSeriesID via POST /series/{id}/merge-into/{dst_id}.
+func writeMatchConflict(w http.ResponseWriter, requestedSeriesID int64, err error) bool {
+	var (
+		conflictID    int64
+		conflictTitle string
+		matched       bool
+	)
+
+	var cvConflict *service.CVMatchConflictError
+	var metronConflict *service.MetronMatchConflictError
+	var seriesConflict *service.SeriesMatchConflictError
+
+	switch {
+	case errors.As(err, &cvConflict):
+		matched = true
+		if cvConflict.ConflictingSeries != nil {
+			conflictID = cvConflict.ConflictingSeries.ID
+			conflictTitle = cvConflict.ConflictingSeries.Title
+		}
+	case errors.As(err, &metronConflict):
+		matched = true
+		if metronConflict.ConflictingSeries != nil {
+			conflictID = metronConflict.ConflictingSeries.ID
+			conflictTitle = metronConflict.ConflictingSeries.Title
+		}
+	case errors.As(err, &seriesConflict):
+		matched = true
+		if seriesConflict.ConflictingSeries != nil {
+			conflictID = seriesConflict.ConflictingSeries.ID
+			conflictTitle = seriesConflict.ConflictingSeries.Title
+		}
+	}
+
+	if !matched {
+		return false
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	json.NewEncoder(w).Encode(map[string]any{
+		"error": map[string]any{
+			"code":    "MERGE_REQUIRED",
+			"message": err.Error(),
+		},
+		"requested_series_id":      requestedSeriesID,
+		"conflicting_series_id":    conflictID,
+		"conflicting_series_title": conflictTitle,
+	})
+	return true
+}
+
 // SearchVolumes searches ComicVine for volumes matching a query.
 // GET /api/v1/metadata/search?q=batman&page=1
 func (h *MetadataHandler) SearchVolumes(w http.ResponseWriter, r *http.Request) {
@@ -90,22 +146,7 @@ func (h *MetadataHandler) MatchSeries(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.metaSvc.MatchSeriesToVolume(r.Context(), seriesID, req.ComicVineID); err != nil {
-		var conflict *service.CVMatchConflictError
-		if errors.As(err, &conflict) {
-			payload := map[string]any{
-				"error": map[string]any{
-					"code":    "CV_ALREADY_MATCHED",
-					"message": err.Error(),
-				},
-				"comicvine_id": conflict.ComicVineID,
-			}
-			if conflict.ConflictingSeries != nil {
-				payload["conflicting_series_id"] = conflict.ConflictingSeries.ID
-				payload["conflicting_series_title"] = conflict.ConflictingSeries.Title
-			}
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusConflict)
-			json.NewEncoder(w).Encode(payload)
+		if writeMatchConflict(w, seriesID, err) {
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "MATCH_FAILED", err.Error())
@@ -163,22 +204,7 @@ func (h *MetadataHandler) MatchSeriesToMetron(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if err := h.metaSvc.MatchSeriesToMetronVolume(r.Context(), seriesID, req.MetronID); err != nil {
-		var conflict *service.MetronMatchConflictError
-		if errors.As(err, &conflict) {
-			payload := map[string]any{
-				"error": map[string]any{
-					"code":    "METRON_ALREADY_MATCHED",
-					"message": err.Error(),
-				},
-				"metron_id": conflict.MetronID,
-			}
-			if conflict.ConflictingSeries != nil {
-				payload["conflicting_series_id"] = conflict.ConflictingSeries.ID
-				payload["conflicting_series_title"] = conflict.ConflictingSeries.Title
-			}
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusConflict)
-			json.NewEncoder(w).Encode(payload)
+		if writeMatchConflict(w, seriesID, err) {
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "METRON_MATCH_FAILED", err.Error())

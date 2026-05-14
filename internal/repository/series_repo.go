@@ -262,6 +262,30 @@ func (r *SeriesRepo) FindByComicVineID(cvID int64) (*model.Series, error) {
 	return scanSeries(row)
 }
 
+// FindByNormalizedTitleYear finds a series whose (title, year) collides with
+// the given pair under the SAME normalization the ux_series_norm_title_year
+// unique index uses: LOWER(TRIM(title)) and COALESCE(year, -1). excludeID is
+// skipped so a series doesn't conflict with itself. Used to pre-flight a
+// match before UpdateFromMetadata trips the UNIQUE constraint at write time.
+func (r *SeriesRepo) FindByNormalizedTitleYear(title string, year *int, excludeID int64) (*model.Series, error) {
+	yearKey := -1
+	if year != nil {
+		yearKey = *year
+	}
+	row := r.read.QueryRow(`
+		SELECT s.id, s.title, s.sort_title, s.year, s.publisher_id, s.comicvine_id, s.metron_id,
+			COALESCE(s.description,''), s.status, s.total_issues, s.cover_file_id, COALESCE(s.cover_image_url,''), s.tracked,
+			s.metadata_locked, s.last_cv_sync, s.parent_series_id, s.created_at, s.updated_at,
+			COALESCE((SELECT COUNT(*) FROM issues WHERE series_id = s.id), 0) as issue_count,
+			COALESCE((SELECT COUNT(*) FROM comic_files cf JOIN issues i ON cf.issue_id = i.id WHERE i.series_id = s.id), 0) as file_count,
+			COALESCE(p.name, '') as publisher_name
+		FROM series s
+		LEFT JOIN publishers p ON s.publisher_id = p.id
+		WHERE LOWER(TRIM(s.title)) = LOWER(TRIM(?)) AND COALESCE(s.year, -1) = ? AND s.id != ?`,
+		title, yearKey, excludeID)
+	return scanSeries(row)
+}
+
 // DuplicateSeriesGroup names a (normalized_title, year) pair that has more
 // than one row in the series table.
 type DuplicateSeriesGroup struct {

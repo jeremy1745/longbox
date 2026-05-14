@@ -165,7 +165,10 @@ func (h *CalendarHandler) TrackSeries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	wantAll := true
+	// Default to NOT auto-wanting back issues. Tracking a series should follow
+	// new releases, not silently dump every prior issue into the want list.
+	// Callers can opt in by passing "want_all": true.
+	wantAll := false
 	if body.WantAll != nil {
 		wantAll = *body.WantAll
 	}

@@ -34,6 +34,7 @@
 		metronId: number;
 		conflictingSeriesId: number;
 		conflictingSeriesTitle: string;
+		message: string;
 	} | null>(null);
 	let merging = $state(false);
 
@@ -83,10 +84,11 @@
 						metronId,
 						conflictingSeriesId: body.conflicting_series_id,
 						conflictingSeriesTitle: body.conflicting_series_title || `series #${body.conflicting_series_id}`,
+						message: body?.error?.message || 'This match conflicts with an existing local series.',
 					};
 					return;
 				}
-				error = body?.error?.message || 'This Metron series is already matched to another local series.';
+				error = body?.error?.message || 'This match conflicts with an existing local series.';
 				return;
 			}
 			if (!res.ok) {
@@ -183,9 +185,14 @@
 			<div class="px-4 pt-3 flex-shrink-0">
 				<div class="bg-amber-900/20 border border-amber-700/60 rounded-lg p-3 space-y-2">
 					<p class="text-sm text-amber-200">
-						This Metron series is already matched to
+						{conflict.message}
+					</p>
+					<p class="text-xs text-amber-300/80">
+						Merging will move every issue and file from this series into
 						<span class="font-semibold">{conflict.conflictingSeriesTitle}</span>
-						(local series #{conflict.conflictingSeriesId}).
+						(local series #{conflict.conflictingSeriesId}), then delete this
+						duplicate series record. The merged series keeps its existing
+						match, tracking, and read progress.
 					</p>
 					<div class="flex gap-2 pt-1">
 						<button

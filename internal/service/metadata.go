@@ -500,6 +500,17 @@ func (s *MetadataService) MatchSeriesToMetronVolume(ctx context.Context, seriesI
 		series.Status = "continuing"
 	}
 
+	// Pre-flight the ux_series_norm_title_year unique index — see the matching
+	// check in MatchSeriesToVolume. Without it, UpdateFromMetronMetadata leaks a
+	// raw UNIQUE constraint error when another series already holds this
+	// normalized title+year.
+	if conflict, cErr := s.seriesRepo.FindByNormalizedTitleYear(series.Title, series.Year, seriesID); cErr == nil && conflict != nil {
+		return &SeriesMatchConflictError{
+			RequestedSeriesID: seriesID,
+			ConflictingSeries: conflict,
+		}
+	}
+
 	if err := s.seriesRepo.UpdateFromMetronMetadata(series); err != nil {
 		return fmt.Errorf("updating series: %w", err)
 	}
@@ -772,6 +783,27 @@ func (e *CVMatchConflictError) conflictingID() int64 {
 	return e.ConflictingSeries.ID
 }
 
+// SeriesMatchConflictError is returned when applying a match would collide
+// with an existing local series under the ux_series_norm_title_year unique
+// index — i.e. another series already has the same normalized title+year the
+// match would assign. Without this pre-flight, UpdateFromMetadata leaks a raw
+// "UNIQUE constraint failed" error to the user. The resolution is a merge of
+// the two series.
+type SeriesMatchConflictError struct {
+	RequestedSeriesID int64
+	ConflictingSeries *model.Series
+}
+
+func (e *SeriesMatchConflictError) Error() string {
+	title := ""
+	var id int64
+	if e.ConflictingSeries != nil {
+		title = e.ConflictingSeries.Title
+		id = e.ConflictingSeries.ID
+	}
+	return fmt.Sprintf("a series titled %q already exists (id=%d) — merge required", title, id)
+}
+
 // MatchSeriesToVolume matches a local series to a ComicVine volume and applies metadata.
 func (s *MetadataService) MatchSeriesToVolume(ctx context.Context, seriesID int64, cvVolumeID int) error {
 	if !s.cv.HasAPIKey() {
@@ -845,6 +877,17 @@ func (s *MetadataService) MatchSeriesToVolume(ctx context.Context, seriesID int6
 
 	// Determine status
 	series.Status = "continuing"
+
+	// Pre-flight the ux_series_norm_title_year unique index. If another local
+	// series already holds this normalized title+year, UpdateFromMetadata would
+	// fail with a raw "UNIQUE constraint failed" error. Surface a typed conflict
+	// so the caller can offer a merge instead.
+	if conflict, cErr := s.seriesRepo.FindByNormalizedTitleYear(series.Title, series.Year, seriesID); cErr == nil && conflict != nil {
+		return &SeriesMatchConflictError{
+			RequestedSeriesID: seriesID,
+			ConflictingSeries: conflict,
+		}
+	}
 
 	if err := s.seriesRepo.UpdateFromMetadata(series); err != nil {
 		return fmt.Errorf("updating series: %w", err)
@@ -1787,9 +1830,12 @@ func (s *MetadataService) TrackFromComicVine(cvVolumeID int, wantListRepo *repos
 		return nil, 0, fmt.Errorf("tracking series: %w", err)
 	}
 
-	// Step 6: Add missing issues to the want list (unless wantAll=false)
+	// Step 6: Add missing issues to the want list ONLY if the caller explicitly
+	// asks for it. Default is off — tracking a series should not silently dump
+	// every back issue ever published into the want list. (e.g., tracking
+	// "Zorro" once accidentally enqueued 30 issues from a 1952 reprint series.)
 	wantAdded := 0
-	shouldWantAll := len(wantAll) == 0 || wantAll[0]
+	shouldWantAll := len(wantAll) > 0 && wantAll[0]
 	if wantListRepo != nil && shouldWantAll {
 		added, err := wantListRepo.AddMissingForSeries(series.ID)
 		if err != nil {

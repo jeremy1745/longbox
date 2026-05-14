@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/jeremy/longbox/internal/model"
 	"github.com/jeremy/longbox/internal/newznab"
@@ -803,25 +804,79 @@ func shouldRequireSeriesYear(series *model.Series, issue *model.Issue) bool {
 // yearPattern matches 4-digit years (1900–2099) in NZB titles.
 var yearPattern = regexp.MustCompile(`(?:^|[\s._(-])(\d{4})(?:[\s._)\-]|$)`)
 
+// issueNumberCutPattern finds the first issue-number-like token in a result
+// title, used to slice off the trailing "001 (2024) (digital)" tail so the
+// leading portion can be compared as a claimed series name.
+var issueNumberCutPattern = regexp.MustCompile(`(?i)[\s._-]+#?\d{1,4}(?:[\s._(\-]|$)`)
+
+// indexerTitleStopwords are dropped before comparing token sets — they convey
+// no series identity and would otherwise inflate the "extra word" count.
+var indexerTitleStopwords = map[string]bool{
+	"the": true, "of": true, "and": true, "vs": true, "with": true,
+	"from": true, "for": true, "a": true, "an": true, "to": true,
+	"in": true, "on": true, "at": true, "by": true, "into": true, "onto": true,
+}
+
+// significantTokens lowercases, splits on non-alphanumerics, and returns the
+// set of tokens longer than 2 chars that aren't stopwords. Used on both the
+// LB series title and the claimed series portion of an indexer result.
+func significantTokens(s string) map[string]bool {
+	tokens := make(map[string]bool)
+	for _, w := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	}) {
+		if len(w) > 2 && !indexerTitleStopwords[w] {
+			tokens[w] = true
+		}
+	}
+	return tokens
+}
+
+// claimedSeriesTokens extracts the series-name token set from an indexer-style
+// result title by cutting at the first issue-number or year marker. This
+// prevents "Lady Rawhide - Lady Zorro 001 (2015)" from being treated as a
+// "Zorro" match just because the word zorro appears somewhere in the title.
+func claimedSeriesTokens(resultTitle string) map[string]bool {
+	cut := strings.ToLower(resultTitle)
+	if loc := issueNumberCutPattern.FindStringIndex(cut); loc != nil {
+		cut = cut[:loc[0]]
+	} else if loc := yearPattern.FindStringIndex(cut); loc != nil {
+		cut = cut[:loc[0]]
+	}
+	return significantTokens(cut)
+}
+
 func scoreResult(result newznab.SearchResult, series *model.Series, issue *model.Issue) int {
 	score := 0
 	titleLower := strings.ToLower(result.Title)
-	seriesLower := strings.ToLower(series.Title)
 
-	// Title contains series name
-	if strings.Contains(titleLower, seriesLower) {
-		score += 50
-	} else {
-		// Check individual significant words
-		words := strings.Fields(seriesLower)
+	// Title matching by token set. The old check (substring contains) accepted
+	// "Lady Rawhide - Lady Zorro" as a "Zorro" match because the substring
+	// "zorro" appears in it. Now: pull the claimed series portion (everything
+	// before the issue number) and compare token sets. Extra distinguishing
+	// words like "Lady" or "Rawhide" become a strong negative signal.
+	seriesTokens := significantTokens(series.Title)
+	claimedTokens := claimedSeriesTokens(result.Title)
+	if len(seriesTokens) > 0 {
 		matched := 0
-		for _, w := range words {
-			if len(w) > 2 && strings.Contains(titleLower, w) {
+		extra := 0
+		for t := range claimedTokens {
+			if seriesTokens[t] {
 				matched++
+			} else {
+				extra++
 			}
 		}
-		if len(words) > 0 {
-			score += (matched * 30) / len(words)
+		switch {
+		case matched == len(seriesTokens) && extra == 0:
+			score += 60 // clean token-set match
+		case matched == len(seriesTokens) && extra == 1:
+			score += 30 // one extra word — possibly a subtitle, allow
+		case matched == len(seriesTokens):
+			score -= 100 // claimed name has 2+ distinguishing words — wrong volume
+		default:
+			// Missing series tokens in result. Partial credit proportional to coverage.
+			score += (matched * 30) / len(seriesTokens)
 		}
 	}
 
