@@ -68,6 +68,10 @@ func WriteSeriesSidecar(seriesDir string, series *model.Series, issues []model.I
 
 	// 1. Write ComicVine.xml
 	if err := writeComicVineXML(seriesDir, series); err != nil {
+		slog.Warn("series_sidecar: failed to write ComicVine.xml",
+			"series_id", series.ID,
+			"error", err,
+		)
 		errs = append(errs, fmt.Errorf("writing ComicVine.xml: %w", err))
 	}
 
@@ -128,8 +132,10 @@ type cdataString struct {
 }
 
 // MarshalXML omits the element entirely when the CDATA value is empty.
+// encoding/xml skips nil pointer fields before dispatching MarshalXML, so
+// c is always non-nil here; only the empty-value guard is needed.
 func (c *cdataString) MarshalXML(e *xml.Encoder, start xml.StartElement) error {
-	if c == nil || c.Value == "" {
+	if c.Value == "" {
 		return nil
 	}
 	return e.EncodeElement(struct {
@@ -181,14 +187,21 @@ func writeComicVineXML(seriesDir string, series *model.Series) error {
 // common filesystems (Windows, macOS, Linux). Replaced with "_".
 var unsafeFilenameChars = regexp.MustCompile(`[\\/:*?"<>|#%&{}]`)
 
+// multiUnderscoreRE matches two or more consecutive underscores.
+var multiUnderscoreRE = regexp.MustCompile(`_+`)
+
+// htmlBRRE matches <br> variants (self-closing or not, any case).
+var htmlBRRE = regexp.MustCompile(`(?i)<br\s*/?>`)
+
+// htmlMultiNewlineRE matches three or more consecutive newlines.
+var htmlMultiNewlineRE = regexp.MustCompile(`\n{3,}`)
+
 // sanitizeIssueFilename turns an issue number into a safe filename stem.
 // e.g. "un#ed" → "un_ed", "1/2" → "1_2".
 func sanitizeIssueFilename(issueNumber string) string {
 	safe := unsafeFilenameChars.ReplaceAllString(issueNumber, "_")
 	// Collapse multiple underscores that might result from adjacent unsafe chars.
-	for strings.Contains(safe, "__") {
-		safe = strings.ReplaceAll(safe, "__", "_")
-	}
+	safe = multiUnderscoreRE.ReplaceAllString(safe, "_")
 	safe = strings.Trim(safe, "_")
 	if safe == "" {
 		safe = "unknown"
@@ -203,10 +216,10 @@ var htmlTagRE = regexp.MustCompile(`<[^>]+>`)
 
 func stripHTML(s string) string {
 	// Replace <br> variants with newlines before stripping other tags.
-	s = regexp.MustCompile(`(?i)<br\s*/?>`) .ReplaceAllString(s, "\n")
+	s = htmlBRRE.ReplaceAllString(s, "\n")
 	s = htmlTagRE.ReplaceAllString(s, "")
 	// Collapse multiple blank lines down to two.
-	s = regexp.MustCompile(`\n{3,}`).ReplaceAllString(s, "\n\n")
+	s = htmlMultiNewlineRE.ReplaceAllString(s, "\n\n")
 	return strings.TrimSpace(s)
 }
 
