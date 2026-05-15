@@ -94,9 +94,29 @@
 			if (sourceIssueId) body.source_issue_id = sourceIssueId;
 
 			const res = await postWantTrack(body);
+
+			// A 409 here means MatchSeriesToVolume itself hit a conflict —
+			// e.g. another local series owns the CV ID, or another local series
+			// shares the normalized title+year. Update the prompt in place so
+			// the user sees the NEW conflict, not the stale original one.
+			if (res.status === 409) {
+				const data = await res.json().catch(() => null);
+				if (data && data.conflicting_series_id) {
+					conflict = {
+						seriesId: data.conflicting_series_id,
+						title: data.conflicting_series_title || `series #${data.conflicting_series_id}`,
+						message: data?.error?.message || 'Cannot link — another series conflicts.',
+					};
+					return;
+				}
+				error = data?.error?.message || 'Link failed — series conflict.';
+				conflict = null;
+				return;
+			}
 			if (!res.ok) {
 				const data = await res.json().catch(() => null);
 				error = data?.error?.message || `HTTP ${res.status}`;
+				conflict = null;
 				return;
 			}
 			result = (await res.json()) as WantTrackResult;
@@ -104,6 +124,7 @@
 			onTracked?.(result);
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Link failed';
+			conflict = null;
 		} finally {
 			linking = false;
 		}
