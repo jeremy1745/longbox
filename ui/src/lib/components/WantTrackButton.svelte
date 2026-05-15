@@ -148,7 +148,8 @@
 	{#if result}
 		<div class="mt-1 {variant === 'compact' ? 'absolute right-0 z-10 w-64' : ''} bg-green-900/25 border border-green-700/60 rounded-lg p-2.5 space-y-1 shadow-lg">
 			<p class="text-xs text-green-300">
-				Tracking — {result.issues_queued} queued, {result.files_moved} already in library
+				Tracking — {result.issues_wanted} issue{result.issues_wanted === 1 ? '' : 's'} wanted.
+				Folder, file-scan, and downloads are running in the background.
 			</p>
 			{#if result.warnings && result.warnings.length > 0}
 				<ul class="text-[11px] text-amber-300/80 list-disc list-inside">

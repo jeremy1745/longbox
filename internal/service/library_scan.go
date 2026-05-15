@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -52,7 +53,12 @@ type fileFingerprint struct {
 // FindFilesForSeries walks libraryDir for .cbz/.cbr files belonging to series,
 // returning a FindFilesResult with matched regular issues, annuals, and
 // rejected duplicates.
+//
+// The walk opens every archive in the library to fingerprint it — on a large
+// SMB-mounted library that is genuinely slow (minutes). The ctx lets the
+// caller bound it: cancellation aborts the walk promptly and returns ctx.Err().
 func (s *LibraryScanService) FindFilesForSeries(
+	ctx context.Context,
 	libraryDir string,
 	series *model.Series,
 ) (FindFilesResult, error) {
@@ -65,17 +71,19 @@ func (s *LibraryScanService) FindFilesForSeries(
 		return FindFilesResult{}, fmt.Errorf("building canonical folder set: %w", err)
 	}
 
-	return s.findFilesWithSkipSet(libraryDir, series, canonicalFolders)
+	return s.findFilesWithSkipSet(ctx, libraryDir, series, canonicalFolders)
 }
 
 // findFilesWithSkipSet performs the actual directory walk, skipping any
-// subdirectory whose base name appears in canonicalFolders.
+// subdirectory whose base name appears in canonicalFolders. The walk checks
+// ctx at every entry so a cancelled/timed-out caller aborts promptly.
 //
 // NOTE: filepath.WalkDir does not follow symlinks. Symlinked subdirectories on
 // the network share (SMB mount) are silently skipped. If that becomes a
 // problem, replace this with a manual recursive walk using os.ReadLink +
 // os.Stat to dereference symlinks before descending.
 func (s *LibraryScanService) findFilesWithSkipSet(
+	ctx context.Context,
 	libraryDir string,
 	series *model.Series,
 	canonicalFolders map[string]bool,
@@ -93,6 +101,11 @@ func (s *LibraryScanService) findFilesWithSkipSet(
 	annualsCand := make(map[string]fileFingerprint)
 
 	err := filepath.WalkDir(libraryDir, func(path string, d os.DirEntry, walkErr error) error {
+		// Abort promptly if the caller's context was cancelled or timed out —
+		// returning the ctx error stops WalkDir and surfaces from below.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			slog.Warn("library scan: walk error", "path", path, "error", walkErr)
 			return nil // continue walking, don't abort

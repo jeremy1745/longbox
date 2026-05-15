@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/jeremy/longbox/internal/model"
 	"github.com/jeremy/longbox/internal/prowlarr"
@@ -38,14 +39,22 @@ type WantTrackInput struct {
 	SourceIssueID *int64
 }
 
-// WantTrackResult summarizes what WantAndTrackSeries did.
+// WantTrackResult summarizes what WantAndTrackSeries did. The synchronous HTTP
+// response only carries the step 1-2 fields (SeriesID, IssuesWanted,
+// BackgroundStarted, and any sync-phase Warnings). The remaining fields are
+// populated by completeAcquisition in the background goroutine — they are
+// logged there rather than returned, since the HTTP response has already been
+// sent. They stay on the struct so the background phase and its tests share
+// one shape.
 type WantTrackResult struct {
-	SeriesID        int64    `json:"series_id"`
-	FolderPath      string   `json:"folder_path"`
-	MetadataWritten bool     `json:"metadata_written"`
-	FilesMoved      int      `json:"files_moved"`
-	IssuesQueued    int      `json:"issues_queued"`
-	Warnings        []string `json:"warnings,omitempty"`
+	SeriesID          int64    `json:"series_id"`
+	IssuesWanted      int      `json:"issues_wanted"`
+	BackgroundStarted bool     `json:"background_started"`
+	FolderPath        string   `json:"folder_path,omitempty"`
+	MetadataWritten   bool     `json:"metadata_written,omitempty"`
+	FilesMoved        int      `json:"files_moved,omitempty"`
+	IssuesQueued      int      `json:"issues_queued,omitempty"`
+	Warnings          []string `json:"warnings,omitempty"`
 }
 
 // seriesResolver is the narrow slice of *MetadataService that the
@@ -95,6 +104,11 @@ type AcquisitionService struct {
 	fileRepo        *repository.FileRepo
 	wantListRepo    *repository.WantListRepo
 	libraryDir      string // resolved once by the caller (settings DB / config)
+
+	// launchBackground runs the slow steps 3-5 of the flow. In production it
+	// spawns a goroutine; tests override it (run synchronously, or no-op then
+	// call completeAcquisition directly) for deterministic assertions.
+	launchBackground func(fn func())
 }
 
 // NewAcquisitionService constructs an AcquisitionService. prowlarrClient may
@@ -113,15 +127,16 @@ func NewAcquisitionService(
 	libraryDir string,
 ) *AcquisitionService {
 	return &AcquisitionService{
-		resolver:        resolver,
-		seriesFolderSvc: seriesFolderSvc,
-		libraryScanSvc:  libraryScanSvc,
-		prowlarrClient:  prowlarrClient,
-		seriesRepo:      seriesRepo,
-		issueRepo:       issueRepo,
-		fileRepo:        fileRepo,
-		wantListRepo:    wantListRepo,
-		libraryDir:      libraryDir,
+		resolver:         resolver,
+		seriesFolderSvc:  seriesFolderSvc,
+		libraryScanSvc:   libraryScanSvc,
+		prowlarrClient:   prowlarrClient,
+		seriesRepo:       seriesRepo,
+		issueRepo:        issueRepo,
+		fileRepo:         fileRepo,
+		wantListRepo:     wantListRepo,
+		libraryDir:       libraryDir,
+		launchBackground: func(fn func()) { go fn() },
 	}
 }
 
@@ -181,7 +196,43 @@ func (s *AcquisitionService) WantAndTrackSeries(ctx context.Context, in WantTrac
 			result.Warnings = append(result.Warnings,
 				fmt.Sprintf("issue %s: could not set procurement status pending: %v", issues[i].IssueNumber, err))
 		}
+		result.IssuesWanted++
 	}
+
+	// ── Steps 3-5 run in the background ───────────────────────────────────
+	// Folder + sidecar I/O, the full-library SMB scan, and Prowlarr round-
+	// trips are slow — running them inside the HTTP request routinely blew
+	// past the 60s server WriteTimeout, so the request "hung" and the UI
+	// showed every add as failed. They now run in a background goroutine
+	// with their own bounded context. The user's window into their progress
+	// is the want-list procurement_status column on the Wanted page.
+	result.BackgroundStarted = true
+	bgSeries, bgIssues := series, issues
+	s.launchBackground(func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		defer cancel()
+		s.completeAcquisition(bgCtx, bgSeries, bgIssues)
+	})
+
+	slog.Info("acquisition: want+track sync phase complete — background started",
+		"series_id", series.ID,
+		"title", series.Title,
+		"issues_wanted", result.IssuesWanted,
+		"warnings", len(result.Warnings),
+	)
+	return result, nil
+}
+
+// completeAcquisition runs the slow, best-effort steps 3-5 of the flow:
+// create the series folder + metadata sidecars, scan the local library and
+// move loose files in, and queue still-missing issues via Prowlarr. It is
+// invoked in a background goroutine by WantAndTrackSeries (and called
+// directly by tests). Nothing here is fatal — failures are recorded as
+// warnings and logged; there is no HTTP caller to return them to. The
+// want-list procurement_status is the user-facing record of progress. The
+// returned WantTrackResult is for logging and tests; production discards it.
+func (s *AcquisitionService) completeAcquisition(ctx context.Context, series *model.Series, issues []model.Issue) WantTrackResult {
+	var result WantTrackResult
 
 	// ── Step 3: create folder + write metadata sidecars ───────────────────
 	seriesDir := s.seriesFolderPath(series)
@@ -199,19 +250,22 @@ func (s *AcquisitionService) WantAndTrackSeries(ctx context.Context, in WantTrac
 	}
 
 	// ── Step 4: scan local library + move matching files in ───────────────
-	filesByIssueNumber := s.moveLocalFiles(s.libraryDir, seriesDir, series, issues, &result)
+	filesByIssueNumber := s.moveLocalFiles(ctx, s.libraryDir, seriesDir, series, issues, &result)
 
 	// ── Step 5: queue still-missing issues via Prowlarr ───────────────────
 	s.queueMissingIssues(ctx, series, issues, filesByIssueNumber, &result)
 
-	slog.Info("acquisition: want+track complete",
+	slog.Info("acquisition: background phase complete",
 		"series_id", series.ID,
 		"title", series.Title,
 		"files_moved", result.FilesMoved,
 		"issues_queued", result.IssuesQueued,
 		"warnings", len(result.Warnings),
 	)
-	return result, nil
+	for _, w := range result.Warnings {
+		slog.Warn("acquisition: background warning", "series_id", series.ID, "detail", w)
+	}
+	return result
 }
 
 // resolveSeries handles step 1 — turning the input identifier into a local
@@ -301,6 +355,7 @@ func (s *AcquisitionService) seriesFolderPath(series *model.Series) string {
 // going back to the DB with an exact string query — that would silently miss
 // zero-padded issue numbers (DB "001" vs scan key "1").
 func (s *AcquisitionService) moveLocalFiles(
+	ctx context.Context,
 	libraryDir, seriesDir string,
 	series *model.Series,
 	issues []model.Issue,
@@ -314,7 +369,7 @@ func (s *AcquisitionService) moveLocalFiles(
 		return filesByIssueNumber
 	}
 
-	scan, err := s.libraryScanSvc.FindFilesForSeries(libraryDir, series)
+	scan, err := s.libraryScanSvc.FindFilesForSeries(ctx, libraryDir, series)
 	if err != nil {
 		result.Warnings = append(result.Warnings,
 			fmt.Sprintf("local library scan failed: %v", err))

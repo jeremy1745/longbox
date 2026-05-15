@@ -5,7 +5,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/jeremy/longbox/internal/database"
 	"github.com/jeremy/longbox/internal/model"
@@ -44,6 +46,28 @@ func setupAcqTestEnv(t *testing.T) *acqTestEnv {
 		fileRepo:     repository.NewFileRepo(db.Read, db.Write),
 		wantListRepo: repository.NewWantListRepo(db.Read, db.Write),
 	}
+}
+
+// newAcqService builds an AcquisitionService for tests with the background
+// launch DISABLED (no-op). Tests drive the background phase explicitly by
+// calling svc.completeAcquisition directly, so step 3-5 assertions are
+// deterministic and don't race the test's DB teardown.
+func newAcqService(
+	env *acqTestEnv,
+	resolver seriesResolver,
+	folder folderEnsurer,
+	grabber releaseGrabber,
+	libraryDir string,
+) *AcquisitionService {
+	svc := NewAcquisitionService(
+		resolver, folder,
+		NewLibraryScanService(env.seriesRepo),
+		grabber,
+		env.seriesRepo, env.issueRepo, env.fileRepo, env.wantListRepo,
+		libraryDir,
+	)
+	svc.launchBackground = func(func()) {} // tests run the background phase manually
+	return svc
 }
 
 // seedSeriesWithIssues creates a series and the given issue numbers, returning
@@ -96,13 +120,19 @@ func (f *fakeResolver) MatchSeriesToMetronVolume(ctx context.Context, seriesID i
 
 // fakeFolderEnsurer is a folderEnsurer that records calls and optionally
 // fails. It does NOT create anything on disk — the test creates the series
-// folder itself when it needs the sidecar step to succeed.
+// folder itself when it needs the sidecar step to succeed. When block is
+// non-nil, EnsureFolderAndPoster waits on it — used to prove the background
+// phase doesn't block the synchronous WantAndTrackSeries return.
 type fakeFolderEnsurer struct {
 	called int
 	err    error
+	block  chan struct{}
 }
 
 func (f *fakeFolderEnsurer) EnsureFolderAndPoster(ctx context.Context, seriesID int64) error {
+	if f.block != nil {
+		<-f.block
+	}
 	f.called++
 	return f.err
 }
@@ -153,18 +183,68 @@ func (e *acqTestEnv) procurementStatus(t *testing.T, issueID int64) string {
 	return item.ProcurementStatus
 }
 
+func warningsContain(warnings []string, substr string) bool {
+	for _, w := range warnings {
+		if w == substr {
+			return true
+		}
+	}
+	return false
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────
 
-// TestAcquisition_HappyPath exercises the full untracked-series flow:
-// resolution → tracked → all issues wanted+pending → folder+sidecar →
-// local file moved in → still-missing issues queued via the fake grabber.
-func TestAcquisition_HappyPath(t *testing.T) {
+// TestAcquisition_HappyPath_SyncPhase verifies the synchronous part of the
+// flow: resolution → series tracked → every issue wanted + pending. The
+// returned result carries SeriesID, IssuesWanted, and BackgroundStarted.
+// The slow steps 3-5 are NOT run here (launchBackground is a no-op).
+func TestAcquisition_HappyPath_SyncPhase(t *testing.T) {
+	env := setupAcqTestEnv(t)
+	series, issues := env.seedSeriesWithIssues(t, "Absolute Flash", 2025, "1", "2", "3")
+
+	resolver := &fakeResolver{series: series}
+	svc := newAcqService(env, resolver, &fakeFolderEnsurer{}, newFakeGrabber(), t.TempDir())
+
+	cvID := int64(12345)
+	result, err := svc.WantAndTrackSeries(context.Background(), WantTrackInput{ComicVineID: &cvID})
+	if err != nil {
+		t.Fatalf("WantAndTrackSeries: unexpected error: %v\nwarnings: %v", err, result.Warnings)
+	}
+
+	if resolver.trackFromCVCalled != 1 {
+		t.Errorf("TrackFromComicVine call count: got %d, want 1", resolver.trackFromCVCalled)
+	}
+	if result.SeriesID != series.ID {
+		t.Errorf("result.SeriesID: got %d, want %d", result.SeriesID, series.ID)
+	}
+	if result.IssuesWanted != 3 {
+		t.Errorf("result.IssuesWanted: got %d, want 3", result.IssuesWanted)
+	}
+	if !result.BackgroundStarted {
+		t.Error("result.BackgroundStarted should be true")
+	}
+
+	reloaded, err := env.seriesRepo.GetByID(series.ID)
+	if err != nil || reloaded == nil {
+		t.Fatalf("reloading series: %v", err)
+	}
+	if !reloaded.Tracked {
+		t.Error("series should be marked tracked")
+	}
+	for i := range issues {
+		if got := env.procurementStatus(t, issues[i].ID); got != "pending" {
+			t.Errorf("issue %s procurement_status: got %q, want %q", issues[i].IssueNumber, got, "pending")
+		}
+	}
+}
+
+// TestAcquisition_HappyPath_BackgroundPhase verifies the slow steps 3-5 via a
+// direct, synchronous completeAcquisition call: folder ensured, sidecar
+// written, the loose file for issue #1 moved into the canonical folder and
+// relinked, and the still-missing issues #2/#3 queued via the fake grabber.
+func TestAcquisition_HappyPath_BackgroundPhase(t *testing.T) {
 	env := setupAcqTestEnv(t)
 	libraryDir := t.TempDir()
-
-	// Series with 3 issues. Issue #1 has a loose file in the library that
-	// should get moved into the canonical folder; #2 and #3 are missing and
-	// should be queued via Prowlarr.
 	series, issues := env.seedSeriesWithIssues(t, "Absolute Flash", 2025, "1", "2", "3")
 
 	// A loose file for issue #1, sitting in a non-canonical subdir.
@@ -193,65 +273,37 @@ func TestAcquisition_HappyPath(t *testing.T) {
 		t.Fatalf("mkdir %s: %v", seriesDir, err)
 	}
 
-	resolver := &fakeResolver{series: series}
 	folder := &fakeFolderEnsurer{}
 	grabber := newFakeGrabber()
 	grabber.searchResults["2"] = []prowlarr.Release{{GUID: "guid-2", IndexerID: 7, Title: "Absolute Flash 002"}}
 	grabber.searchResults["3"] = []prowlarr.Release{{GUID: "guid-3", IndexerID: 7, Title: "Absolute Flash 003"}}
 
-	svc := NewAcquisitionService(
-		resolver, folder,
-		NewLibraryScanService(env.seriesRepo),
-		grabber,
-		env.seriesRepo, env.issueRepo, env.fileRepo, env.wantListRepo,
-		libraryDir,
-	)
+	svc := newAcqService(env, &fakeResolver{series: series}, folder, grabber, libraryDir)
 
+	// Sync phase first (wants the issues), then drive the background phase.
 	cvID := int64(12345)
-	result, err := svc.WantAndTrackSeries(context.Background(), WantTrackInput{ComicVineID: &cvID})
-	if err != nil {
-		t.Fatalf("WantAndTrackSeries: unexpected error: %v\nwarnings: %v", err, result.Warnings)
+	if _, err := svc.WantAndTrackSeries(context.Background(), WantTrackInput{ComicVineID: &cvID}); err != nil {
+		t.Fatalf("WantAndTrackSeries (sync): %v", err)
 	}
-
-	// Step 1: resolver was used.
-	if resolver.trackFromCVCalled != 1 {
-		t.Errorf("TrackFromComicVine call count: got %d, want 1", resolver.trackFromCVCalled)
-	}
-	if result.SeriesID != series.ID {
-		t.Errorf("result.SeriesID: got %d, want %d", result.SeriesID, series.ID)
-	}
-
-	// Step 2: series tracked, every issue wanted + pending (issue #1 won't
-	// stay pending forever — but at no point in this flow is it changed away
-	// from pending because it had a local file, so step 5 skipped it).
-	reloaded, err := env.seriesRepo.GetByID(series.ID)
-	if err != nil || reloaded == nil {
-		t.Fatalf("reloading series: %v", err)
-	}
-	if !reloaded.Tracked {
-		t.Error("series should be marked tracked")
-	}
-	if got := env.procurementStatus(t, issues[0].ID); got != "pending" {
-		t.Errorf("issue #1 procurement_status: got %q, want %q (had a local file, not queued)", got, "pending")
-	}
+	bg := svc.completeAcquisition(context.Background(), series, issues)
 
 	// Step 3: folder ensurer called, sidecar written.
 	if folder.called != 1 {
 		t.Errorf("EnsureFolderAndPoster call count: got %d, want 1", folder.called)
 	}
-	if result.FolderPath != seriesDir {
-		t.Errorf("result.FolderPath: got %q, want %q", result.FolderPath, seriesDir)
+	if bg.FolderPath != seriesDir {
+		t.Errorf("bg.FolderPath: got %q, want %q", bg.FolderPath, seriesDir)
 	}
-	if !result.MetadataWritten {
-		t.Errorf("result.MetadataWritten: got false, want true (warnings: %v)", result.Warnings)
+	if !bg.MetadataWritten {
+		t.Errorf("bg.MetadataWritten: got false, want true (warnings: %v)", bg.Warnings)
 	}
 	if !fileExists(filepath.Join(seriesDir, "ComicVine.xml")) {
 		t.Error("ComicVine.xml sidecar was not written")
 	}
 
 	// Step 4: loose file for #1 moved into the canonical folder, DB relinked.
-	if result.FilesMoved != 1 {
-		t.Errorf("result.FilesMoved: got %d, want 1 (warnings: %v)", result.FilesMoved, result.Warnings)
+	if bg.FilesMoved != 1 {
+		t.Errorf("bg.FilesMoved: got %d, want 1 (warnings: %v)", bg.FilesMoved, bg.Warnings)
 	}
 	movedPath := filepath.Join(seriesDir, "Absolute Flash 001.cbz")
 	if !fileExists(movedPath) {
@@ -272,8 +324,8 @@ func TestAcquisition_HappyPath(t *testing.T) {
 	}
 
 	// Step 5: issues #2 and #3 had no local file → searched + grabbed.
-	if result.IssuesQueued != 2 {
-		t.Errorf("result.IssuesQueued: got %d, want 2 (warnings: %v)", result.IssuesQueued, result.Warnings)
+	if bg.IssuesQueued != 2 {
+		t.Errorf("bg.IssuesQueued: got %d, want 2 (warnings: %v)", bg.IssuesQueued, bg.Warnings)
 	}
 	if len(grabber.grabCalls) != 2 {
 		t.Errorf("grab call count: got %d, want 2", len(grabber.grabCalls))
@@ -292,6 +344,54 @@ func TestAcquisition_HappyPath(t *testing.T) {
 	}
 }
 
+// TestAcquisition_BackgroundDoesNotBlockSyncPhase proves the sync/async split:
+// with a folder ensurer that blocks indefinitely, WantAndTrackSeries must
+// still return promptly — the slow steps 3-5 run in a separate goroutine.
+func TestAcquisition_BackgroundDoesNotBlockSyncPhase(t *testing.T) {
+	env := setupAcqTestEnv(t)
+	series, _ := env.seedSeriesWithIssues(t, "Slow Series", 2025, "1")
+
+	folder := &fakeFolderEnsurer{block: make(chan struct{})}
+	svc := NewAcquisitionService(
+		&fakeResolver{series: series}, folder,
+		NewLibraryScanService(env.seriesRepo),
+		newFakeGrabber(),
+		env.seriesRepo, env.issueRepo, env.fileRepo, env.wantListRepo,
+		t.TempDir(),
+	)
+	// Use a real goroutine launch, but track it so the test can join before
+	// teardown closes the DB.
+	var bg sync.WaitGroup
+	svc.launchBackground = func(fn func()) {
+		bg.Add(1)
+		go func() { defer bg.Done(); fn() }()
+	}
+
+	cvID := int64(1)
+	done := make(chan struct{})
+	go func() {
+		_, err := svc.WantAndTrackSeries(context.Background(), WantTrackInput{ComicVineID: &cvID})
+		if err != nil {
+			t.Errorf("WantAndTrackSeries: %v", err)
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Good — returned without waiting on the blocked folder ensurer.
+	case <-time.After(3 * time.Second):
+		close(folder.block) // unblock so the goroutine can exit
+		bg.Wait()
+		t.Fatal("WantAndTrackSeries blocked on the background folder ensurer — sync/async split is broken")
+	}
+
+	// Unblock the background phase and wait for it so the DB isn't closed
+	// out from under it.
+	close(folder.block)
+	bg.Wait()
+}
+
 // TestAcquisition_ConflictPropagation verifies that a typed match-conflict
 // error from the resolver is returned such that errors.As still unwraps to
 // the concrete *SeriesMatchConflictError — the Phase 6 handler relies on this
@@ -303,15 +403,7 @@ func TestAcquisition_ConflictPropagation(t *testing.T) {
 		RequestedSeriesID: 1,
 		ConflictingSeries: &model.Series{ID: 99, Title: "Already Here"},
 	}
-	resolver := &fakeResolver{err: conflict}
-
-	svc := NewAcquisitionService(
-		resolver, &fakeFolderEnsurer{},
-		NewLibraryScanService(env.seriesRepo),
-		newFakeGrabber(),
-		env.seriesRepo, env.issueRepo, env.fileRepo, env.wantListRepo,
-		t.TempDir(),
-	)
+	svc := newAcqService(env, &fakeResolver{err: conflict}, &fakeFolderEnsurer{}, newFakeGrabber(), t.TempDir())
 
 	cvID := int64(777)
 	_, err := svc.WantAndTrackSeries(context.Background(), WantTrackInput{ComicVineID: &cvID})
@@ -328,8 +420,8 @@ func TestAcquisition_ConflictPropagation(t *testing.T) {
 }
 
 // TestAcquisition_ProwlarrFailurePerIssue verifies that a Prowlarr failure on
-// one issue marks just that issue 'failed' and the flow keeps going — the
-// remaining issues are still searched and queued.
+// one issue marks just that issue 'failed' and the background phase keeps
+// going — the remaining issues are still searched and queued.
 func TestAcquisition_ProwlarrFailurePerIssue(t *testing.T) {
 	env := setupAcqTestEnv(t)
 	libraryDir := t.TempDir()
@@ -340,56 +432,39 @@ func TestAcquisition_ProwlarrFailurePerIssue(t *testing.T) {
 		t.Fatalf("mkdir %s: %v", seriesDir, err)
 	}
 
-	resolver := &fakeResolver{series: series}
 	grabber := newFakeGrabber()
-	// #1 search fails outright.
-	grabber.searchErr["1"] = errors.New("indexer timeout")
-	// #2 succeeds.
-	grabber.searchResults["2"] = []prowlarr.Release{{GUID: "guid-2", IndexerID: 1}}
-	// #3 search returns a result but the grab fails.
-	grabber.searchResults["3"] = []prowlarr.Release{{GUID: "guid-3", IndexerID: 1}}
-	grabber.grabErr["guid-3"] = errors.New("download client rejected")
+	grabber.searchErr["1"] = errors.New("indexer timeout")                          // #1 search fails outright
+	grabber.searchResults["2"] = []prowlarr.Release{{GUID: "guid-2", IndexerID: 1}}  // #2 succeeds
+	grabber.searchResults["3"] = []prowlarr.Release{{GUID: "guid-3", IndexerID: 1}}  // #3 result found
+	grabber.grabErr["guid-3"] = errors.New("download client rejected")              // ...but grab fails
 
-	svc := NewAcquisitionService(
-		resolver, &fakeFolderEnsurer{},
-		NewLibraryScanService(env.seriesRepo),
-		grabber,
-		env.seriesRepo, env.issueRepo, env.fileRepo, env.wantListRepo,
-		libraryDir,
-	)
+	svc := newAcqService(env, &fakeResolver{series: series}, &fakeFolderEnsurer{}, grabber, libraryDir)
 
 	cvID := int64(42)
-	result, err := svc.WantAndTrackSeries(context.Background(), WantTrackInput{ComicVineID: &cvID})
-	if err != nil {
-		t.Fatalf("WantAndTrackSeries: unexpected error: %v", err)
+	if _, err := svc.WantAndTrackSeries(context.Background(), WantTrackInput{ComicVineID: &cvID}); err != nil {
+		t.Fatalf("WantAndTrackSeries (sync): %v", err)
 	}
+	bg := svc.completeAcquisition(context.Background(), series, issues)
 
-	// All three issues were searched — the flow did not abort on #1's failure.
+	// All three issues were searched — the background phase did not abort on
+	// #1's failure.
 	if len(grabber.searchCalls) != 3 {
-		t.Errorf("search call count: got %d, want 3 (flow should not abort on a per-issue failure)", len(grabber.searchCalls))
+		t.Errorf("search call count: got %d, want 3 (must not abort on a per-issue failure)", len(grabber.searchCalls))
 	}
-
-	// #1: search failed → 'failed'.
 	if got := env.procurementStatus(t, issues[0].ID); got != "failed" {
 		t.Errorf("issue #1 procurement_status: got %q, want %q", got, "failed")
 	}
-	// #2: succeeded → 'submitted'.
 	if got := env.procurementStatus(t, issues[1].ID); got != "submitted" {
 		t.Errorf("issue #2 procurement_status: got %q, want %q", got, "submitted")
 	}
-	// #3: grab failed → 'failed'.
 	if got := env.procurementStatus(t, issues[2].ID); got != "failed" {
 		t.Errorf("issue #3 procurement_status: got %q, want %q", got, "failed")
 	}
-
-	// Only #2 actually counts as queued.
-	if result.IssuesQueued != 1 {
-		t.Errorf("result.IssuesQueued: got %d, want 1", result.IssuesQueued)
+	if bg.IssuesQueued != 1 {
+		t.Errorf("bg.IssuesQueued: got %d, want 1", bg.IssuesQueued)
 	}
-
-	// The failures show up as warnings, with the issue's last-error recorded.
-	if len(result.Warnings) < 2 {
-		t.Errorf("expected at least 2 warnings for the two failed issues, got %d: %v", len(result.Warnings), result.Warnings)
+	if len(bg.Warnings) < 2 {
+		t.Errorf("expected at least 2 warnings for the two failed issues, got %d: %v", len(bg.Warnings), bg.Warnings)
 	}
 	item1, _ := env.wantListRepo.GetByIssueID(issues[0].ID)
 	if item1 == nil || item1.ProcurementLastError == nil || *item1.ProcurementLastError == "" {
@@ -405,12 +480,10 @@ func TestAcquisition_ZeroPaddedIssueNumber(t *testing.T) {
 	env := setupAcqTestEnv(t)
 	libraryDir := t.TempDir()
 
-	// Seed series with zero-padded issue numbers.
 	series, issues := env.seedSeriesWithIssues(t, "Zero Pad Comics", 2025, "001", "002")
 
 	// Loose file for issue "001" — the ComicInfo reports Number "1" (no pad),
-	// so the scan key normalises to "1". Previously this missed the DB row
-	// "001" because FindBySeriesAndNumber did an exact string match.
+	// so the scan key normalises to "1".
 	looseDir := filepath.Join(libraryDir, "incoming")
 	if err := os.MkdirAll(looseDir, 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -432,23 +505,16 @@ func TestAcquisition_ZeroPaddedIssueNumber(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 
-	svc := NewAcquisitionService(
-		&fakeResolver{series: series}, &fakeFolderEnsurer{},
-		NewLibraryScanService(env.seriesRepo),
-		nil, // Prowlarr not needed for this test
-		env.seriesRepo, env.issueRepo, env.fileRepo, env.wantListRepo,
-		libraryDir,
-	)
+	svc := newAcqService(env, &fakeResolver{series: series}, &fakeFolderEnsurer{}, nil, libraryDir)
 
 	cvID := int64(99)
-	result, err := svc.WantAndTrackSeries(context.Background(), WantTrackInput{ComicVineID: &cvID})
-	if err != nil {
-		t.Fatalf("WantAndTrackSeries: unexpected error: %v\nwarnings: %v", err, result.Warnings)
+	if _, err := svc.WantAndTrackSeries(context.Background(), WantTrackInput{ComicVineID: &cvID}); err != nil {
+		t.Fatalf("WantAndTrackSeries (sync): %v", err)
 	}
+	bg := svc.completeAcquisition(context.Background(), series, issues)
 
-	// File must have moved.
-	if result.FilesMoved != 1 {
-		t.Errorf("result.FilesMoved: got %d, want 1 (zero-padded issue not matched)\nwarnings: %v", result.FilesMoved, result.Warnings)
+	if bg.FilesMoved != 1 {
+		t.Errorf("bg.FilesMoved: got %d, want 1 (zero-padded issue not matched)\nwarnings: %v", bg.FilesMoved, bg.Warnings)
 	}
 	movedPath := filepath.Join(seriesDir, "Zero Pad Comics 001.cbz")
 	if !fileExists(movedPath) {
@@ -457,8 +523,6 @@ func TestAcquisition_ZeroPaddedIssueNumber(t *testing.T) {
 	if fileExists(loosePath) {
 		t.Errorf("file still at old loose path %q — move failed", loosePath)
 	}
-
-	// DB row must be relinked to the zero-padded issue.
 	relinked, err := env.fileRepo.GetByID(cf.ID)
 	if err != nil || relinked == nil {
 		t.Fatalf("reloading comic_files row: %v", err)
@@ -473,37 +537,12 @@ func TestAcquisition_ZeroPaddedIssueNumber(t *testing.T) {
 
 // TestAcquisition_MetronHappyPath exercises the Metron resolution path:
 // MetronID → placeholder created → MatchSeriesToMetronVolume succeeds →
-// series resolved and tracked, issues wanted.
+// series resolved and tracked. The fake resolver doesn't populate issues, so
+// the sync phase wants nothing — we verify the control flow, not metadata.
 func TestAcquisition_MetronHappyPath(t *testing.T) {
 	env := setupAcqTestEnv(t)
-	libraryDir := t.TempDir()
-
-	// Pre-seed the issues so step 2 finds them. We use the same env.issueRepo
-	// as the service, so ListBySeries will see them. The series row itself is
-	// created inside resolveSeries (as a placeholder), so we pre-create it
-	// here with a known ID to let seedSeriesWithIssues give us the issues.
-	// However, that's circular — instead we let the flow create the placeholder
-	// and we verify the post-condition independently.
-	//
-	// The fakeResolver.MatchSeriesToMetronVolume does nothing to the DB (it's
-	// a fake), so the placeholder row remains with title "metron-42". That's
-	// fine — we're testing the control flow, not real Metron metadata.
-	//
-	// Because the placeholder has no issues, ListBySeries will return an empty
-	// slice — steps 3/4/5 are no-ops but must not error. We verify:
-	//   - the flow returns a non-zero SeriesID
-	//   - the series exists in the DB and is marked tracked
-	//   - matchToMetronCalled == 1
-	//   - no error returned
-
 	resolver := &fakeResolver{} // err == nil → success
-	svc := NewAcquisitionService(
-		resolver, &fakeFolderEnsurer{},
-		NewLibraryScanService(env.seriesRepo),
-		nil,
-		env.seriesRepo, env.issueRepo, env.fileRepo, env.wantListRepo,
-		libraryDir,
-	)
+	svc := newAcqService(env, resolver, &fakeFolderEnsurer{}, nil, t.TempDir())
 
 	metronID := int64(42)
 	result, err := svc.WantAndTrackSeries(context.Background(), WantTrackInput{MetronID: &metronID})
@@ -517,7 +556,6 @@ func TestAcquisition_MetronHappyPath(t *testing.T) {
 		t.Errorf("MatchSeriesToMetronVolume call count: got %d, want 1", resolver.matchToMetronCalled)
 	}
 
-	// Series must exist in the DB and be tracked.
 	reloaded, err := env.seriesRepo.GetByID(result.SeriesID)
 	if err != nil || reloaded == nil {
 		t.Fatalf("reloading series after Metron resolve: err=%v series=%v", err, reloaded)
@@ -527,23 +565,15 @@ func TestAcquisition_MetronHappyPath(t *testing.T) {
 	}
 }
 
-// TestAcquisition_MetronMatchFailureNoLeak verifies Fix I1: when
+// TestAcquisition_MetronMatchFailureNoLeak verifies that when
 // MatchSeriesToMetronVolume fails, the placeholder series row is deleted so no
-// orphaned row is left in the DB. Both the error return and the absence of the
-// row are checked.
+// orphaned row is left in the DB.
 func TestAcquisition_MetronMatchFailureNoLeak(t *testing.T) {
 	env := setupAcqTestEnv(t)
 
 	matchErr := errors.New("metron: volume not found")
 	resolver := &fakeResolver{err: matchErr}
-
-	svc := NewAcquisitionService(
-		resolver, &fakeFolderEnsurer{},
-		NewLibraryScanService(env.seriesRepo),
-		nil,
-		env.seriesRepo, env.issueRepo, env.fileRepo, env.wantListRepo,
-		t.TempDir(),
-	)
+	svc := newAcqService(env, resolver, &fakeFolderEnsurer{}, nil, t.TempDir())
 
 	metronID := int64(99)
 	_, err := svc.WantAndTrackSeries(context.Background(), WantTrackInput{MetronID: &metronID})
@@ -554,8 +584,6 @@ func TestAcquisition_MetronMatchFailureNoLeak(t *testing.T) {
 		t.Errorf("error should wrap the match error; got: %v", err)
 	}
 
-	// The placeholder row must be gone — verify by listing all series.
-	// We check that no series with the placeholder title pattern exists.
 	all, _, err2 := env.seriesRepo.List(1, 1000, "title", "asc")
 	if err2 != nil {
 		t.Fatalf("listing series after failed Metron match: %v", err2)
@@ -572,7 +600,7 @@ func TestAcquisition_MetronMatchFailureNoLeak(t *testing.T) {
 
 // TestAcquisition_NoProwlarrSkipsQueue verifies that a nil prowlarr client
 // skips step 5 entirely with a single warning — and crucially does NOT mark
-// the missing issues 'failed' (they stay 'pending' from step 2).
+// the missing issues 'failed' (they stay 'pending' from the sync phase).
 func TestAcquisition_NoProwlarrSkipsQueue(t *testing.T) {
 	env := setupAcqTestEnv(t)
 	libraryDir := t.TempDir()
@@ -583,21 +611,16 @@ func TestAcquisition_NoProwlarrSkipsQueue(t *testing.T) {
 		t.Fatalf("mkdir %s: %v", seriesDir, err)
 	}
 
-	svc := NewAcquisitionService(
-		&fakeResolver{series: series}, &fakeFolderEnsurer{},
-		NewLibraryScanService(env.seriesRepo),
-		nil, // no Prowlarr
-		env.seriesRepo, env.issueRepo, env.fileRepo, env.wantListRepo,
-		libraryDir,
-	)
+	svc := newAcqService(env, &fakeResolver{series: series}, &fakeFolderEnsurer{}, nil, libraryDir)
 
 	cvID := int64(1)
-	result, err := svc.WantAndTrackSeries(context.Background(), WantTrackInput{ComicVineID: &cvID})
-	if err != nil {
-		t.Fatalf("WantAndTrackSeries: unexpected error: %v", err)
+	if _, err := svc.WantAndTrackSeries(context.Background(), WantTrackInput{ComicVineID: &cvID}); err != nil {
+		t.Fatalf("WantAndTrackSeries (sync): %v", err)
 	}
-	if result.IssuesQueued != 0 {
-		t.Errorf("result.IssuesQueued: got %d, want 0", result.IssuesQueued)
+	bg := svc.completeAcquisition(context.Background(), series, issues)
+
+	if bg.IssuesQueued != 0 {
+		t.Errorf("bg.IssuesQueued: got %d, want 0", bg.IssuesQueued)
 	}
 	for i := range issues {
 		if got := env.procurementStatus(t, issues[i].ID); got != "pending" {
@@ -605,13 +628,7 @@ func TestAcquisition_NoProwlarrSkipsQueue(t *testing.T) {
 				issues[i].IssueNumber, got, "pending")
 		}
 	}
-	foundSkipWarning := false
-	for _, w := range result.Warnings {
-		if w == "Prowlarr is not configured — skipping download queue step" {
-			foundSkipWarning = true
-		}
-	}
-	if !foundSkipWarning {
-		t.Errorf("expected a 'Prowlarr is not configured' warning, got: %v", result.Warnings)
+	if !warningsContain(bg.Warnings, "Prowlarr is not configured — skipping download queue step") {
+		t.Errorf("expected a 'Prowlarr is not configured' warning, got: %v", bg.Warnings)
 	}
 }

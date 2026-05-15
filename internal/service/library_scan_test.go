@@ -2,6 +2,7 @@ package service
 
 import (
 	"archive/zip"
+	"context"
 	"encoding/xml"
 	"os"
 	"path/filepath"
@@ -387,7 +388,7 @@ func TestLibraryScan_CanonicalFoldersSkipped(t *testing.T) {
 	canonicalSet := map[string]bool{
 		"Batman (2016)": true,
 	}
-	result, err := svc.findFilesWithSkipSet(dir, &model.Series{Title: "Batman", Year: &year}, canonicalSet)
+	result, err := svc.findFilesWithSkipSet(context.Background(), dir, &model.Series{Title: "Batman", Year: &year}, canonicalSet)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -435,10 +436,11 @@ func TestLibraryScan_AnnualDetectionViaComicInfoFormat(t *testing.T) {
 // --- Internal helpers exposed for testing ---
 
 // findFilesNoSkip is a test helper that calls findFilesWithSkipSet with an
-// empty canonical folder skip set (no seriesRepo needed).
+// empty canonical folder skip set (no seriesRepo needed) and a background
+// context (cancellation is exercised separately, not through this helper).
 func (s *LibraryScanService) findFilesNoSkip(
 	libraryDir string,
 	series *model.Series,
 ) (FindFilesResult, error) {
-	return s.findFilesWithSkipSet(libraryDir, series, map[string]bool{})
+	return s.findFilesWithSkipSet(context.Background(), libraryDir, series, map[string]bool{})
 }

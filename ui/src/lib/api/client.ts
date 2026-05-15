@@ -302,13 +302,21 @@ export interface WantListItem {
 	procurement_last_error?: string;
 }
 
-// Result of POST /pull-list/want-track — the full want+track acquisition flow.
+// Result of POST /pull-list/want-track. The synchronous response only carries
+// series_id, issues_wanted, and background_started — the series is resolved,
+// tracked, and every issue is wanted before the response returns. The slow
+// steps (folder + metadata sidecars, local-file scan/move, Prowlarr queueing)
+// run in a background goroutine; their progress shows up as procurement_status
+// on the Wanted page. The remaining fields are populated server-side only for
+// logging and are not present in the HTTP response.
 export interface WantTrackResult {
 	series_id: number;
-	folder_path: string;
-	metadata_written: boolean;
-	files_moved: number;
-	issues_queued: number;
+	issues_wanted: number;
+	background_started: boolean;
+	folder_path?: string;
+	metadata_written?: boolean;
+	files_moved?: number;
+	issues_queued?: number;
 	warnings?: string[];
 }
 
