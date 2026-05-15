@@ -1819,6 +1819,18 @@ func (s *MetadataService) TrackFromComicVine(cvVolumeID int, wantListRepo *repos
 				series.Year = &year
 			}
 		}
+
+		// Pre-flight ux_series_norm_title_year before INSERT. If a local series
+		// already holds this normalized title+year under a different CV ID, the
+		// Create below blows up with a raw "UNIQUE constraint failed" error.
+		// Surface a typed conflict so writeMatchConflict returns 409 MERGE_REQUIRED
+		// and the UI can offer "Go to <existing>" instead of leaking SQL.
+		if conflict, cErr := s.seriesRepo.FindByNormalizedTitleYear(series.Title, series.Year, 0); cErr == nil && conflict != nil {
+			return nil, 0, &SeriesMatchConflictError{
+				ConflictingSeries: conflict,
+			}
+		}
+
 		if err := s.seriesRepo.Create(series); err != nil {
 			return nil, 0, fmt.Errorf("creating series: %w", err)
 		}
