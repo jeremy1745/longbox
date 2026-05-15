@@ -33,10 +33,17 @@ import (
 // or MetronID should be set. SourceIssueID is the issue the user clicked from
 // a pull-list "+" — informational only; the flow wants ALL issues of the
 // series, not a partial range.
+//
+// LinkToSeriesID is set when the user is resolving a prior
+// SeriesMatchConflictError by explicitly opting into "Track under existing":
+// instead of creating a new series, link this existing local series to the
+// given ComicVineID and continue. ComicVineID must be set when LinkToSeriesID
+// is set.
 type WantTrackInput struct {
-	ComicVineID   *int64
-	MetronID      *int64
-	SourceIssueID *int64
+	ComicVineID    *int64
+	MetronID       *int64
+	SourceIssueID  *int64
+	LinkToSeriesID *int64
 }
 
 // WantTrackResult summarizes what WantAndTrackSeries did. The synchronous HTTP
@@ -72,6 +79,10 @@ type seriesResolver interface {
 	// populates its issues. wantAll is left false here — acquisition does
 	// its own want-list handling.
 	TrackFromComicVine(cvVolumeID int, wantListRepo *repository.WantListRepo, wantAll ...bool) (*model.Series, int, error)
+	// MatchSeriesToVolume binds an EXISTING local series row to a CV
+	// volume. Used by the link-existing path when the user resolves a
+	// SeriesMatchConflictError by opting into "Track under existing".
+	MatchSeriesToVolume(ctx context.Context, seriesID int64, cvVolumeID int) error
 	// MatchSeriesToMetronVolume binds an EXISTING local series row to a
 	// Metron series and populates issues.
 	MatchSeriesToMetronVolume(ctx context.Context, seriesID int64, metronSeriesID int) error
@@ -271,6 +282,26 @@ func (s *AcquisitionService) completeAcquisition(ctx context.Context, series *mo
 // resolveSeries handles step 1 — turning the input identifier into a local
 // series row. Conflict errors are returned as-is so errors.As still works.
 func (s *AcquisitionService) resolveSeries(ctx context.Context, in WantTrackInput) (*model.Series, error) {
+	// Link-existing path: user is resolving a prior SeriesMatchConflictError
+	// by explicitly opting into "Track under existing". Skip the create
+	// path; link the named local series to the CV volume instead.
+	if in.LinkToSeriesID != nil {
+		if in.ComicVineID == nil {
+			return nil, fmt.Errorf("linking series: link_to_series_id requires comicvine_id")
+		}
+		if err := s.resolver.MatchSeriesToVolume(ctx, *in.LinkToSeriesID, int(*in.ComicVineID)); err != nil {
+			return nil, fmt.Errorf("linking series to ComicVine: %w", err)
+		}
+		series, err := s.seriesRepo.GetByID(*in.LinkToSeriesID)
+		if err != nil {
+			return nil, fmt.Errorf("linking series: reloading: %w", err)
+		}
+		if series == nil {
+			return nil, fmt.Errorf("linking series: series %d not found after match", *in.LinkToSeriesID)
+		}
+		return series, nil
+	}
+
 	switch {
 	case in.ComicVineID != nil:
 		// wantAll=false: acquisition does its own want-list handling in step 2.

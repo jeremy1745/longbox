@@ -16,15 +16,27 @@
 	} = $props();
 
 	let loading = $state(false);
+	let linking = $state(false);
 	let result = $state<WantTrackResult | null>(null);
 	let error = $state<string | null>(null);
 	// Conflict state: a series with this title+year already exists in the library.
 	// Unlike ComicVineSearch's merge prompt, there is NO source series to merge FROM
 	// here (the user is tracking a series that isn't in LongBox yet) — so the backend
-	// omits requested_series_id and we offer navigation, not a merge.
+	// omits requested_series_id. The user picks between navigating to the existing
+	// series or explicitly linking it to this CV volume and continuing the flow.
 	let conflict = $state<{ seriesId: number; title: string; message: string } | null>(null);
 
 	let canTrack = $derived(!!comicvineId || !!metronId);
+
+	async function postWantTrack(body: Record<string, number>): Promise<Response> {
+		// Raw fetch (not ApiClient) so we can read the 409 conflict body.
+		return fetch('/api/v1/pull-list/want-track', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(body),
+			credentials: 'include',
+		});
+	}
 
 	async function track() {
 		if (loading || !canTrack) return;
@@ -38,13 +50,7 @@
 			if (metronId) body.metron_id = metronId;
 			if (sourceIssueId) body.source_issue_id = sourceIssueId;
 
-			// Raw fetch (not ApiClient) so we can read the 409 conflict body.
-			const res = await fetch('/api/v1/pull-list/want-track', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify(body),
-				credentials: 'include',
-			});
+			const res = await postWantTrack(body);
 
 			if (res.status === 409) {
 				const data = await res.json().catch(() => null);
@@ -71,6 +77,35 @@
 			error = e instanceof Error ? e.message : 'Track failed';
 		} finally {
 			loading = false;
+		}
+	}
+
+	// linkExisting resolves a merge-required conflict by binding the existing
+	// local series to this CV volume and continuing the normal Want+Track flow.
+	async function linkExisting() {
+		if (linking || !conflict || !comicvineId) return;
+		linking = true;
+		error = null;
+		try {
+			const body: Record<string, number> = {
+				comicvine_id: comicvineId,
+				link_to_series_id: conflict.seriesId,
+			};
+			if (sourceIssueId) body.source_issue_id = sourceIssueId;
+
+			const res = await postWantTrack(body);
+			if (!res.ok) {
+				const data = await res.json().catch(() => null);
+				error = data?.error?.message || `HTTP ${res.status}`;
+				return;
+			}
+			result = (await res.json()) as WantTrackResult;
+			conflict = null;
+			onTracked?.(result);
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Link failed';
+		} finally {
+			linking = false;
 		}
 	}
 
@@ -122,12 +157,22 @@
 	{/if}
 
 	{#if conflict}
-		<div class="mt-1 {variant === 'compact' ? 'absolute right-0 z-10 w-64' : ''} bg-amber-900/20 border border-amber-700/60 rounded-lg p-2.5 space-y-1.5 shadow-lg">
+		<div class="mt-1 {variant === 'compact' ? 'absolute right-0 z-10 w-72' : ''} bg-amber-900/20 border border-amber-700/60 rounded-lg p-2.5 space-y-1.5 shadow-lg">
 			<p class="text-xs text-amber-200">{conflict.message}</p>
-			<div class="flex gap-2">
+			<div class="flex flex-wrap gap-2">
+				{#if comicvineId}
+					<button
+						onclick={linkExisting}
+						disabled={linking}
+						class="px-2.5 py-1 text-xs bg-amber-500 hover:bg-amber-600 text-gray-900 font-semibold rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+						title="Link the existing local series to this ComicVine volume and continue the Want+Track flow"
+					>
+						{linking ? 'Linking…' : `Track under ${conflict.title}`}
+					</button>
+				{/if}
 				<a
 					href="/library/{conflict.seriesId}"
-					class="px-2.5 py-1 text-xs bg-amber-500 hover:bg-amber-600 text-gray-900 font-semibold rounded transition-colors"
+					class="px-2.5 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-200 rounded transition-colors"
 				>
 					Go to {conflict.title}
 				</a>

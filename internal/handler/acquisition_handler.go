@@ -35,9 +35,10 @@ func NewAcquisitionHandler(
 // At least one of comicvine_id or metron_id is required.
 func (h *AcquisitionHandler) WantTrack(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ComicVineID   *int64 `json:"comicvine_id"`
-		MetronID      *int64 `json:"metron_id"`
-		SourceIssueID *int64 `json:"source_issue_id"`
+		ComicVineID    *int64 `json:"comicvine_id"`
+		MetronID       *int64 `json:"metron_id"`
+		SourceIssueID  *int64 `json:"source_issue_id"`
+		LinkToSeriesID *int64 `json:"link_to_series_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
@@ -49,9 +50,10 @@ func (h *AcquisitionHandler) WantTrack(w http.ResponseWriter, r *http.Request) {
 	}
 
 	input := service.WantTrackInput{
-		ComicVineID:   req.ComicVineID,
-		MetronID:      req.MetronID,
-		SourceIssueID: req.SourceIssueID,
+		ComicVineID:    req.ComicVineID,
+		MetronID:       req.MetronID,
+		SourceIssueID:  req.SourceIssueID,
+		LinkToSeriesID: req.LinkToSeriesID,
 	}
 
 	result, err := h.acqSvc.WantAndTrackSeries(r.Context(), input)

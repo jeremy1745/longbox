@@ -102,6 +102,7 @@ type fakeResolver struct {
 	series              *model.Series
 	err                 error
 	trackFromCVCalled   int
+	matchToCVCalled     int
 	matchToMetronCalled int
 }
 
@@ -111,6 +112,11 @@ func (f *fakeResolver) TrackFromComicVine(cvVolumeID int, wl *repository.WantLis
 		return nil, 0, f.err
 	}
 	return f.series, 0, nil
+}
+
+func (f *fakeResolver) MatchSeriesToVolume(ctx context.Context, seriesID int64, cvVolumeID int) error {
+	f.matchToCVCalled++
+	return f.err
 }
 
 func (f *fakeResolver) MatchSeriesToMetronVolume(ctx context.Context, seriesID int64, metronSeriesID int) error {
