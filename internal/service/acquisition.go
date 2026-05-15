@@ -571,24 +571,24 @@ func (s *AcquisitionService) RetryIssue(ctx context.Context, issueID int64) (*mo
 		year = *series.Year
 	}
 
-	releases, err := s.prowlarrClient.SearchIssue(ctx, series.Title, issue.IssueNumber, year)
-	if err != nil {
-		_ = s.wantListRepo.SetProcurementStatus(issueID, "failed", fmt.Sprintf("prowlarr search failed: %v", err))
-		return nil, fmt.Errorf("retry: prowlarr search: %w", err)
-	}
-	if len(releases) == 0 {
+	// A failed procurement is a NORMAL outcome — it's recorded on the want_list
+	// row as procurement_status='failed' with the reason in procurement_last_error.
+	// Only infrastructure failures (above) return an error. A search/grab miss
+	// returns the reloaded item so the caller renders the updated 'failed' state
+	// instead of seeing a 500 and a stale row.
+	releases, searchErr := s.prowlarrClient.SearchIssue(ctx, series.Title, issue.IssueNumber, year)
+	switch {
+	case searchErr != nil:
+		_ = s.wantListRepo.SetProcurementStatus(issueID, "failed", fmt.Sprintf("prowlarr search failed: %v", searchErr))
+	case len(releases) == 0:
 		_ = s.wantListRepo.SetProcurementStatus(issueID, "failed", "no results")
-		return nil, fmt.Errorf("retry: prowlarr search returned no results")
-	}
-
-	best := releases[0]
-	if err := s.prowlarrClient.GrabRelease(ctx, best.GUID, best.IndexerID); err != nil {
-		_ = s.wantListRepo.SetProcurementStatus(issueID, "failed", fmt.Sprintf("prowlarr grab failed: %v", err))
-		return nil, fmt.Errorf("retry: prowlarr grab: %w", err)
-	}
-
-	if err := s.wantListRepo.SetProcurementStatus(issueID, "submitted", ""); err != nil {
-		slog.Warn("retry: grab succeeded but could not mark submitted", "issue_id", issueID, "error", err)
+	default:
+		best := releases[0]
+		if grabErr := s.prowlarrClient.GrabRelease(ctx, best.GUID, best.IndexerID); grabErr != nil {
+			_ = s.wantListRepo.SetProcurementStatus(issueID, "failed", fmt.Sprintf("prowlarr grab failed: %v", grabErr))
+		} else if err := s.wantListRepo.SetProcurementStatus(issueID, "submitted", ""); err != nil {
+			slog.Warn("retry: grab succeeded but could not mark submitted", "issue_id", issueID, "error", err)
+		}
 	}
 
 	item, err := s.wantListRepo.GetByIssueID(issueID)

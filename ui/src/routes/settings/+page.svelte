@@ -248,6 +248,14 @@
 			if (settings?.library_dir) {
 				libraryDirInput = settings.library_dir;
 			}
+			// Hydrate the Prowlarr inputs from persisted settings so editing one
+			// field (e.g. the URL) doesn't blank out a saved URL/category.
+			if (settings?.prowlarr_url) {
+				prowlarrUrlInput = settings.prowlarr_url;
+			}
+			if (settings?.prowlarr_category) {
+				prowlarrCategoryInput = settings.prowlarr_category;
+			}
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load settings';
 		} finally {

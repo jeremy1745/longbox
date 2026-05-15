@@ -61,9 +61,11 @@ func NewSettingsHandler(
 func (h *SettingsHandler) GetSettings(w http.ResponseWriter, r *http.Request) {
 	settings := h.metaSvc.GetSettings()
 
-	// Prowlarr status — surface URL and configured bool; never expose the key.
+	// Prowlarr status — surface URL, category, and configured bool; never expose the key.
 	prowlarrURL, _ := h.settingRepo.Get("prowlarr_url")
+	prowlarrCategory, _ := h.settingRepo.Get("prowlarr_category")
 	settings["prowlarr_url"] = prowlarrURL
+	settings["prowlarr_category"] = prowlarrCategory
 	settings["prowlarr_configured"] = h.prowlarrClient != nil && h.prowlarrClient.Configured()
 
 	writeJSON(w, http.StatusOK, settings)

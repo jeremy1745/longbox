@@ -231,6 +231,7 @@ export interface Settings {
 	metron_burst_remaining: number;
 	metron_sustained_remaining: number;
 	prowlarr_url: string;
+	prowlarr_category: string;
 	prowlarr_configured: boolean;
 	library_dir: string;
 	pull_list_enabled: boolean;
