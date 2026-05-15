@@ -370,6 +370,24 @@ func (r *WantListRepo) SetProcurementStatus(issueID int64, status string, errMsg
 	return nil
 }
 
+// MarkSeriesPending promotes every want_list row for the given series from the
+// 'none' procurement status to 'pending', so the pull-list refresh pass enqueues
+// newly-discovered missing issues of tracked series for procurement. Rows already
+// in a later state (submitted/acquired/failed) are left untouched. Returns the
+// number of rows promoted.
+func (r *WantListRepo) MarkSeriesPending(seriesID int64) (int, error) {
+	res, err := r.write.Exec(`
+		UPDATE want_list
+		SET procurement_status = 'pending'
+		WHERE procurement_status = 'none'
+		  AND issue_id IN (SELECT id FROM issues WHERE series_id = ?)`, seriesID)
+	if err != nil {
+		return 0, fmt.Errorf("marking series want list pending: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 // ListByProcurementStatus returns want list items with the given procurement_status.
 func (r *WantListRepo) ListByProcurementStatus(status string) ([]model.WantListItem, error) {
 	rows, err := r.read.Query(`

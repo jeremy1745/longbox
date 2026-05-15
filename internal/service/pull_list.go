@@ -314,6 +314,18 @@ func (s *PullListService) RefreshPullList() error {
 				"title", series.Title,
 				"error", err,
 			)
+			continue
+		}
+		// Promote this tracked series' want_list rows from 'none' to 'pending'
+		// so newly-discovered future issues get queued for procurement —
+		// otherwise "want all proceeding issues" only enqueues issues that
+		// existed at track time.
+		if _, err := s.wantListRepo.MarkSeriesPending(series.ID); err != nil {
+			slog.Warn("failed to mark series want list pending",
+				"series_id", series.ID,
+				"title", series.Title,
+				"error", err,
+			)
 		}
 	}
 

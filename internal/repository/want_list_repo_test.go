@@ -229,3 +229,56 @@ func TestProcurementStatus(t *testing.T) {
 		t.Error("expected error for unknown issueID, got nil")
 	}
 }
+
+// TestMarkSeriesPending covers the pull-list refresh promotion: 'none' rows for
+// the series become 'pending'; rows already in a later state are left alone.
+func TestMarkSeriesPending(t *testing.T) {
+	db := setupWantListTestDB(t)
+	defer db.Close()
+	repo := NewWantListRepo(db, db)
+
+	// Issue 101: a freshly-wanted row, defaults to procurement_status 'none'.
+	if _, err := repo.Create(101, 0, ""); err != nil {
+		t.Fatalf("Create 101: %v", err)
+	}
+	// Issue 102: already wanted AND already submitted — must NOT be touched.
+	if _, err := repo.Create(102, 0, ""); err != nil {
+		t.Fatalf("Create 102: %v", err)
+	}
+	if err := repo.SetProcurementStatus(102, "submitted", ""); err != nil {
+		t.Fatalf("SetProcurementStatus 102: %v", err)
+	}
+
+	n, err := repo.MarkSeriesPending(1)
+	if err != nil {
+		t.Fatalf("MarkSeriesPending: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("expected 1 row promoted, got %d", n)
+	}
+
+	got101, err := repo.GetByIssueID(101)
+	if err != nil || got101 == nil {
+		t.Fatalf("GetByIssueID 101: %v", err)
+	}
+	if got101.ProcurementStatus != "pending" {
+		t.Errorf("issue 101: expected 'pending', got %q", got101.ProcurementStatus)
+	}
+
+	got102, err := repo.GetByIssueID(102)
+	if err != nil || got102 == nil {
+		t.Fatalf("GetByIssueID 102: %v", err)
+	}
+	if got102.ProcurementStatus != "submitted" {
+		t.Errorf("issue 102: expected 'submitted' (untouched), got %q", got102.ProcurementStatus)
+	}
+
+	// Idempotent: a second call promotes nothing (no 'none' rows left).
+	n2, err := repo.MarkSeriesPending(1)
+	if err != nil {
+		t.Fatalf("MarkSeriesPending (2nd): %v", err)
+	}
+	if n2 != 0 {
+		t.Errorf("expected 0 rows promoted on second call, got %d", n2)
+	}
+}
