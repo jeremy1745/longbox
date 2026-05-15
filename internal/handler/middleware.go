@@ -164,3 +164,13 @@ func (w *statusWriter) WriteHeader(status int) {
 	w.status = status
 	w.ResponseWriter.WriteHeader(status)
 }
+
+// Flush delegates to the wrapped ResponseWriter so SSE handlers (which
+// type-assert w.(http.Flusher)) keep working through the Logger middleware.
+// Without this, /api/v1/events returns 500 "streaming not supported" on every
+// request and the browser re-subscribes in a tight loop.
+func (w *statusWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}

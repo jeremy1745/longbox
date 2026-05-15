@@ -103,17 +103,19 @@ func (h *JobHandler) Cancel(w http.ResponseWriter, r *http.Request) {
 // Events provides an SSE stream of real-time job updates.
 // GET /api/v1/events
 func (h *JobHandler) Events(w http.ResponseWriter, r *http.Request) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeError(w, http.StatusInternalServerError, "SSE_UNSUPPORTED", "streaming not supported")
-		return
-	}
+	// Use ResponseController so we Flush through any wrapping middleware
+	// (Logger's statusWriter, etc.) — type-asserting w.(http.Flusher) used
+	// to fail there and 500 every SSE request.
+	rc := http.NewResponseController(w)
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
-	flusher.Flush()
+	if err := rc.Flush(); err != nil {
+		slog.Warn("SSE flush after headers failed", "error", err)
+		return
+	}
 
 	// Subscribe to events
 	ch := h.eventBus.Subscribe()
@@ -123,7 +125,10 @@ func (h *JobHandler) Events(w http.ResponseWriter, r *http.Request) {
 
 	// Send a connection-established event
 	fmt.Fprintf(w, "data: {\"type\":\"connected\"}\n\n")
-	flusher.Flush()
+	if err := rc.Flush(); err != nil {
+		slog.Warn("SSE flush after connected event failed", "error", err)
+		return
+	}
 
 	// Stream events until client disconnects
 	ctx := r.Context()
@@ -142,7 +147,10 @@ func (h *JobHandler) Events(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			w.Write(data)
-			flusher.Flush()
+			if err := rc.Flush(); err != nil {
+				slog.Debug("SSE flush failed — client likely gone", "error", err)
+				return
+			}
 		}
 	}
 }
