@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
-	import { ApiClient, type PullListIssue, type ReleasesResponse, type ReleaseDebugInfo, type CalendarRefreshResponse, type TrackFromPullListResponse, type WantListItem } from '$lib/api/client';
+	import { ApiClient, type PullListIssue, type ReleasesResponse, type ReleaseDebugInfo, type CalendarRefreshResponse, type WantListItem, type WantTrackResult } from '$lib/api/client';
+	import WantTrackButton from '$lib/components/WantTrackButton.svelte';
 
 	let releases = $state<PullListIssue[]>([]);
 	let debugInfo = $state<ReleaseDebugInfo | null>(null);
@@ -10,8 +11,7 @@
 	let refreshing = $state(false);
 	let refreshMessage = $state<string | null>(null);
 
-	// Track/Want action state
-	let trackingInProgress = $state<Set<number>>(new Set());
+	// Want action state (Track is handled by the WantTrackButton component)
 	let wantingInProgress = $state<Set<string>>(new Set());
 
 	// View mode: 'week' = single week view, 'month' = full month view
@@ -261,26 +261,14 @@
 	let ownedCount = $derived(filteredReleases.filter(r => r.has_file).length);
 	let wantedCount = $derived(filteredReleases.filter(r => r.wanted && !r.has_file).length);
 
-	async function trackSeries(issue: PullListIssue) {
-		if (!issue.series_cv_id || trackingInProgress.has(issue.series_cv_id)) return;
-
-		trackingInProgress = new Set([...trackingInProgress, issue.series_cv_id]);
-		try {
-			const data = await ApiClient.post<TrackFromPullListResponse>('/calendar/track', {
-				series_cv_id: issue.series_cv_id
-			});
-
-			// Update all releases from this series to show tracked
-			releases = releases.map(r =>
-				r.series_cv_id === issue.series_cv_id
-					? { ...r, tracked: true, local_series_id: data.series.id }
-					: r
-			);
-		} catch (e) {
-			error = e instanceof Error ? e.message : 'Failed to track series';
-		} finally {
-			trackingInProgress = new Set([...trackingInProgress].filter(id => id !== issue.series_cv_id));
-		}
+	// Called by WantTrackButton's onTracked: mark every release from this series
+	// as tracked (and link the new local series id) so the row badges update.
+	function markSeriesTracked(issue: PullListIssue, result: WantTrackResult) {
+		releases = releases.map(r =>
+			r.series_cv_id === issue.series_cv_id
+				? { ...r, tracked: true, local_series_id: result.series_id }
+				: r
+		);
 	}
 
 	// Unique key for want-in-progress tracking
@@ -624,25 +612,12 @@
 		<!-- Action buttons -->
 		<div class="flex items-center gap-0.5 flex-shrink-0">
 			{#if !issue.tracked && issue.series_cv_id}
-				<button
-					onclick={() => trackSeries(issue)}
-					disabled={trackingInProgress.has(issue.series_cv_id)}
-					class="p-1.5 rounded-md text-gray-500 hover:text-amber-400 hover:bg-amber-500/10
-						disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-					title="Track this series"
-				>
-					{#if trackingInProgress.has(issue.series_cv_id)}
-						<svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-							<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-							<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-						</svg>
-					{:else}
-						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-								d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
-						</svg>
-					{/if}
-				</button>
+				<WantTrackButton
+					variant="compact"
+					comicvineId={issue.series_cv_id}
+					sourceIssueId={issue.local_issue_id}
+					onTracked={(result) => markSeriesTracked(issue, result)}
+				/>
 			{/if}
 			{#if canWant(issue)}
 				<button
@@ -728,25 +703,12 @@
 		<!-- Action buttons -->
 		<div class="flex items-center gap-0.5 flex-shrink-0">
 			{#if !issue.tracked && issue.series_cv_id}
-				<button
-					onclick={() => trackSeries(issue)}
-					disabled={trackingInProgress.has(issue.series_cv_id)}
-					class="p-1 rounded-md text-gray-500 hover:text-amber-400 hover:bg-amber-500/10
-						disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-					title="Track this series"
-				>
-					{#if trackingInProgress.has(issue.series_cv_id)}
-						<svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
-							<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-							<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-						</svg>
-					{:else}
-						<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-								d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
-						</svg>
-					{/if}
-				</button>
+				<WantTrackButton
+					variant="compact"
+					comicvineId={issue.series_cv_id}
+					sourceIssueId={issue.local_issue_id}
+					onTracked={(result) => markSeriesTracked(issue, result)}
+				/>
 			{/if}
 			{#if canWant(issue)}
 				<button

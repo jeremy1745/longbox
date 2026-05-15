@@ -78,6 +78,33 @@
 		}
 	}
 
+	let retryingId = $state<number | null>(null);
+
+	// Re-dispatch a failed procurement attempt through Prowlarr.
+	async function retryProcurement(item: WantListItem) {
+		retryingId = item.id;
+		error = null;
+		try {
+			const updated = await ApiClient.post<WantListItem>(`/wantlist/${item.id}/retry`);
+			const idx = items.findIndex((i) => i.id === item.id);
+			if (idx >= 0) {
+				items[idx] = updated;
+				items = [...items];
+			}
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Retry failed';
+		} finally {
+			retryingId = null;
+		}
+	}
+
+	const procurementBadge: Record<string, string> = {
+		pending: 'bg-blue-900/50 text-blue-400 border border-blue-500/30',
+		submitted: 'bg-amber-900/50 text-amber-400 border border-amber-500/30',
+		acquired: 'bg-green-900/50 text-green-400 border border-green-500/30',
+		failed: 'bg-red-900/50 text-red-400 border border-red-500/30'
+	};
+
 	// Group items by series
 	let groupedItems = $derived(() => {
 		const groups: Record<number, { seriesTitle: string; seriesId: number; items: WantListItem[] }> = {};
@@ -189,6 +216,27 @@
 										</p>
 									{/if}
 								</div>
+
+								<!-- Procurement status -->
+								{#if item.procurement_status && item.procurement_status !== 'none'}
+									<span
+										class="text-xs px-2 py-0.5 rounded-full {procurementBadge[item.procurement_status] ?? 'bg-gray-700 text-gray-400'}"
+										title={item.procurement_last_error || (item.procurement_submitted_at ? `Submitted ${item.procurement_submitted_at}` : '')}
+									>
+										{item.procurement_status}
+									</span>
+								{/if}
+								{#if item.procurement_status === 'failed'}
+									<button
+										onclick={() => retryProcurement(item)}
+										disabled={retryingId === item.id}
+										class="text-xs px-2 py-0.5 rounded-full bg-gray-700 text-gray-300 hover:bg-gray-600
+											disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+										title={item.procurement_last_error || 'Retry this procurement'}
+									>
+										{retryingId === item.id ? 'Retrying…' : 'Retry'}
+									</button>
+								{/if}
 
 								<!-- Priority selector -->
 								<div class="flex gap-1">

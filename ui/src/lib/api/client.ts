@@ -230,6 +230,8 @@ export interface Settings {
 	metron_token_set: boolean;
 	metron_burst_remaining: number;
 	metron_sustained_remaining: number;
+	prowlarr_url: string;
+	prowlarr_configured: boolean;
 	library_dir: string;
 	pull_list_enabled: boolean;
 	pull_list_day: number;
@@ -280,6 +282,8 @@ export interface JobListResponse {
 
 // --- Want List types ---
 
+export type ProcurementStatus = 'none' | 'pending' | 'submitted' | 'acquired' | 'failed';
+
 export interface WantListItem {
 	id: number;
 	issue_id: number;
@@ -292,6 +296,28 @@ export interface WantListItem {
 	cover_url?: string;
 	store_date?: string;
 	cover_date?: string;
+	procurement_status?: ProcurementStatus;
+	procurement_submitted_at?: string;
+	procurement_last_error?: string;
+}
+
+// Result of POST /pull-list/want-track — the full want+track acquisition flow.
+export interface WantTrackResult {
+	series_id: number;
+	folder_path: string;
+	metadata_written: boolean;
+	files_moved: number;
+	issues_queued: number;
+	warnings?: string[];
+}
+
+// Body of a 409 MERGE_REQUIRED from /pull-list/want-track. Note: requested_series_id
+// is omitted when the conflict fires before a series row exists (the want-track case).
+export interface MergeConflictBody {
+	error: { code: string; message: string };
+	requested_series_id?: number;
+	conflicting_series_id: number;
+	conflicting_series_title: string;
 }
 
 export interface WantListResponse {

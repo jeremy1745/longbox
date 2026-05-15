@@ -41,6 +41,15 @@
 	let metronTesting = $state(false);
 	let metronTestResult = $state<{ valid: boolean; message: string; burst_remaining?: number; sustained_remaining?: number } | null>(null);
 
+	// Prowlarr settings state
+	let prowlarrUrlInput = $state('');
+	let prowlarrKeyInput = $state('');
+	let prowlarrCategoryInput = $state('');
+	let prowlarrSaving = $state(false);
+	let prowlarrSaveMessage = $state<string | null>(null);
+	let prowlarrTesting = $state(false);
+	let prowlarrTestResult = $state<{ valid: boolean; message: string } | null>(null);
+
 	// File organization state
 	let templateInput = $state('');
 	let templateLoading = $state(true);
@@ -633,6 +642,41 @@
 			metronTestResult = { valid: false, message: e instanceof Error ? e.message : 'Test failed' };
 		} finally {
 			metronTesting = false;
+		}
+	}
+
+	async function saveProwlarrSettings() {
+		const url = prowlarrUrlInput.trim();
+		const apiKey = prowlarrKeyInput.trim();
+		if (!url || !apiKey) return;
+		prowlarrSaving = true;
+		prowlarrSaveMessage = null;
+		prowlarrTestResult = null;
+		try {
+			await ApiClient.put('/settings/prowlarr', {
+				url,
+				api_key: apiKey,
+				category: prowlarrCategoryInput.trim()
+			});
+			prowlarrKeyInput = '';
+			prowlarrSaveMessage = 'Prowlarr settings saved.';
+			await loadSettings();
+		} catch (e) {
+			prowlarrSaveMessage = e instanceof Error ? e.message : 'Save failed';
+		} finally {
+			prowlarrSaving = false;
+		}
+	}
+
+	async function testProwlarr() {
+		prowlarrTesting = true;
+		prowlarrTestResult = null;
+		try {
+			prowlarrTestResult = await ApiClient.post<{ valid: boolean; message: string }>('/settings/prowlarr/test');
+		} catch (e) {
+			prowlarrTestResult = { valid: false, message: e instanceof Error ? e.message : 'Test failed' };
+		} finally {
+			prowlarrTesting = false;
 		}
 	}
 
@@ -1455,6 +1499,107 @@
 									{metronTestResult.sustained_remaining ?? '?'} daily remaining
 								</p>
 							{/if}
+						</div>
+					{/if}
+				</div>
+			{/if}
+		</div>
+
+		<!-- Prowlarr Section -->
+		<div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+			<h2 class="text-xl font-semibold mb-4">Prowlarr</h2>
+			<p class="text-sm text-gray-400 mb-6">
+				Indexer manager used by the Track flow to search for and grab missing issues.
+				Prowlarr forwards grabs to its configured download client (SABnzbd, etc.).
+				Set the base URL (e.g. <code class="text-gray-300">http://192.168.1.10:9696</code>) and an API key from
+				Prowlarr's Settings &rarr; General page.
+			</p>
+
+			<div class="mb-6 space-y-2">
+				<div class="flex items-center gap-3">
+					<span class="text-sm text-gray-400">Status:</span>
+					{#if settings?.prowlarr_configured}
+						<span class="inline-flex items-center gap-1.5 text-sm text-green-400">
+							<span class="w-2 h-2 bg-green-400 rounded-full"></span>
+							Connected
+						</span>
+					{:else}
+						<span class="inline-flex items-center gap-1.5 text-sm text-yellow-400">
+							<span class="w-2 h-2 bg-yellow-400 rounded-full"></span>
+							Not configured
+						</span>
+					{/if}
+				</div>
+				{#if settings?.prowlarr_url}
+					<div class="flex items-center gap-3">
+						<span class="text-sm text-gray-400">URL:</span>
+						<code class="text-sm text-gray-300 bg-gray-700 px-2 py-0.5 rounded">
+							{settings.prowlarr_url}
+						</code>
+					</div>
+				{/if}
+			</div>
+
+			<div class="space-y-3">
+				<label for="prowlarr-url" class="block text-sm font-medium text-gray-300">URL</label>
+				<input
+					id="prowlarr-url"
+					type="text"
+					bind:value={prowlarrUrlInput}
+					placeholder="http://host:9696"
+					class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+				/>
+
+				<label for="prowlarr-key" class="block text-sm font-medium text-gray-300">API Key</label>
+				<input
+					id="prowlarr-key"
+					type="password"
+					bind:value={prowlarrKeyInput}
+					placeholder={settings?.prowlarr_configured ? 'Enter a new key to replace' : 'Paste your Prowlarr API key'}
+					class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+				/>
+
+				<label for="prowlarr-category" class="block text-sm font-medium text-gray-300">Category</label>
+				<div class="flex gap-3">
+					<input
+						id="prowlarr-category"
+						type="text"
+						bind:value={prowlarrCategoryInput}
+						placeholder="7030 (Books › Comics)"
+						class="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+						onkeydown={(e) => e.key === 'Enter' && saveProwlarrSettings()}
+					/>
+					<button
+						onclick={saveProwlarrSettings}
+						disabled={prowlarrSaving || !prowlarrUrlInput.trim() || !prowlarrKeyInput.trim()}
+						class="px-4 py-2 bg-amber-500 hover:bg-amber-600 disabled:bg-gray-600 disabled:cursor-not-allowed text-gray-900 font-semibold rounded-lg transition-colors"
+					>
+						{prowlarrSaving ? 'Saving...' : 'Save'}
+					</button>
+				</div>
+			</div>
+
+			{#if prowlarrSaveMessage}
+				<p class="mt-3 text-sm {prowlarrSaveMessage.includes('saved') ? 'text-green-400' : 'text-red-400'}">
+					{prowlarrSaveMessage}
+				</p>
+			{/if}
+
+			{#if settings?.prowlarr_configured}
+				<div class="mt-4 pt-4 border-t border-gray-700">
+					<button
+						onclick={testProwlarr}
+						disabled={prowlarrTesting}
+						class="px-4 py-2 bg-gray-700 hover:bg-gray-600 disabled:bg-gray-600 disabled:cursor-not-allowed text-gray-200 font-medium rounded-lg transition-colors text-sm"
+					>
+						{prowlarrTesting ? 'Testing...' : 'Test Connection'}
+					</button>
+
+					{#if prowlarrTestResult}
+						<div class="mt-3 p-3 rounded-lg {prowlarrTestResult.valid ? 'bg-green-900/30 border border-green-700' : 'bg-red-900/30 border border-red-700'}">
+							<p class="text-sm {prowlarrTestResult.valid ? 'text-green-400' : 'text-red-400'}">
+								{prowlarrTestResult.message}
+							</p>
 						</div>
 					{/if}
 				</div>

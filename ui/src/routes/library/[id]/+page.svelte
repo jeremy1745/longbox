@@ -4,6 +4,7 @@
 	import { ApiClient, type Series, type Issue, type IssueListResponse, type WriteMetadataResponse, type ComicFile, type SeriesFilesResponse, type FileRenameResponse, type BacklogRun } from '$lib/api/client';
 	import ComicVineSearch from '$lib/components/ComicVineSearch.svelte';
 	import MetronSearch from '$lib/components/MetronSearch.svelte';
+	import WantTrackButton from '$lib/components/WantTrackButton.svelte';
 	import { proxiedCoverURL } from '$lib/cover';
 
 	let series = $state<Series | null>(null);
@@ -526,21 +527,28 @@
 				<div class="flex items-start justify-between gap-4">
 					<h1 class="text-3xl font-bold">{series.title}</h1>
 					<div class="flex flex-wrap items-center gap-2 flex-shrink-0">
-						<button
-							onclick={toggleTracked}
-							disabled={toggling}
-							class="px-3 py-1.5 text-sm rounded-lg transition-colors flex items-center gap-1.5
-								{series.tracked
-									? 'bg-amber-500/20 text-amber-400 border border-amber-500/50 hover:bg-amber-500/30'
-									: 'bg-gray-700 text-gray-300 hover:bg-gray-600'}"
-							title={series.tracked ? 'Stop tracking this series' : 'Track this series'}
-						>
-							<svg class="w-4 h-4" fill={series.tracked ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-									d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
-							</svg>
-							{toggling ? '...' : series.tracked ? 'Tracking' : 'Track'}
-						</button>
+						{#if series.tracked}
+							<button
+								onclick={toggleTracked}
+								disabled={toggling}
+								class="px-3 py-1.5 text-sm rounded-lg transition-colors flex items-center gap-1.5
+									bg-amber-500/20 text-amber-400 border border-amber-500/50 hover:bg-amber-500/30"
+								title="Stop tracking this series"
+							>
+								<svg class="w-4 h-4" fill="currentColor" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+										d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
+								</svg>
+								{toggling ? '...' : 'Tracking'}
+							</button>
+						{:else}
+							<WantTrackButton
+								variant="full"
+								comicvineId={series.comicvine_id}
+								metronId={series.metron_id}
+								onTracked={() => loadSeriesDetail()}
+							/>
+						{/if}
 
 						{#if missingCount > 0}
 							<button
