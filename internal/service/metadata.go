@@ -1555,10 +1555,15 @@ func (s *MetadataService) buildResultsFromWalksoftly(
 					item.LocalSeriesID = &ts.ID
 				}
 			}
-			// Enrich with local series cover URL if we don't have one yet
-			if item.CoverURL == "" {
-				if ls, ok := localSeriesByCV[seriesCVID]; ok {
-					_ = ls // local series doesn't have cover URL on the series level
+			// Publisher fallback: walksoftly sometimes ships releases with an
+			// empty publisher, which dumps them into the UI's "Other" bucket.
+			// When the series exists locally (by CV ID) or was cached by a
+			// prior CV pass, use that publisher instead.
+			if item.Publisher == "" {
+				if ls, ok := localSeriesByCV[seriesCVID]; ok && ls.PublisherName != "" {
+					item.Publisher = ls.PublisherName
+				} else if cached, ok := s.publisherCache[int(seriesCVID)]; ok {
+					item.Publisher = cached
 				}
 			}
 		}
