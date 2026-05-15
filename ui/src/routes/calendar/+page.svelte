@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
-	import { ApiClient, type PullListIssue, type ReleasesResponse, type ReleaseDebugInfo, type CalendarRefreshResponse, type WantListItem, type WantTrackResult } from '$lib/api/client';
+	import { ApiClient, type PullListIssue, type ReleasesResponse, type ReleaseDebugInfo, type CalendarRefreshResponse, type WantTrackResult } from '$lib/api/client';
 	import WantTrackButton from '$lib/components/WantTrackButton.svelte';
 
 	let releases = $state<PullListIssue[]>([]);
@@ -11,8 +11,6 @@
 	let refreshing = $state(false);
 	let refreshMessage = $state<string | null>(null);
 
-	// Want action state (Track is handled by the WantTrackButton component)
-	let wantingInProgress = $state<Set<string>>(new Set());
 
 	// View mode: 'week' = single week view, 'month' = full month view
 	let viewMode = $state<'week' | 'month'>('week');
@@ -269,53 +267,6 @@
 				? { ...r, tracked: true, local_series_id: result.series_id }
 				: r
 		);
-	}
-
-	// Unique key for want-in-progress tracking
-	function wantKey(issue: PullListIssue): string {
-		if (issue.comicvine_id) return `cv:${issue.comicvine_id}`;
-		if (issue.local_issue_id) return `local:${issue.local_issue_id}`;
-		if (issue.series_cv_id) return `series:${issue.series_cv_id}:${issue.issue_number}`;
-		return '';
-	}
-
-	function canWant(issue: PullListIssue): boolean {
-		return !issue.has_file && !issue.wanted && (!!issue.comicvine_id || !!issue.local_issue_id || !!issue.series_cv_id);
-	}
-
-	async function wantIssue(issue: PullListIssue) {
-		const key = wantKey(issue);
-		if (key === '' || wantingInProgress.has(key)) return;
-
-		wantingInProgress = new Set([...wantingInProgress, key]);
-		try {
-			// Use local_issue_id if available (direct DB add), then ComicVine issue ID, then series + issue number
-			const body = issue.local_issue_id
-				? { local_issue_id: issue.local_issue_id }
-				: issue.comicvine_id
-					? { comicvine_id: issue.comicvine_id, series_cv_id: issue.series_cv_id }
-					: { series_cv_id: issue.series_cv_id, issue_number: issue.issue_number };
-
-			await ApiClient.post<WantListItem>('/calendar/want', body);
-
-			// Mark this issue as wanted and the series as tracked
-			releases = releases.map(r => {
-				const isSameIssue = (issue.comicvine_id && r.comicvine_id === issue.comicvine_id)
-					|| (issue.local_issue_id && r.local_issue_id === issue.local_issue_id)
-					|| (issue.series_cv_id && r.series_cv_id === issue.series_cv_id && r.issue_number === issue.issue_number);
-				if (isSameIssue) {
-					return { ...r, tracked: true, wanted: true };
-				}
-				if (r.series_cv_id === issue.series_cv_id) {
-					return { ...r, tracked: true };
-				}
-				return r;
-			});
-		} catch (e) {
-			error = e instanceof Error ? e.message : 'Failed to add to want list';
-		} finally {
-			wantingInProgress = new Set([...wantingInProgress].filter(id => id !== key));
-		}
 	}
 
 	$effect(() => {
@@ -619,27 +570,6 @@
 					onTracked={(result) => markSeriesTracked(issue, result)}
 				/>
 			{/if}
-			{#if canWant(issue)}
-				<button
-					onclick={() => wantIssue(issue)}
-					disabled={wantingInProgress.has(wantKey(issue))}
-					class="p-1.5 rounded-md text-gray-500 hover:text-blue-400 hover:bg-blue-500/10
-						disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-					title="Add to want list"
-				>
-					{#if wantingInProgress.has(wantKey(issue))}
-						<svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-							<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-							<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-						</svg>
-					{:else}
-						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-								d="M12 4v16m8-8H4" />
-						</svg>
-					{/if}
-				</button>
-			{/if}
 		</div>
 
 		<!-- Status badges -->
@@ -709,27 +639,6 @@
 					sourceIssueId={issue.local_issue_id}
 					onTracked={(result) => markSeriesTracked(issue, result)}
 				/>
-			{/if}
-			{#if canWant(issue)}
-				<button
-					onclick={() => wantIssue(issue)}
-					disabled={wantingInProgress.has(wantKey(issue))}
-					class="p-1 rounded-md text-gray-500 hover:text-blue-400 hover:bg-blue-500/10
-						disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-					title="Add to want list"
-				>
-					{#if wantingInProgress.has(wantKey(issue))}
-						<svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
-							<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-							<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-						</svg>
-					{:else}
-						<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-								d="M12 4v16m8-8H4" />
-						</svg>
-					{/if}
-				</button>
 			{/if}
 		</div>
 
