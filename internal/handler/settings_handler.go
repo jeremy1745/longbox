@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/jeremy/longbox/internal/model"
+	"github.com/jeremy/longbox/internal/prowlarr"
 	"github.com/jeremy/longbox/internal/repository"
 	"github.com/jeremy/longbox/internal/scanner"
 	"github.com/jeremy/longbox/internal/scheduler"
@@ -645,6 +646,12 @@ func (h *SettingsHandler) UpdateProwlarrSettings(w http.ResponseWriter, r *http.
 		return
 	}
 
+	// Both URL and API key are required — a Prowlarr instance is unusable without either.
+	if strings.TrimSpace(req.URL) == "" || strings.TrimSpace(req.APIKey) == "" {
+		writeError(w, http.StatusBadRequest, "MISSING_FIELDS", "url and api_key are both required")
+		return
+	}
+
 	if err := h.settingRepo.Set("prowlarr_url", req.URL); err != nil {
 		writeError(w, http.StatusInternalServerError, "SAVE_FAILED", err.Error())
 		return
@@ -655,7 +662,7 @@ func (h *SettingsHandler) UpdateProwlarrSettings(w http.ResponseWriter, r *http.
 	}
 	category := req.Category
 	if category == "" {
-		category = "7030"
+		category = prowlarr.DefaultCategory
 	}
 	if err := h.settingRepo.Set("prowlarr_category", category); err != nil {
 		writeError(w, http.StatusInternalServerError, "SAVE_FAILED", err.Error())

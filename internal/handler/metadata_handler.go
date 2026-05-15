@@ -60,17 +60,25 @@ func writeMatchConflict(w http.ResponseWriter, requestedSeriesID int64, err erro
 		return false
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusConflict)
-	json.NewEncoder(w).Encode(map[string]any{
+	body := map[string]any{
 		"error": map[string]any{
 			"code":    "MERGE_REQUIRED",
 			"message": err.Error(),
 		},
-		"requested_series_id":      requestedSeriesID,
 		"conflicting_series_id":    conflictID,
 		"conflicting_series_title": conflictTitle,
-	})
+	}
+	// Only include requested_series_id when non-zero — a zero means no series
+	// was created yet (e.g. conflict during WantTrack before any DB write), and
+	// exposing 0 as a series ID would mislead the frontend into calling
+	// POST /series/0/merge-into/{dst}.
+	if requestedSeriesID != 0 {
+		body["requested_series_id"] = requestedSeriesID
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	json.NewEncoder(w).Encode(body)
 	return true
 }
 

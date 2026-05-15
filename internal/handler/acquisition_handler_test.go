@@ -114,6 +114,11 @@ func TestWantTrack_ConflictPassthrough(t *testing.T) {
 	if resp["conflicting_series_title"] != "X-Men" {
 		t.Errorf("conflicting_series_title: got %v, want X-Men", resp["conflicting_series_title"])
 	}
+	// requested_series_id must be absent when the caller passed 0 — a zero is not
+	// a valid series ID and the frontend must not try to call /series/0/merge-into/…
+	if _, present := resp["requested_series_id"]; present {
+		t.Errorf("requested_series_id should be absent in body when requestedSeriesID=0, got %v", resp["requested_series_id"])
+	}
 }
 
 // TestWantTrack_ConflictNotTriggered verifies that writeMatchConflict returns

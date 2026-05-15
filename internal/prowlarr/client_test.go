@@ -158,8 +158,8 @@ func TestSearchIssue_CorrectRequest(t *testing.T) {
 	if got := params.Get("type"); got != "search" {
 		t.Errorf("type param: got %q, want %q", got, "search")
 	}
-	if got := params.Get("categories"); got != defaultCategory {
-		t.Errorf("categories param: got %q, want %q", got, defaultCategory)
+	if got := params.Get("categories"); got != DefaultCategory {
+		t.Errorf("categories param: got %q, want %q", got, DefaultCategory)
 	}
 }
 
@@ -283,8 +283,8 @@ func TestNewClient_Defaults(t *testing.T) {
 	if c.baseURL != "http://192.168.1.100:9696" {
 		t.Errorf("trailing slash not trimmed: %q", c.baseURL)
 	}
-	if c.category != defaultCategory {
-		t.Errorf("default category: got %q, want %q", c.category, defaultCategory)
+	if c.category != DefaultCategory {
+		t.Errorf("default category: got %q, want %q", c.category, DefaultCategory)
 	}
 }
 
@@ -334,8 +334,8 @@ func TestSetConfig_DefaultCategory(t *testing.T) {
 	c.mu.RLock()
 	cat := c.category
 	c.mu.RUnlock()
-	if cat != defaultCategory {
-		t.Errorf("SetConfig with empty category: got %q, want %q", cat, defaultCategory)
+	if cat != DefaultCategory {
+		t.Errorf("SetConfig with empty category: got %q, want %q", cat, DefaultCategory)
 	}
 }
 

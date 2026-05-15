@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jeremy/longbox/internal/prowlarr"
 	"gopkg.in/yaml.v3"
 )
 
@@ -40,7 +41,7 @@ func defaults() Config {
 		LibraryDir:       filepath.Join(home, "Comics"),
 		DataDir:          filepath.Join(home, ".longbox"),
 		LogLevel:         "info",
-		ProwlarrCategory: "7030",
+		ProwlarrCategory: prowlarr.DefaultCategory,
 		Backlog: BacklogConfig{
 			MaxConcurrentDownloads: 25,
 			MaxRetries:             3,

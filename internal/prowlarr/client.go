@@ -13,8 +13,9 @@ import (
 	"time"
 )
 
-// defaultCategory is the Newznab category for Books > Comics.
-const defaultCategory = "7030"
+// DefaultCategory is the Newznab category for Books > Comics (7030).
+// Exported so config and settings packages share one source of truth.
+const DefaultCategory = "7030"
 
 // Client is a REST client for the Prowlarr indexer-manager API.
 // It handles auth, rate limiting, and forwarding grab requests to Prowlarr's
@@ -47,7 +48,7 @@ type Release struct {
 func NewClient(baseURL, apiKey, category string) *Client {
 	baseURL = strings.TrimRight(baseURL, "/")
 	if category == "" {
-		category = defaultCategory
+		category = DefaultCategory
 	}
 	return &Client{
 		baseURL:  baseURL,
@@ -66,7 +67,7 @@ func NewClient(baseURL, apiKey, category string) *Client {
 func (c *Client) SetConfig(baseURL, apiKey, category string) {
 	baseURL = strings.TrimRight(baseURL, "/")
 	if category == "" {
-		category = defaultCategory
+		category = DefaultCategory
 	}
 	c.mu.Lock()
 	c.baseURL = baseURL

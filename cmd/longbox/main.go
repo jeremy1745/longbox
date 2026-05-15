@@ -119,6 +119,9 @@ func main() {
 	prowlarrClient := prowlarr.NewClient(cfg.ProwlarrURL, cfg.ProwlarrAPIKey, cfg.ProwlarrCategory)
 	if dbURL, err := settingRepo.Get("prowlarr_url"); err == nil && dbURL != "" {
 		dbKey, _ := settingRepo.Get("prowlarr_api_key")
+		if dbKey == "" {
+			slog.Warn("prowlarr URL configured in settings DB but API key missing; Prowlarr will be treated as not configured", "url", dbURL)
+		}
 		dbCat, _ := settingRepo.Get("prowlarr_category")
 		prowlarrClient.SetConfig(dbURL, dbKey, dbCat)
 		slog.Info("loaded Prowlarr settings from settings DB", "url", dbURL)

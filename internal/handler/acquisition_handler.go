@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jeremy/longbox/internal/model"
 	"github.com/jeremy/longbox/internal/repository"
 	"github.com/jeremy/longbox/internal/service"
 )
@@ -100,7 +101,15 @@ func (h *AcquisitionHandler) RetryProcurement(w http.ResponseWriter, r *http.Req
 }
 
 // ListWantlist lists want-list items, optionally filtered by procurement_status.
-// GET /api/v1/wantlist?procurement_status=<status>
+// GET /api/v1/wantlist?procurement_status=<status>&page=<n>&per_page=<n>
+//
+// Response envelope is consistent with WantListHandler.List:
+//
+//	{"items": [...], "total": N, "page": N, "per_page": N}
+//
+// When procurement_status is set the filtered list is returned without DB-level
+// pagination (status-filtered sets are small), but the envelope shape is the
+// same — page=1, per_page=total.
 func (h *AcquisitionHandler) ListWantlist(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("procurement_status")
 	if status != "" {
@@ -109,15 +118,43 @@ func (h *AcquisitionHandler) ListWantlist(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusInternalServerError, "LIST_FAILED", err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, items)
+		if items == nil {
+			items = []model.WantListItem{}
+		}
+		total := len(items)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"items":    items,
+			"total":    total,
+			"page":     1,
+			"per_page": total,
+		})
 		return
 	}
 
-	// No filter: return all want-list items (paginated with a generous cap).
-	items, _, err := h.wantListRepo.List(1, 1000, "", "")
+	// No filter: paginated, matching WantListHandler.List clamp rules.
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+	if page < 1 {
+		page = 1
+	}
+	if perPage < 1 {
+		perPage = 100
+	} else if perPage > 500 {
+		perPage = 500
+	}
+
+	items, total, err := h.wantListRepo.List(page, perPage, "", "")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "LIST_FAILED", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, items)
+	if items == nil {
+		items = []model.WantListItem{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":    items,
+		"total":    total,
+		"page":     page,
+		"per_page": perPage,
+	})
 }
