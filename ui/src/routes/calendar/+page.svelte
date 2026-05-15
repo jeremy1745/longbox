@@ -527,10 +527,11 @@
 </div>
 
 {#snippet issueRow(issue: PullListIssue)}
-	<div class="px-4 py-3 flex items-center gap-4 hover:bg-gray-750 transition-colors
-		{issue.tracked ? '' : 'opacity-80'}">
-		<!-- Issue info -->
-		<div class="flex-1 min-w-0">
+	<div class="px-4 py-3 flex items-center gap-4 hover:bg-gray-750 transition-colors">
+		<!-- Issue info — opacity-80 lives HERE (not on the row) so it doesn't
+			 create a per-row stacking context that traps WantTrackButton's
+			 conflict popup behind the next row's paint layer. -->
+		<div class="flex-1 min-w-0 {issue.tracked ? '' : 'opacity-80'}">
 			<div class="flex items-center gap-2">
 				{#if issue.local_series_id}
 					<a href="/library/{issue.local_series_id}"
@@ -588,10 +589,10 @@
 {/snippet}
 
 {#snippet issueRowCompact(issue: PullListIssue)}
-	<div class="px-4 py-3 flex items-center gap-4 hover:bg-gray-750 transition-colors
-		{issue.tracked ? '' : 'opacity-80'}">
-		<!-- Date badge -->
-		<div class="w-12 text-center flex-shrink-0">
+	<div class="px-4 py-3 flex items-center gap-4 hover:bg-gray-750 transition-colors">
+		<!-- Date badge — see issueRow comment: opacity-80 stays off the row
+			 container so the WantTrackButton conflict popup isn't trapped. -->
+		<div class="w-12 text-center flex-shrink-0 {issue.tracked ? '' : 'opacity-80'}">
 			<p class="text-xs font-medium
 				{issue.store_date && isToday(issue.store_date) ? 'text-amber-400' :
 				 issue.store_date && isPast(issue.store_date) ? 'text-gray-500' :
@@ -603,7 +604,7 @@
 		</div>
 
 		<!-- Issue info -->
-		<div class="flex-1 min-w-0">
+		<div class="flex-1 min-w-0 {issue.tracked ? '' : 'opacity-80'}">
 			<div class="flex items-center gap-2">
 				{#if issue.local_series_id}
 					<a href="/library/{issue.local_series_id}"
